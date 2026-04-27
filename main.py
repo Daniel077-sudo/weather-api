@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 import requests
-from fastapi import FastAPI, BaseModel, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks
+from pydantic import BaseModel
 import uvicorn
 import json
 from datetime import datetime, timezone, timedelta
