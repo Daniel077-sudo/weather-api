@@ -60,18 +60,24 @@ async def _internal_sync(city: str, district: str):
         res_obj = requests.get(url, params=params, timeout=20, verify=False)
         res = res_obj.json()
         
-        # 【新增：安全防呆與除錯雷達】
+       # 【終極解析雷達】
         records = res.get("records", {})
         if not records:
-            # 如果連 records 都沒有，代表氣象署回傳了錯誤訊息 (例如金鑰有問題)
-            print(f"⚠️ 氣象署回傳異常: {str(res)[:200]}")
+            print(f"⚠️ 氣象署回傳異常: {res}")
             return
             
+        # 印出 records 裡面到底有哪些第一層的 key
+        if city == "臺北市" and district == "信義區":
+            print(f"🔍 臺北市 records 的 Keys: {list(records.keys())}")
+            # 假設裡面有 'locations'，我們印出它第一個元素的 keys
+            if "locations" in records and len(records["locations"]) > 0:
+                 print(f"🔍 臺北市 locations[0] 的 Keys: {list(records['locations'][0].keys())}")
+            # 假設裡面只有 'location'，我們印出它第一個元素的 keys
+            elif "location" in records and len(records["location"]) > 0:
+                 print(f"🔍 臺北市 location[0] 的 Keys: {list(records['location'][0].keys())}")
+                 
         locations_list = records.get("locations", [{}])[0].get("location", [])
-        if not locations_list:
-            # 如果有 records 但沒有該區的資料，印出氣象署到底給了什麼
-            print(f"⚠️ 找不到 {city}{district} 的資料！氣象署回傳: {str(res)[:200]}")
-            return
+        # ... (保留後面的程式碼)
 
         # 如果檢查都通過，才安心地拿出第一筆資料
         location_data = locations_list[0]
