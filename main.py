@@ -76,12 +76,16 @@ async def _internal_sync(city: str, district: str):
             elif "location" in records and len(records["location"]) > 0:
                  print(f"🔍 臺北市 location[0] 的 Keys: {list(records['location'][0].keys())}")
                  
-        locations_list = records.get("locations", [{}])[0].get("location", [])
-        # ... (保留後面的程式碼)
+        # 注意這裡的 Locations 和 Location 都要大寫！
+        locations_list = records.get("Locations", [{}])[0].get("Location", [])
+        if not locations_list:
+            print(f"⚠️ 找不到 {city}{district} 的資料！氣象署回傳: {str(res)[:200]}")
+            return
 
-        # 如果檢查都通過，才安心地拿出第一筆資料
         location_data = locations_list[0]
-        elements = location_data.get("weatherElement", [])
+        # 注意這裡的 WeatherElement 可能也需要大寫，根據氣象署最新的習慣
+        # 為了保險起見，我們兩種都抓
+        elements = location_data.get("weatherElement") or location_data.get("WeatherElement", [])
         
         time_map = {}
         for el in elements:
