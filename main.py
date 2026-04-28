@@ -8,7 +8,8 @@ import json
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import asyncio
-
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 載入金鑰
 load_dotenv()
 
@@ -56,7 +57,7 @@ async def _internal_sync(city: str, district: str):
         
         url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
         params = {"Authorization": CWA_API_KEY, "format": "JSON", "locationName": district}
-        res = requests.get(url, params=params, timeout=20).json()
+        res = requests.get(url, params=params, timeout=20, verify=False).json()
         
         # 解析邏輯 (簡化版)
         location_data = res.get("records", {}).get("locations", [{}])[0].get("location", [{}])[0]
