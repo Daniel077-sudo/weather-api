@@ -83,22 +83,40 @@ async def _internal_sync(city: str, district: str):
             return
 
         location_data = locations_list[0]
-        # 注意這裡的 WeatherElement 可能也需要大寫，根據氣象署最新的習慣
-        # 為了保險起見，我們兩種都抓
-        elements = location_data.get("weatherElement") or location_data.get("WeatherElement", [])
+        
+        # 兼容大小寫：取得天氣元素
+        elements = location_data.get("WeatherElement") or location_data.get("weatherElement", [])
         
         time_map = {}
         for el in elements:
-            en = el.get("elementName")
-            for t in el.get("time", []):
-                dt = t.get("dataTime") or t.get("startTime")
+            en = el.get("ElementName") or el.get("elementName")
+            times = el.get("Time") or el.get("time", [])
+            for t in times:
+                # 兼容各種時間命名
+                dt = t.get("DataTime") or t.get("dataTime") or t.get("StartTime") or t.get("startTime")
+                if not dt: continue
                 if dt not in time_map: time_map[dt] = {"time": dt, "temp":0, "pop":0, "description":"未知"}
-                val = t.get("elementValue", [{}])[0].get("value")
-                if en in ["T", "MaxT"]: time_map[dt]["temp"] = int(val)
-                elif "PoP" in en: time_map[dt]["pop"] = int(val)
-                elif en == "Wx": time_map[dt]["description"] = val
+                
+                # 兼容 Value 大小寫
+                val_list = t.get("ElementValue") or t.get("elementValue", [{}])
+                if val_list:
+                    val = val_list[0].get("Value") or val_list[0].get("value")
+                    if en in ["T", "MaxT"] and val is not None: 
+                        try: time_map[dt]["temp"] = int(val) 
+                        except: pass
+                    elif "PoP" in en and val is not None: 
+                        try: time_map[dt]["pop"] = int(val) 
+                        except: pass
+                    elif en == "Wx" and val is not None: 
+                        time_map[dt]["description"] = val
 
         sorted_data = sorted(time_map.values(), key=lambda x: x["time"])
+        
+        # 終極防呆：如果資料還是空的，印出來讓我們抓蟲
+        if not sorted_data:
+            print(f"⚠️ {city} 解析後沒有資料，請檢查結構: {str(elements)[:300]}")
+            return
+            
         now = datetime.now(timezone(timedelta(hours=8)))
         
         db_payload = {
