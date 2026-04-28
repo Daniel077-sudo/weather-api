@@ -156,6 +156,63 @@ async def get_weather(city: str = "臺南市", district: str = "東區"):
     if res.data:
         return res.data[0]
     return {"error": "資料庫尚無此地區快取，請先觸發同步。"}
+# ==========================================
+# 🚄 行程 (Events) API 模組 
+# ==========================================
+from typing import Optional
 
+# 定義接收前端資料的格式
+class EventCreate(BaseModel):
+    title: str
+    start_time: str
+    end_time: str
+    url: Optional[str] = None
+    # 如果你們前端還有傳其他欄位（例如 description, location 等），請在這裡補上
+
+# 判斷交通工具的邏輯
+def determine_transport_type(url: str) -> Optional[str]:
+    """根據網址判斷是台鐵(tra)還是高鐵(thsrc)"""
+    if not url:
+        return None
+        
+    url_lower = url.lower()
+    if "railway.gov.tw" in url_lower or "tra" in url_lower:
+        return "tra"
+    elif "thsrc.com.tw" in url_lower:
+        return "thsrc"
+        
+    return None
+
+# 新增行程的 API
+@app.post("/events")
+async def create_event(event: EventCreate):
+    try:
+        # 1. 自動判斷並產生 transport_type
+        transport_type = determine_transport_type(event.url)
+        
+        # 2. 準備要存進 Supabase 的資料
+        db_payload = event.model_dump() # 如果 Pydantic 是 v2 版本用 model_dump()，v1 版用 dict()
+        db_payload["transport_type"] = transport_type
+        
+        # 3. 寫入 Supabase (假設你的資料表叫做 events)
+        res = supabase.table("events").insert(db_payload).execute()
+        
+        if res.data:
+            return {"status": "success", "data": res.data[0]}
+        else:
+            return {"status": "error", "message": "寫入失敗"}
+            
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# 取得行程的 API (讓前端去讀取)
+@app.get("/events")
+async def get_events():
+    try:
+        # 把行程從 Supabase 抓出來，前端就能直接拿到 transport_type 了
+        res = supabase.table("events").select("*").execute()
+        return {"status": "success", "data": res.data}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
