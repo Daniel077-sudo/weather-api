@@ -7,16 +7,19 @@ import uvicorn
 import json
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
-import asyncio
+from typing import Optional
 import urllib3
+import asyncio
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-# 載入金鑰
+
+# 載入金鑰 (堅持使用環境變數，保護安全)
 load_dotenv()
 
 app = FastAPI()
 
 # ==========================================
-# 🔑 金鑰與連線 (已改為環境變數)
+# 🔑 金鑰與連線區
 # ==========================================
 CWA_API_KEY = os.getenv("CWA_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -25,9 +28,72 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================
-# 🗺️ 全台 22 縣市代表性地區清單 (進階版核心)
+# 🛠️ 共用工具函式區
 # ==========================================
-# 這裡定義了每個縣市我們要優先快取的「門面」地區
+def call_gemini_raw(prompt: str):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.8}
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        res_json = response.json()
+        if 'candidates' in res_json and len(res_json['candidates']) > 0:
+            return res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+        return f"[AI 罷工原因]: {json.dumps(res_json, ensure_ascii=False)}"
+    except Exception as e:
+        return f"[連線錯誤]: {str(e)}"
+
+def find_district(data, target):
+    if isinstance(data, dict):
+        if data.get("locationName") == target or data.get("LocationName") == target: return data
+        for k, v in data.items():
+            found = find_district(v, target)
+            if found: return found
+    elif isinstance(data, list):
+        for item in data:
+            found = find_district(item, target)
+            if found: return found
+    return None
+
+def determine_transport_type(url: str) -> Optional[str]:
+    """根據網址判斷是台鐵(tra)還是高鐵(thsrc)"""
+    if not url: return None
+    url_lower = url.lower()
+    if "railway.gov.tw" in url_lower or "tra" in url_lower: return "tra"
+    elif "thsrc.com.tw" in url_lower: return "thsrc"
+    return None
+
+# ==========================================
+# 🗺️ 字典與設定區
+# ==========================================
+TAIWAN_LOCATIONS = {
+    "基隆市": ["仁愛區", "信義區", "中正區", "中山區", "安樂區", "暖暖區", "七堵區"],
+    "臺北市": ["中正區", "大同區", "中山區", "松山區", "大安區", "萬華區", "信義區", "士林區", "北投區", "內湖區", "南港區", "文山區"],
+    "新北市": ["板橋區", "新莊區", "中和區", "永和區", "土城區", "樹林區", "三峽區", "鶯歌區", "三重區", "蘆洲區", "五股區", "泰山區", "林口區", "八里區", "淡水區", "三芝區", "石門區", "金山區", "萬里區", "汐止區", "瑞芳區", "貢寮區", "平溪區", "雙溪區", "新店區", "深坑區", "石碇區", "坪林區", "烏來區"],
+    "桃園市": ["桃園區", "中壢區", "平鎮區", "八德區", "楊梅區", "蘆竹區", "大溪區", "龍潭區", "龜山區", "大園區", "觀音區", "新屋區", "復興區"],
+    "新竹市": ["東區", "北區", "香山區"],
+    "新竹縣": ["竹北市", "竹東鎮", "新埔鎮", "關西鎮", "湖口鄉", "新豐鄉", "芎林鄉", "橫山鄉", "北埔鄉", "寶山鄉", "峨眉鄉", "尖石鄉", "五峰鄉"],
+    "苗栗縣": ["苗栗市", "苑裡鎮", "通霄鎮", "竹南鎮", "頭份市", "後龍鎮", "卓蘭鎮", "大湖鄉", "公館鄉", "銅鑼鄉", "南庄鄉", "頭屋鄉", "三義鄉", "西湖鄉", "造橋鄉", "三灣鄉", "獅潭鄉", "泰安鄉"],
+    "臺中市": ["中區", "東區", "南區", "西區", "北區", "北屯區", "西屯區", "南屯區", "太平區", "大里區", "霧峰區", "烏日區", "豐原區", "后里區", "石岡區", "東勢區", "和平區", "新社區", "潭子區", "大雅區", "神岡區", "大肚區", "沙鹿區", "龍井區", "梧棲區", "清水區", "大甲區", "外埔區", "大安區"],
+    "彰化縣": ["彰化市", "鹿港鎮", "和美鎮", "線西鄉", "伸港鄉", "福興鄉", "秀水鄉", "花壇鄉", "芬園鄉", "員林市", "溪湖鎮", "田中鎮", "大村鄉", "埔鹽鄉", "埔心鄉", "永靖鄉", "社頭鄉", "二水鄉", "北斗鎮", "二林鎮", "田尾鄉", "埤頭鄉", "芳苑鄉", "大城鄉", "竹塘鄉", "溪州鄉"],
+    "南投縣": ["南投市", "埔里鎮", "草屯鎮", "竹山鎮", "集集鎮", "名間鄉", "鹿谷鄉", "中寮鄉", "魚池鄉", "國姓鄉", "水里鄉", "信義鄉", "仁愛鄉"],
+    "雲林縣": ["斗六市", "斗南鎮", "虎尾鎮", "西螺鎮", "土庫鎮", "北港鎮", "古坑鄉", "大埤鄉", "莿桐鄉", "林內鄉", "二崙鄉", "崙背鄉", "麥寮鄉", "東勢鄉", "褒忠鄉", "臺西鄉", "元長鄉", "四湖鄉", "口湖鄉", "水林鄉"],
+    "嘉義市": ["東區", "西區"],
+    "嘉義縣": ["太保市", "朴子市", "布袋鎮", "大林鎮", "民雄鄉", "溪口鄉", "新港鄉", "六腳鄉", "東石鄉", "義竹鄉", "鹿草鄉", "水上鄉", "中埔鄉", "竹崎鄉", "梅山鄉", "番路鄉", "大埔鄉", "阿里山鄉"],
+    "臺南市": ["中西區", "東區", "南區", "北區", "安平區", "安南區", "永康區", "歸仁區", "新化區", "左鎮區", "玉井區", "楠西區", "南化區", "仁德區", "關廟區", "龍崎區", "官田區", "麻豆區", "佳里區", "西港區", "七股區", "將軍區", "學甲區", "北門區", "新營區", "後壁區", "白河區", "東山區", "六甲區", "下營區", "柳營區", "鹽水區", "善化區", "大內區", "山上區", "新市區", "安定區"],
+    "高雄市": ["新興區", "前金區", "苓雅區", "鹽埕區", "鼓山區", "旗津區", "前鎮區", "三民區", "楠梓區", "小港區", "左營區", "仁武區", "大社區", "岡山區", "路竹區", "阿蓮區", "田寮區", "燕巢區", "橋頭區", "梓官區", "彌陀區", "永安區", "湖內區", "鳳山區", "大寮區", "林園區", "鳥松區", "大樹區", "旗山區", "美濃區", "六龜區", "內門區", "杉林區", "甲仙區", "桃源區", "那瑪夏區", "茂林區"],
+    "屏東縣": ["屏東市", "潮州鎮", "東港鎮", "恆春鎮", "萬丹鄉", "長治鄉", "麟洛鄉", "九如鄉", "里港鄉", "鹽埔鄉", "高樹鄉", "萬巒鄉", "內埔鄉", "竹田鄉", "新埤鄉", "枋寮鄉", "新園鄉", "崁頂鄉", "林邊鄉", "南州鄉", "佳冬鄉", "琉球鄉", "車城鄉", "滿州鄉", "枋山鄉", "三地門鄉", "霧臺鄉", "瑪家鄉", "泰武鄉", "來義鄉", "春日鄉", "獅子鄉", "牡丹鄉"],
+    "宜蘭縣": ["宜蘭市", "羅東鎮", "蘇澳鎮", "頭城鎮", "礁溪鄉", "壯圍鄉", "員山鄉", "冬山鄉", "五結鄉", "三星鄉", "大同鄉", "南澳鄉"],
+    "花蓮縣": ["花蓮市", "鳳林鎮", "玉里鎮", "新城鄉", "吉安鄉", "壽豐鄉", "光復鄉", "豐濱鄉", "瑞穗鄉", "富里鄉", "秀林鄉", "萬榮鄉", "卓溪鄉"],
+    "臺東縣": ["臺東市", "成功鎮", "關山鎮", "卑南鄉", "大武鄉", "太麻里鄉", "東河鄉", "長濱鄉", "鹿野鄉", "池上鄉", "綠島鄉", "延平鄉", "海端鄉", "達仁鄉", "金峰鄉", "蘭嶼鄉"],
+    "澎湖縣": ["馬公市", "湖西鄉", "白沙鄉", "西嶼鄉", "望安鄉", "七美鄉"],
+    "金門縣": ["金城鎮", "金湖鎮", "金沙鎮", "金寧鄉", "烈嶼鄉", "烏坵鄉"],
+    "連江縣": ["南竿鄉", "北竿鄉", "莒光鄉", "東引鄉"]
+}
+
 REPRESENTATIVE_DISTRICTS = {
     "臺北市": "信義區", "新北市": "板橋區", "桃園市": "桃園區", "臺中市": "西屯區",
     "臺南市": "東區", "高雄市": "左營區", "基隆市": "仁愛區", "新竹市": "東區",
@@ -35,6 +101,15 @@ REPRESENTATIVE_DISTRICTS = {
     "南投縣": "南投市", "雲林縣": "斗六市", "嘉義縣": "太保市", "屏東縣": "屏東市",
     "宜蘭縣": "宜蘭市", "花蓮縣": "花蓮市", "臺東縣": "臺東市", "澎湖縣": "馬公市",
     "金門縣": "金城鎮", "連江縣": "南竿鄉"
+}
+
+CITY_MAP = {
+    "宜蘭縣": "F-D0047-001", "桃園市": "F-D0047-005", "新竹縣": "F-D0047-009", "苗栗縣": "F-D0047-013",
+    "彰化縣": "F-D0047-017", "南投縣": "F-D0047-021", "雲林縣": "F-D0047-025", "嘉義縣": "F-D0047-029",
+    "屏東縣": "F-D0047-033", "臺東縣": "F-D0047-037", "花蓮縣": "F-D0047-041", "澎湖縣": "F-D0047-045",
+    "基隆市": "F-D0047-049", "新竹市": "F-D0047-053", "嘉義市": "F-D0047-057", "臺北市": "F-D0047-061",
+    "高雄市": "F-D0047-065", "新北市": "F-D0047-069", "臺中市": "F-D0047-073", "臺南市": "F-D0047-077",
+    "連江縣": "F-D0047-081", "金門縣": "F-D0047-085"
 }
 
 CITY_7DAY_MAP = {
@@ -47,78 +122,120 @@ CITY_7DAY_MAP = {
 }
 
 # ==========================================
-# ⚙️ 核心邏輯：單一地區同步函式 (內部使用)
+# 🚀 API 1：前端地區選單
+# ==========================================
+@app.get("/locations")
+async def get_locations():
+    return {"status": "success", "data": TAIWAN_LOCATIONS}
+
+# ==========================================
+# 🚀 API 2：AI 防災與生活助理
+# ==========================================
+class UserQuery(BaseModel):
+    city: str
+    district: str
+    message: str
+
+@app.post("/ask-assistant")
+async def ask_assistant(query: UserQuery):
+    try:
+        city, district, msg = query.city, query.district, query.message
+        dataset_id = CITY_MAP.get(city)
+        if not dataset_id: return {"status": "error", "message": f"目前尚不支援 {city} 的天氣查詢"}
+
+        weather_url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
+        params = {"Authorization": CWA_API_KEY, "format": "JSON"}
+        
+        wx, pop = "未知", "未知"
+        try:
+            res = requests.get(weather_url, params=params, timeout=15, verify=False).json()
+            dist_data = find_district(res, district)
+            
+            if dist_data:
+                elements = dist_data.get("weatherElement") or dist_data.get("WeatherElement") or []
+                for el in elements:
+                    en = el.get("elementName") or el.get("ElementName") or ""
+                    try:
+                        times = el.get("time") or el.get("Time") or []
+                        if not times: continue
+                        vals = times[0].get("elementValue") or times[0].get("ElementValue") or []
+                        if not vals: continue
+                        val = list(vals[0].values())[0]
+
+                        if "天氣現象" in en: wx = val
+                        elif "降雨機率" in en: pop = val
+                    except: continue
+        except Exception as e:
+            print(f"氣象解析錯誤: {e}") 
+
+        final_prompt = f"地點:{city}{district}，天氣:{wx}，降雨機率:{pop}%。行程:{msg}。請給40字內防災或生活建議。"
+        ai_suggestion = call_gemini_raw(final_prompt)
+
+        try:
+            db_data = {"user_input": f"[{city}{district}] {msg}", "ai_response": ai_suggestion}
+            supabase.table("chat_logs").insert(db_data).execute()
+        except Exception as db_e:
+            print(f"備份對話紀錄失敗: {db_e}")
+
+        return {
+            "target_location": f"{city}{district}",
+            "weather": {"wx": wx, "pop": f"{pop}%"},
+            "ai_suggestion": ai_suggestion
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"解析失敗: {str(e)}"}
+
+# ==========================================
+# 🚀 API 3 & 4：天氣快取機制 (含新裝備 & 背景同步防封鎖)
 # ==========================================
 async def _internal_sync(city: str, district: str):
+    """內部背景核心同步邏輯"""
     try:
         dataset_id = CITY_7DAY_MAP.get(city)
         if not dataset_id: return
         
         url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
-        params = {"Authorization": CWA_API_KEY, "format": "JSON", "locationName": district}
-        # 這裡保留了我們剛剛加上的 verify=False
-        res_obj = requests.get(url, params=params, timeout=20, verify=False)
-        res = res_obj.json()
+        params = {"Authorization": CWA_API_KEY, "format": "JSON"}
+        res = requests.get(url, params=params, timeout=20, verify=False).json()
         
-       # 【終極解析雷達】
-        records = res.get("records", {})
-        if not records:
-            print(f"⚠️ 氣象署回傳異常: {res}")
-            return
-            
-        # 印出 records 裡面到底有哪些第一層的 key
-        if city == "臺北市" and district == "信義區":
-            print(f"🔍 臺北市 records 的 Keys: {list(records.keys())}")
-            # 假設裡面有 'locations'，我們印出它第一個元素的 keys
-            if "locations" in records and len(records["locations"]) > 0:
-                 print(f"🔍 臺北市 locations[0] 的 Keys: {list(records['locations'][0].keys())}")
-            # 假設裡面只有 'location'，我們印出它第一個元素的 keys
-            elif "location" in records and len(records["location"]) > 0:
-                 print(f"🔍 臺北市 location[0] 的 Keys: {list(records['location'][0].keys())}")
-                 
-        # 注意這裡的 Locations 和 Location 都要大寫！
-        locations_list = records.get("Locations", [{}])[0].get("Location", [])
-        if not locations_list:
-            print(f"⚠️ 找不到 {city}{district} 的資料！氣象署回傳: {str(res)[:200]}")
-            return
+        dist_data = find_district(res, district)
+        if not dist_data: return
 
-        location_data = locations_list[0]
-        
-        # 兼容大小寫：取得天氣元素
-        elements = location_data.get("WeatherElement") or location_data.get("weatherElement", [])
-        
+        elements = dist_data.get("weatherElement") or dist_data.get("WeatherElement") or []
         time_map = {}
+
         for el in elements:
-            en = el.get("ElementName") or el.get("elementName")
-            times = el.get("Time") or el.get("time", [])
+            en = el.get("elementName") or el.get("ElementName") or ""
+            times = el.get("time") or el.get("Time") or []
+            
             for t in times:
-                # 兼容各種時間命名
-                dt = t.get("DataTime") or t.get("dataTime") or t.get("StartTime") or t.get("startTime")
+                dt = t.get("dataTime") or t.get("DataTime") or t.get("startTime") or t.get("StartTime")
                 if not dt: continue
-                if dt not in time_map: time_map[dt] = {"time": dt, "temp":0, "pop":0, "description":"未知"}
                 
-                # 兼容 Value 大小寫
-                val_list = t.get("ElementValue") or t.get("elementValue", [{}])
-                if val_list:
-                    val = val_list[0].get("Value") or val_list[0].get("value")
-                    if en in ["T", "MaxT"] and val is not None: 
-                        try: time_map[dt]["temp"] = int(val) 
-                        except: pass
-                    elif "PoP" in en and val is not None: 
-                        try: time_map[dt]["pop"] = int(val) 
-                        except: pass
-                    elif en == "Wx" and val is not None: 
-                        time_map[dt]["description"] = val
+                if dt not in time_map:
+                    time_map[dt] = {
+                        "time": dt, "temp": 0, "pop": 0, "hum": 0, 
+                        "description": "未知", "app_temp": 0, "uvi": 0, "wind_speed": "0"
+                    }
+                
+                try:
+                    vals = t.get("elementValue") or t.get("ElementValue") or []
+                    if not vals: continue
+                    val = list(vals[0].values())[0]
+
+                    if "天氣現象" in en or en == "Wx": time_map[dt]["description"] = val
+                    elif "降雨機率" in en or "PoP" in en: time_map[dt]["pop"] = int(val) if str(val).isdigit() else 0
+                    elif "溫度" in en or en in ["T", "MaxT", "MinT"]: time_map[dt]["temp"] = int(val) if str(val).isdigit() else 0
+                    elif "相對濕度" in en or en == "RH": time_map[dt]["hum"] = int(val) if str(val).isdigit() else 0
+                    elif "體感溫度" in en or en == "AT": time_map[dt]["app_temp"] = int(val) if str(val).lstrip('-').isdigit() else 0 
+                    elif "紫外線" in en or en == "UVI": time_map[dt]["uvi"] = int(val) if str(val).isdigit() else 0
+                    elif "風速" in en or en == "WS": time_map[dt]["wind_speed"] = val 
+                except: continue
 
         sorted_data = sorted(time_map.values(), key=lambda x: x["time"])
-        
-        # 終極防呆：如果資料還是空的，印出來讓我們抓蟲
-        if not sorted_data:
-            print(f"⚠️ {city} 解析後沒有資料，請檢查結構: {str(elements)[:300]}")
-            return
+        if not sorted_data: return
             
         now = datetime.now(timezone(timedelta(hours=8)))
-        
         db_payload = {
             "city_name": f"{city}{district}",
             "weather_data": {"current": sorted_data[0], "forecast": sorted_data},
@@ -126,93 +243,69 @@ async def _internal_sync(city: str, district: str):
             "valid_until": (now + timedelta(hours=3)).isoformat()
         }
         supabase.table("weather_cache").upsert(db_payload, on_conflict="city_name").execute()
-        print(f"✅ 已同步: {city}{district}")
+        print(f"✅ 已同步: {city}{district} (含擴充裝備)")
     except Exception as e:
         print(f"❌ 同步 {city} 失敗: {e}")
 
-# ==========================================
-# 🚀 進階 API 1：全台大同步 (鬧鐘改敲這裡！)
-# ==========================================
+async def _delayed_sync(city: str, district: str, delay_seconds: int):
+    """延遲執行小幫手：保護 IP 不被氣象署封鎖"""
+    await asyncio.sleep(delay_seconds)
+    await _internal_sync(city, district)
+
 @app.post("/sync-all-taiwan")
 async def sync_all_taiwan(background_tasks: BackgroundTasks):
-    """
-    鬧鐘敲這個網址，我們會立刻回傳 200 OK，
-    然後在背景慢慢把 22 縣市抓完，不怕 Render Timeout！
-    """
+    """鬧鐘排程專用：全台 22 縣市背景同步 (加入防封鎖延遲)"""
+    delay = 0
     for city, district in REPRESENTATIVE_DISTRICTS.items():
-        # 把任務丟進背景排隊，每抓一個縣市休息 1 秒，避免被氣象署封鎖
-        background_tasks.add_task(_internal_sync, city, district)
+        # 把任務丟進背景，並設定每個城市錯開 1 秒執行
+        background_tasks.add_task(_delayed_sync, city, district, delay)
+        delay += 1 
         
     return {
-        "status": "processing",
-        "message": f"已啟動全台 {len(REPRESENTATIVE_DISTRICTS)} 縣市背景同步任務，請稍後查看資料庫。"
+        "status": "processing", 
+        "message": f"已啟動全台 {len(REPRESENTATIVE_DISTRICTS)} 縣市背景同步任務，將於 {delay} 秒內陸續完成。"
     }
 
-# 保留原本的單一查詢介面給前端
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
-    # 先看資料庫有沒有，沒有再報錯 (這就是快取的力量)
+    """前端讀取天氣專用 (直接從快取拿，速度最快)"""
     res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
     if res.data:
         return res.data[0]
     return {"error": "資料庫尚無此地區快取，請先觸發同步。"}
-# ==========================================
-# 🚄 行程 (Events) API 模組 
-# ==========================================
-from typing import Optional
 
-# 定義接收前端資料的格式
+# ==========================================
+# 🚄 API 5：行程與交通工具判斷 (Events)
+# ==========================================
 class EventCreate(BaseModel):
     title: str
     start_time: str
     end_time: str
     url: Optional[str] = None
-    # 如果你們前端還有傳其他欄位（例如 description, location 等），請在這裡補上
+    description: Optional[str] = None
 
-# 判斷交通工具的邏輯
-def determine_transport_type(url: str) -> Optional[str]:
-    """根據網址判斷是台鐵(tra)還是高鐵(thsrc)"""
-    if not url:
-        return None
-        
-    url_lower = url.lower()
-    if "railway.gov.tw" in url_lower or "tra" in url_lower:
-        return "tra"
-    elif "thsrc.com.tw" in url_lower:
-        return "thsrc"
-        
-    return None
-
-# 新增行程的 API
 @app.post("/events")
 async def create_event(event: EventCreate):
     try:
-        # 1. 自動判斷並產生 transport_type
         transport_type = determine_transport_type(event.url)
-        
-        # 2. 準備要存進 Supabase 的資料
-        db_payload = event.model_dump() # 如果 Pydantic 是 v2 版本用 model_dump()，v1 版用 dict()
+        db_payload = event.model_dump()
         db_payload["transport_type"] = transport_type
         
-        # 3. 寫入 Supabase (假設你的資料表叫做 events)
+        # 寫入 events 資料表 (請確保 Supabase 已有 transport_type 欄位)
         res = supabase.table("events").insert(db_payload).execute()
-        
         if res.data:
             return {"status": "success", "data": res.data[0]}
-        else:
-            return {"status": "error", "message": "寫入失敗"}
-            
+        return {"status": "error", "message": "寫入失敗"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# 取得行程的 API (讓前端去讀取)
 @app.get("/events")
 async def get_events():
     try:
-        # 把行程從 Supabase 抓出來，前端就能直接拿到 transport_type 了
         res = supabase.table("events").select("*").execute()
         return {"status": "success", "data": res.data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
