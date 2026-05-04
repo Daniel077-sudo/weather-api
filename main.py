@@ -186,10 +186,10 @@ async def ask_assistant(query: UserQuery):
         return {"status": "error", "message": f"解析失敗: {str(e)}"}
 
 # ==========================================
-# 🚀 API 3 & 4：天氣快取機制 (含新裝備 & 背景同步防封鎖)
+# 🚀 API 3 & 4：天氣快取機制 (含新裝備 & 背景同步防封鎖 & 系統日誌)
 # ==========================================
 async def _internal_sync(city: str, district: str):
-    """內部背景核心同步邏輯"""
+    """內部背景核心同步邏輯 (加上單一縣市的錯誤捕捉)"""
     try:
         dataset_id = CITY_7DAY_MAP.get(city)
         if not dataset_id: return
@@ -244,26 +244,104 @@ async def _internal_sync(city: str, district: str):
         }
         supabase.table("weather_cache").upsert(db_payload, on_conflict="city_name").execute()
         print(f"✅ 已同步: {city}{district} (含擴充裝備)")
+        
     except Exception as e:
-        print(f"❌ 同步 {city} 失敗: {e}")
+        error_msg = str(e)
+        print(f"❌ 同步 {city} 失敗: {error_msg}")
+        # 如果單一縣市當機，獨立寫入 error 日誌，不影響其他縣市
+        try:
+            supabase.table("sync_logs").insert({
+                "task_name": f"weather_sync_{city}",
+                "status": "error",
+                "message": f"{city} 同步失敗: {error_msg}"
+            }).execute()
+        except Exception:
+            pass
 
 async def _delayed_sync(city: str, district: str, delay_seconds: int):
     """延遲執行小幫手：保護 IP 不被氣象署封鎖"""
     await asyncio.sleep(delay_seconds)
     await _internal_sync(city, district)
 
+async def _master_alert_and_log(delay_seconds: int):
+    """📍 最終任務：所有縣市跑完後，抓取真實氣象署警報並寫入日誌"""
+    await asyncio.sleep(delay_seconds)
+    try:
+        print("🚨 開始向氣象署請求真實警報資料...")
+        
+        # 1. 抓取真實氣象署特報 (W-C0033-002)
+        alert_url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/W-C0033-002"
+        alert_params = {"Authorization": CWA_API_KEY, "format": "JSON"}
+        alert_res = requests.get(alert_url, params=alert_params, timeout=20, verify=False).json()
+
+        # 2. 解析警報資料 (防呆處理)
+        records = alert_res.get("records", {})
+        locations = records.get("location", [])
+
+        active_alerts = []
+        for loc in locations:
+            loc_name = loc.get("locationName", "")
+            hazard_conditions = loc.get("hazardConditions", {}).get("hazards", [])
+            
+            for hazard in hazard_conditions:
+                # 取得警報現象 (例如: 大雨、強風) 與 程度 (例如: 特報)
+                info = hazard.get("info", {})
+                phenomena = info.get("phenomena", "未知警報")
+                significance = info.get("significance", "特報")
+
+                # 簡單判斷嚴重程度
+                is_high_severity = any(keyword in phenomena or keyword in significance for keyword in ["大", "豪", "警報", "颱風"])
+                
+                # 組裝成翊翔資料庫要的格式
+                active_alerts.append({
+                    "title": f"{loc_name}{phenomena}{significance}",
+                    "severity": "high" if is_high_severity else "medium",
+                    "description": f"氣象署發布：{loc_name}目前有{phenomena}{significance}，請注意防範。",
+                    # 寫入當下時間
+                    "created_at": datetime.now(timezone(timedelta(hours=8))).isoformat()
+                })
+
+        # 3. 寫入資料庫 (weather_alerts)
+        if active_alerts:
+            # Supabase 支援一次 insert 多筆資料 (傳入 List)
+            supabase.table("weather_alerts").insert(active_alerts).execute()
+            print(f"🚨 成功寫入 {len(active_alerts)} 筆真實氣象警報！")
+        else:
+            print("🌤️ 目前全台天氣穩定，無特殊氣象警報。")
+
+        # 4. 寫入排程總結日誌 (翊翔的需求)
+        supabase.table("sync_logs").insert({
+            "task_name": "weather_update_all",
+            "status": "success",
+            "message": "全台 22 縣市天氣與真實警報排程執行完畢"
+        }).execute()
+        print("✅ 系統排程總結已記錄至 sync_logs")
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ 警報抓取或排程總結日誌寫入失敗: {error_msg}")
+        
+        # 如果出錯，依然要寫入失敗日誌給 DB 負責人看
+        supabase.table("sync_logs").insert({
+            "task_name": "weather_update_all",
+            "status": "error",
+            "message": f"排程總結(含警報)執行失敗: {error_msg}"
+        }).execute()
+
 @app.post("/sync-all-taiwan")
 async def sync_all_taiwan(background_tasks: BackgroundTasks):
-    """鬧鐘排程專用：全台 22 縣市背景同步 (加入防封鎖延遲)"""
+    """鬧鐘排程專用：全台 22 縣市背景同步 (加入防封鎖延遲與日誌統整)"""
     delay = 0
     for city, district in REPRESENTATIVE_DISTRICTS.items():
-        # 把任務丟進背景，並設定每個城市錯開 1 秒執行
         background_tasks.add_task(_delayed_sync, city, district, delay)
         delay += 1 
         
+    # 💡 在最後一個縣市抓完之後 (delay + 2 秒)，執行「總結任務」
+    background_tasks.add_task(_master_alert_and_log, delay + 2)
+        
     return {
         "status": "processing", 
-        "message": f"已啟動全台 {len(REPRESENTATIVE_DISTRICTS)} 縣市背景同步任務，將於 {delay} 秒內陸續完成。"
+        "message": f"已啟動全台 {len(REPRESENTATIVE_DISTRICTS)} 縣市同步任務，將於 {delay} 秒內完成並記錄日誌。"
     }
 
 @app.get("/weather")
@@ -301,11 +379,63 @@ async def create_event(event: EventCreate):
 
 @app.get("/events")
 async def get_events():
+    """前端讀取行程專用：包含天氣風險警告與 AI 備案"""
     try:
+        # 1. 從 Supabase 撈取翊翔建好的 events 資料表
+        # 假設資料表裡已經有 ai_suggestion, url, has_weather_risk 等欄位
         res = supabase.table("events").select("*").execute()
-        return {"status": "success", "data": res.data}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+        
+        events_data = res.data
+        if not events_data:
+            return {"status": "success", "data": [], "message": "目前無行程"}
 
+        # 2. 轉換資料格式以符合瀚霆 (前端 SwiftUI) 的需求
+        formatted_events = []
+        for event in events_data:
+            formatted_event = {
+                "id": event.get("id"),
+                "title": event.get("title", "未命名行程"),
+                "start_time": event.get("start_time"),
+                "end_time": event.get("end_time"),
+                "transport_type": event.get("transport_type"),
+                
+                # 瀚霆要求把原本的 url 改名為 transport_ticket_link
+                "transport_ticket_link": event.get("url"),
+                
+                # 氣象風險與 AI 備案 (直接讀取 DB 裡的值)
+                "has_weather_risk": event.get("has_weather_risk", False),
+                "ai_suggestion": event.get("ai_suggestion") # 這裡會直接是 JSON 物件或 None
+            }
+            formatted_events.append(formatted_event)
+
+        return {
+            "status": "success",
+            "data": formatted_events
+        }
+
+    except Exception as e:
+        print(f"❌ 讀取行程失敗: {e}")
+        return {"status": "error", "message": f"伺服器錯誤: {str(e)}"}
+    
+@app.get("/alerts")
+async def get_alerts():
+    """前端讀取突發警報專用：觸發紅色警告圖卡與情境推播"""
+    try:
+        # 從 Supabase 的 weather_alerts 表撈取最新的警報
+        # order("created_at", desc=True) 確保最新的警報排在最前面，limit(5) 只取最近 5 筆
+        res = supabase.table("weather_alerts").select("*").order("created_at", desc=True).limit(5).execute()
+        
+        alerts_data = res.data
+        if not alerts_data:
+            return {"status": "success", "data": [], "message": "目前全台無特殊氣象警報"}
+
+        return {
+            "status": "success",
+            "data": alerts_data
+        }
+
+    except Exception as e:
+        print(f"❌ 讀取警報失敗: {e}")
+        return {"status": "error", "message": f"伺服器錯誤: {str(e)}"}
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
