@@ -6,7 +6,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Query
 from pydantic import BaseModel
 import uvicorn
 from supabase import create_client, Client
@@ -59,13 +59,36 @@ def find_district(data, target):
             if found: return found
     return None
 
-def determine_transport_type(url: str) -> Optional[str]:
+def determine_transport_type(url: Optional[str]) -> Optional[str]:
     """根據網址判斷是台鐵(tra)還是高鐵(thsrc)"""
     if not url: return None
     url_lower = url.lower()
     if "railway.gov.tw" in url_lower or "tra" in url_lower: return "tra"
     elif "thsrc.com.tw" in url_lower: return "thsrc"
     return None
+
+def normalize_event(event: dict) -> dict:
+    """Return the exact JSON shape expected by the iOS frontend."""
+    ai_text = event.get("ai_suggestion")
+    if isinstance(ai_text, dict):
+        reason = ai_text.get("reason") or ""
+        alternative = ai_text.get("alternative_location") or ""
+        ai_text = " ".join(part for part in [reason, alternative] if part)
+    elif ai_text is None:
+        ai_text = ""
+
+    transport_type = event.get("transport_type") or determine_transport_type(event.get("url"))
+
+    return {
+        "id": event.get("id"),
+        "title": event.get("title") or "",
+        "start_time": event.get("start_time"),
+        "end_time": event.get("end_time"),
+        "url": event.get("url") or "",
+        "transport_type": transport_type or "",
+        "has_weather_risk": bool(event.get("has_weather_risk", False)),
+        "ai_suggestion": str(ai_text),
+    }
 
 # ==========================================
 # 🗺️ 字典與設定區
@@ -379,23 +402,29 @@ class EventCreate(BaseModel):
     end_time: str
     url: Optional[str] = None
     description: Optional[str] = None
+    transport_type: Optional[str] = None
+    has_weather_risk: bool = False
+    ai_suggestion: Optional[str] = None
 
 @app.post("/events")
 async def create_event(event: EventCreate):
     try:
-        transport_type = determine_transport_type(event.url)
         db_payload = event.model_dump()
-        db_payload["transport_type"] = transport_type
+        db_payload["transport_type"] = event.transport_type or determine_transport_type(event.url)
         
         # 寫入 events 資料表 (請確保 Supabase 已有 transport_type 欄位)
         res = supabase.table("events").insert(db_payload).execute()
         if res.data:
-            return {"status": "success", "data": res.data[0]}
+            return {"status": "success", "data": normalize_event(res.data[0])}
         return {"status": "error", "message": "寫入失敗"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 # 注意：路由從 /events 改成了 /api/events 配合前端
+@app.post("/api/events")
+async def create_api_event(event: EventCreate):
+    return await create_event(event)
+
 @app.get("/api/events")
 async def get_events():
     """前端讀取行程專用：完全符合瀚霆的 SwiftUI 契約"""
@@ -404,6 +433,11 @@ async def get_events():
         events_data = res.data
         if not events_data:
             return {"status": "success", "data": []}
+
+        return {
+            "status": "success",
+            "data": [normalize_event(event) for event in events_data],
+        }
 
         formatted_events = []
         for event in events_data:
@@ -455,17 +489,30 @@ async def get_alerts():
         return {"status": "error", "message": f"伺服器錯誤: {str(e)}"}
     
 @app.get("/api/guidelines")
-async def get_guidelines(activity: str, disaster: str):
+async def get_guidelines(
+    activity: Optional[str] = Query(None),
+    disaster: Optional[str] = Query(None),
+    user_activity: Optional[str] = Query(None),
+    disaster_type: Optional[str] = Query(None),
+):
     """
     情境感知推播專用：前端傳入狀態與災害，後端回傳避難圖卡文字
     範例網址：/api/guidelines?activity=driving&disaster=大雨
     """
     try:
+        resolved_activity = activity or user_activity
+        resolved_disaster = disaster or disaster_type
+        if not resolved_activity or not resolved_disaster:
+            return {
+                "status": "error",
+                "message": "Missing activity/disaster. Example: /api/guidelines?activity=driving&disaster=earthquake",
+            }
+
         # 直接使用翊翔提供的 SQL 邏輯，轉成 Supabase 語法
         res = supabase.table("disaster_guidelines") \
             .select("instruction, priority") \
-            .eq("user_activity", activity) \
-            .eq("disaster_type", disaster) \
+            .eq("user_activity", resolved_activity) \
+            .eq("disaster_type", resolved_disaster) \
             .execute()
         
         if res.data:
