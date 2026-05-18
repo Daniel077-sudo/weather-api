@@ -2,12 +2,13 @@ import os
 import json
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, BackgroundTasks, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 from supabase import create_client, Client
 
@@ -79,16 +80,139 @@ def normalize_event(event: dict) -> dict:
 
     transport_type = event.get("transport_type") or determine_transport_type(event.get("url"))
 
+    risk_tags = event.get("risk_tags") or []
+    if isinstance(risk_tags, str):
+        risk_tags = [tag.strip() for tag in risk_tags.split(",") if tag.strip()]
+
     return {
         "id": event.get("id"),
         "title": event.get("title") or "",
         "start_time": event.get("start_time"),
         "end_time": event.get("end_time"),
+        "location": event.get("location") or "",
         "url": event.get("url") or "",
         "transport_type": transport_type or "",
         "has_weather_risk": bool(event.get("has_weather_risk", False)),
         "ai_suggestion": str(ai_text),
+        "risk_level": event.get("risk_level") or ("medium" if event.get("has_weather_risk") else "low"),
+        "risk_tags": risk_tags,
+        "recommended_action": event.get("recommended_action") or str(ai_text),
     }
+
+DISASTER_CODE_ALIASES = {
+    "地震": "earthquake",
+    "earthquake": "earthquake",
+    "大雨": "heavy_rain",
+    "豪雨": "heavy_rain",
+    "heavy_rain": "heavy_rain",
+    "淹水": "flood",
+    "洪水": "flood",
+    "flood": "flood",
+    "颱風": "typhoon",
+    "台風": "typhoon",
+    "typhoon": "typhoon",
+    "濃霧": "fog",
+    "fog": "fog",
+    "強風": "strong_wind",
+    "strong_wind": "strong_wind",
+    "火災": "fire",
+    "fire": "fire",
+}
+
+RISK_KEYWORDS = {
+    "heavy_rain": ["大雨", "豪雨", "降雨", "雷雨", "rain"],
+    "flood": ["淹水", "積水", "低窪", "溪水", "flood"],
+    "typhoon": ["颱風", "強颱", "typhoon"],
+    "fog": ["濃霧", "低能見度", "fog"],
+    "strong_wind": ["強風", "陣風", "wind"],
+    "earthquake": ["地震", "earthquake"],
+}
+
+GAME_QUESTIONS = {
+    "flood": [
+        {
+            "id": "flood-1",
+            "question": "遇到淹水地下道時，最安全的做法是？",
+            "choices": ["快速通過", "停下並改道", "跟著前車走"],
+            "answer": 1,
+            "explanation": "地下道積水深度很難判斷，車輛可能熄火或被困，應立即改道。",
+        },
+        {
+            "id": "flood-2",
+            "question": "暴雨時看到河水暴漲，應該怎麼做？",
+            "choices": ["靠近拍照", "遠離河道與堤防", "站在橋下避雨"],
+            "answer": 1,
+            "explanation": "河水暴漲時應遠離河道、堤防與橋下，避免被急流或落石影響。",
+        },
+    ],
+    "earthquake": [
+        {
+            "id": "earthquake-1",
+            "question": "地震發生當下在室內，第一步應該做什麼？",
+            "choices": ["衝去搭電梯", "趴下、掩護、穩住", "站在窗邊觀察"],
+            "answer": 1,
+            "explanation": "地震當下應先保護頭頸，採取趴下、掩護、穩住。",
+        }
+    ],
+    "typhoon": [
+        {
+            "id": "typhoon-1",
+            "question": "颱風來臨前，哪個準備最重要？",
+            "choices": ["固定門窗並準備飲水與手電筒", "到海邊看浪", "把車停在地下低窪處"],
+            "answer": 0,
+            "explanation": "颱風前應固定門窗、準備飲水與照明，並避免海邊與低窪地區。",
+        }
+    ],
+    "fire": [
+        {
+            "id": "fire-1",
+            "question": "火災逃生時遇到濃煙，應該怎麼移動？",
+            "choices": ["低姿勢沿牆移動", "站直快速奔跑", "搭電梯下樓"],
+            "answer": 0,
+            "explanation": "濃煙會往上竄，應低姿勢沿牆移動，並避免搭電梯。",
+        }
+    ],
+}
+
+def normalize_disaster_code(disaster: Optional[str]) -> str:
+    if not disaster:
+        return ""
+    return DISASTER_CODE_ALIASES.get(disaster, disaster)
+
+def analyze_text_risk(text: str) -> Dict[str, Any]:
+    lowered = text.lower()
+    tags = []
+    for tag, keywords in RISK_KEYWORDS.items():
+        if any(keyword.lower() in lowered for keyword in keywords):
+            tags.append(tag)
+
+    if any(tag in tags for tag in ["flood", "typhoon"]):
+        level = "high"
+    elif tags:
+        level = "medium"
+    else:
+        level = "low"
+
+    return {
+        "has_weather_risk": level != "low",
+        "risk_level": level,
+        "risk_tags": tags,
+    }
+
+def build_recommended_action(risk_level: str, risk_tags: List[str], location: str = "") -> str:
+    if risk_level == "low":
+        return "目前未偵測到明顯天氣風險，仍建議出門前確認最新預報。"
+    if "flood" in risk_tags:
+        return f"{location}可能有淹水或積水風險，請避開地下道、河堤與低窪路段。"
+    if "heavy_rain" in risk_tags:
+        return f"{location}可能有大雨風險，建議提早出門並攜帶雨具。"
+    if "strong_wind" in risk_tags:
+        return f"{location}可能有強風風險，請避開招牌、路樹與施工圍籬。"
+    if "fog" in risk_tags:
+        return f"{location}可能有濃霧或低能見度，交通移動請放慢速度。"
+    if "typhoon" in risk_tags:
+        return f"{location}可能受颱風影響，非必要請減少外出並確認交通異動。"
+    return f"{location}有天氣風險，請保留彈性時間並注意官方警報。"
 
 # ==========================================
 # 🗺️ 字典與設定區
@@ -400,20 +524,46 @@ class EventCreate(BaseModel):
     title: str
     start_time: str
     end_time: str
+    location: Optional[str] = None
     url: Optional[str] = None
     description: Optional[str] = None
     transport_type: Optional[str] = None
     has_weather_risk: bool = False
     ai_suggestion: Optional[str] = None
+    risk_level: Optional[str] = None
+    risk_tags: List[str] = Field(default_factory=list)
+    recommended_action: Optional[str] = None
+
+class EventRiskCheckRequest(BaseModel):
+    title: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    location: Optional[str] = None
+    city: Optional[str] = None
+    district: Optional[str] = None
+    activity: Optional[str] = "commuting"
+    transport_type: Optional[str] = None
+
+class GameSubmitRequest(BaseModel):
+    question_id: str
+    selected_index: int
+    game_type: Optional[str] = None
 
 @app.post("/events")
 async def create_event(event: EventCreate):
     try:
-        db_payload = event.model_dump()
+        db_payload = event.model_dump(exclude_none=True)
         db_payload["transport_type"] = event.transport_type or determine_transport_type(event.url)
+        if event.risk_level or event.risk_tags:
+            db_payload["has_weather_risk"] = event.has_weather_risk or event.risk_level in ["medium", "high"]
         
         # 寫入 events 資料表 (請確保 Supabase 已有 transport_type 欄位)
-        res = supabase.table("events").insert(db_payload).execute()
+        try:
+            res = supabase.table("events").insert(db_payload).execute()
+        except Exception:
+            legacy_keys = {"title", "start_time", "end_time", "url", "description", "transport_type", "has_weather_risk", "ai_suggestion"}
+            legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
+            res = supabase.table("events").insert(legacy_payload).execute()
         if res.data:
             return {"status": "success", "data": normalize_event(res.data[0])}
         return {"status": "error", "message": "寫入失敗"}
@@ -467,6 +617,100 @@ async def get_events():
         print(f"❌ 讀取行程失敗: {e}")
         return {"status": "error", "message": str(e)}
     
+async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
+    location = payload.location or "".join(part for part in [payload.city, payload.district] if part) or "目的地"
+    weather_text = ""
+    alert_text = ""
+
+    try:
+        if payload.city and payload.district:
+            cache = supabase.table("weather_cache").select("*").eq("city_name", f"{payload.city}{payload.district}").execute()
+            if cache.data:
+                weather_data = cache.data[0].get("weather_data") or {}
+                weather_text = json.dumps(weather_data, ensure_ascii=False)
+    except Exception as e:
+        weather_text = f"weather_cache unavailable: {e}"
+
+    try:
+        alerts = supabase.table("weather_alerts").select("*").order("created_at", desc=True).limit(5).execute()
+        if alerts.data:
+            alert_text = json.dumps(alerts.data, ensure_ascii=False)
+    except Exception as e:
+        alert_text = f"weather_alerts unavailable: {e}"
+
+    combined_text = " ".join([
+        payload.title or "",
+        location,
+        payload.activity or "",
+        payload.transport_type or "",
+        weather_text,
+        alert_text,
+    ])
+    risk = analyze_text_risk(combined_text)
+    action = build_recommended_action(risk["risk_level"], risk["risk_tags"], location)
+
+    return {
+        "event": {
+            "title": payload.title or "",
+            "start_time": payload.start_time,
+            "end_time": payload.end_time,
+            "location": location,
+            "activity": payload.activity,
+            "transport_type": payload.transport_type,
+        },
+        **risk,
+        "recommended_action": action,
+        "ai_suggestion": action,
+        "sources": {
+            "weather_cache_used": bool(weather_text and "unavailable" not in weather_text),
+            "weather_alerts_used": bool(alert_text and "unavailable" not in alert_text),
+        },
+    }
+
+@app.post("/api/events/risk-check")
+async def check_event_risk(payload: EventRiskCheckRequest):
+    try:
+        risk_result = await build_event_risk(payload)
+        return {"status": "success", "data": risk_result}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/briefing/today")
+async def get_today_briefing():
+    try:
+        today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+        res = supabase.table("events").select("*").gte("start_time", f"{today}T00:00:00").lt("start_time", f"{today}T23:59:59").execute()
+        events = res.data or []
+        alerts = []
+
+        for event in events:
+            normalized = normalize_event(event)
+            risk = analyze_text_risk(json.dumps(normalized, ensure_ascii=False))
+            risk_level = normalized.get("risk_level") or risk["risk_level"]
+            risk_tags = normalized.get("risk_tags") or risk["risk_tags"]
+            has_risk = normalized.get("has_weather_risk") or risk_level != "low"
+            if has_risk:
+                alerts.append({
+                    "event_id": normalized.get("id"),
+                    "title": normalized.get("title"),
+                    "start_time": normalized.get("start_time"),
+                    "location": normalized.get("location"),
+                    "risk_level": risk_level,
+                    "risk_tags": risk_tags,
+                    "message": normalized.get("ai_suggestion") or build_recommended_action(risk_level, risk_tags, normalized.get("location")),
+                })
+
+        summary = f"今天共有 {len(alerts)} 個行程需要注意天氣或災害風險。" if alerts else "今天行程目前沒有明顯天氣風險，仍建議出門前確認最新預報。"
+        return {
+            "status": "success",
+            "date": today,
+            "summary": summary,
+            "alerts": alerts,
+            "events": [normalize_event(event) for event in events],
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/alerts")
 async def get_alerts():
     """前端讀取突發警報專用：觸發紅色警告圖卡與情境推播"""
@@ -501,7 +745,7 @@ async def get_guidelines(
     """
     try:
         resolved_activity = activity or user_activity
-        resolved_disaster = disaster or disaster_type
+        resolved_disaster = normalize_disaster_code(disaster or disaster_type)
         if not resolved_activity or not resolved_disaster:
             return {
                 "status": "error",
@@ -521,6 +765,15 @@ async def get_guidelines(
                 "data": res.data[0] # 回傳符合條件的第一筆指引
             }
         else:
+            fallback_priority = "high" if resolved_disaster in ["flood", "typhoon"] else "medium"
+            return {
+                "status": "success",
+                "data": {
+                    "instruction": build_recommended_action(fallback_priority, [resolved_disaster], "目前位置"),
+                    "priority": fallback_priority,
+                    "disaster_type": resolved_disaster,
+                },
+            }
             return {
                 "status": "success", 
                 "data": {"instruction": "請注意安全，隨時留意氣象變化。", "priority": "low"}
@@ -529,6 +782,71 @@ async def get_guidelines(
     except Exception as e:
         print(f"❌ 讀取避難指引失敗: {e}")
         return {"status": "error", "message": str(e)}
-    
+@app.get("/api/game/questions")
+async def get_game_questions(type: str = Query("flood")):
+    game_type = normalize_disaster_code(type)
+    questions = GAME_QUESTIONS.get(game_type, [])
+    return {
+        "status": "success",
+        "type": game_type,
+        "data": [
+            {
+                "id": question["id"],
+                "question": question["question"],
+                "choices": question["choices"],
+            }
+            for question in questions
+        ],
+    }
+
+@app.post("/api/game/submit")
+async def submit_game_answer(payload: GameSubmitRequest):
+    game_types = [normalize_disaster_code(payload.game_type)] if payload.game_type else list(GAME_QUESTIONS.keys())
+    for game_type in game_types:
+        for question in GAME_QUESTIONS.get(game_type, []):
+            if question["id"] == payload.question_id:
+                is_correct = payload.selected_index == question["answer"]
+                return {
+                    "status": "success",
+                    "data": {
+                        "question_id": payload.question_id,
+                        "correct": is_correct,
+                        "score": 10 if is_correct else 0,
+                        "correct_index": question["answer"],
+                        "explanation": question["explanation"],
+                    },
+                }
+
+    return {"status": "error", "message": "Question not found"}
+
+@app.get("/api/transport/options")
+async def get_transport_options(
+    from_location: str = Query("", alias="from"),
+    to: str = Query(""),
+):
+    origin = quote(from_location)
+    destination = quote(to)
+    maps_url = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode=transit"
+    return {
+        "status": "success",
+        "data": [
+            {
+                "transport_type": "thsrc",
+                "title": "高鐵訂票",
+                "url": "https://www.thsrc.com.tw/",
+            },
+            {
+                "transport_type": "tra",
+                "title": "台鐵訂票",
+                "url": "https://www.railway.gov.tw/",
+            },
+            {
+                "transport_type": "maps",
+                "title": "Google Maps 路線",
+                "url": maps_url,
+            },
+        ],
+    }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
