@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -16,6 +17,55 @@ from supabase import create_client, Client
 load_dotenv()
 
 app = FastAPI()
+
+def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+    )
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def maps_url(lat: float, lng: float) -> str:
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+
+def normalize_shelter(shelter: Dict[str, Any], origin_lat: Optional[float] = None, origin_lng: Optional[float] = None) -> Dict[str, Any]:
+    lat = float(shelter.get("lat") or shelter.get("latitude") or 0)
+    lng = float(shelter.get("lng") or shelter.get("longitude") or 0)
+    result = {
+        "id": shelter.get("id"),
+        "name": shelter.get("name") or "",
+        "city": shelter.get("city") or "",
+        "district": shelter.get("district") or "",
+        "address": shelter.get("address") or "",
+        "lat": lat,
+        "lng": lng,
+        "capacity": shelter.get("capacity"),
+        "shelter_type": shelter.get("shelter_type") or "shelter",
+        "maps_url": maps_url(lat, lng),
+    }
+    if origin_lat is not None and origin_lng is not None:
+        result["distance_km"] = round(haversine_km(origin_lat, origin_lng, lat, lng), 2)
+    return result
+
+def geocode_fallback(query: str) -> Dict[str, Any]:
+    if query in GEOCODE_FALLBACKS:
+        return GEOCODE_FALLBACKS[query]
+
+    for name, data in GEOCODE_FALLBACKS.items():
+        if query in name or name in query:
+            return data
+
+    return {
+        "name": query,
+        "lat": 25.0478,
+        "lng": 121.5170,
+        "city": "台北市",
+        "district": "中正區",
+        "note": "fallback_default_location",
+    }
 
 # ==========================================
 # 🔑 金鑰與連線區
@@ -173,6 +223,63 @@ GAME_QUESTIONS = {
         }
     ],
 }
+
+GEOCODE_FALLBACKS = {
+    "台北車站": {"name": "台北車站", "lat": 25.0478, "lng": 121.5170, "city": "台北市", "district": "中正區"},
+    "台北市政府": {"name": "台北市政府", "lat": 25.0375, "lng": 121.5645, "city": "台北市", "district": "信義區"},
+    "台中車站": {"name": "台中車站", "lat": 24.1368, "lng": 120.6850, "city": "台中市", "district": "中區"},
+    "高雄左營": {"name": "高雄左營", "lat": 22.6880, "lng": 120.3090, "city": "高雄市", "district": "左營區"},
+    "高雄車站": {"name": "高雄車站", "lat": 22.6395, "lng": 120.3020, "city": "高雄市", "district": "三民區"},
+}
+
+SHELTER_FALLBACKS = [
+    {
+        "id": "shelter-tpe-001",
+        "name": "台北車站地下街臨時避難點",
+        "city": "台北市",
+        "district": "中正區",
+        "address": "台北市中正區忠孝西路一段",
+        "lat": 25.0478,
+        "lng": 121.5170,
+        "capacity": 300,
+        "shelter_type": "temporary",
+    },
+    {
+        "id": "shelter-tpe-002",
+        "name": "信義國小活動中心",
+        "city": "台北市",
+        "district": "信義區",
+        "address": "台北市信義區松勤街",
+        "lat": 25.0330,
+        "lng": 121.5660,
+        "capacity": 500,
+        "shelter_type": "school",
+    },
+    {
+        "id": "shelter-txg-001",
+        "name": "台中公園避難廣場",
+        "city": "台中市",
+        "district": "中區",
+        "address": "台中市中區公園路",
+        "lat": 24.1447,
+        "lng": 120.6847,
+        "capacity": 800,
+        "shelter_type": "park",
+    },
+    {
+        "id": "shelter-khh-001",
+        "name": "左營高中活動中心",
+        "city": "高雄市",
+        "district": "左營區",
+        "address": "高雄市左營區海功路",
+        "lat": 22.6890,
+        "lng": 120.2940,
+        "capacity": 600,
+        "shelter_type": "school",
+    },
+]
+
+GAME_SCORE_MEMORY: List[Dict[str, Any]] = []
 
 def normalize_disaster_code(disaster: Optional[str]) -> str:
     if not disaster:
@@ -549,6 +656,16 @@ class GameSubmitRequest(BaseModel):
     selected_index: int
     game_type: Optional[str] = None
 
+class GameScoreCreate(BaseModel):
+    player_name: Optional[str] = "guest"
+    game_type: str
+    score: int
+    total_questions: Optional[int] = None
+    correct_count: Optional[int] = None
+
+class GeocodeRequest(BaseModel):
+    query: str
+
 @app.post("/events")
 async def create_event(event: EventCreate):
     try:
@@ -818,6 +935,116 @@ async def submit_game_answer(payload: GameSubmitRequest):
                 }
 
     return {"status": "error", "message": "Question not found"}
+
+@app.post("/api/game/scores")
+async def create_game_score(payload: GameScoreCreate):
+    score_data = payload.model_dump()
+    score_data["created_at"] = datetime.now(timezone(timedelta(hours=8))).isoformat()
+
+    try:
+        res = supabase.table("game_scores").insert(score_data).execute()
+        if res.data:
+            return {"status": "success", "data": res.data[0], "source": "supabase"}
+    except Exception:
+        GAME_SCORE_MEMORY.append(score_data)
+
+    return {"status": "success", "data": score_data, "source": "memory_fallback"}
+
+@app.get("/api/game/scores")
+async def get_game_scores(game_type: Optional[str] = None, limit: int = 10):
+    try:
+        query = supabase.table("game_scores").select("*").order("score", desc=True).limit(limit)
+        if game_type:
+            query = query.eq("game_type", normalize_disaster_code(game_type))
+        res = query.execute()
+        return {"status": "success", "data": res.data or [], "source": "supabase"}
+    except Exception:
+        scores = GAME_SCORE_MEMORY
+        if game_type:
+            normalized_type = normalize_disaster_code(game_type)
+            scores = [score for score in scores if score.get("game_type") == normalized_type]
+        scores = sorted(scores, key=lambda item: item.get("score", 0), reverse=True)[:limit]
+        return {"status": "success", "data": scores, "source": "memory_fallback"}
+
+@app.post("/api/location/geocode")
+async def post_geocode_location(payload: GeocodeRequest):
+    data = geocode_fallback(payload.query)
+    return {"status": "success", "data": data}
+
+@app.get("/api/location/geocode")
+async def get_geocode_location(query: str):
+    data = geocode_fallback(query)
+    return {"status": "success", "data": data}
+
+@app.get("/api/shelters")
+async def get_shelters(city: Optional[str] = None, district: Optional[str] = None):
+    try:
+        query = supabase.table("shelters").select("*")
+        if city:
+            query = query.eq("city", city)
+        if district:
+            query = query.eq("district", district)
+        res = query.execute()
+        shelters = res.data or []
+        if shelters:
+            return {"status": "success", "data": [normalize_shelter(item) for item in shelters], "source": "supabase"}
+    except Exception:
+        pass
+
+    shelters = SHELTER_FALLBACKS
+    if city:
+        shelters = [item for item in shelters if item.get("city") == city]
+    if district:
+        shelters = [item for item in shelters if item.get("district") == district]
+    return {"status": "success", "data": [normalize_shelter(item) for item in shelters], "source": "fallback"}
+
+@app.get("/api/shelters/nearby")
+async def get_nearby_shelters(lat: float, lng: float, limit: int = 5):
+    try:
+        res = supabase.table("shelters").select("*").execute()
+        shelters = res.data or []
+    except Exception:
+        shelters = SHELTER_FALLBACKS
+
+    if not shelters:
+        shelters = SHELTER_FALLBACKS
+
+    normalized = [normalize_shelter(item, lat, lng) for item in shelters]
+    normalized.sort(key=lambda item: item.get("distance_km", 999999))
+    return {"status": "success", "data": normalized[:limit]}
+
+@app.get("/api/database/schema")
+async def get_database_schema_sql():
+    sql = """
+alter table public.events add column if not exists location text;
+alter table public.events add column if not exists risk_level text default 'low';
+alter table public.events add column if not exists risk_tags jsonb default '[]'::jsonb;
+alter table public.events add column if not exists recommended_action text;
+
+create table if not exists public.shelters (
+  id text primary key,
+  name text not null,
+  city text,
+  district text,
+  address text,
+  lat double precision not null,
+  lng double precision not null,
+  capacity integer,
+  shelter_type text default 'shelter',
+  created_at timestamptz default now()
+);
+
+create table if not exists public.game_scores (
+  id bigint generated by default as identity primary key,
+  player_name text default 'guest',
+  game_type text not null,
+  score integer not null,
+  total_questions integer,
+  correct_count integer,
+  created_at timestamptz default now()
+);
+"""
+    return {"status": "success", "sql": sql.strip()}
 
 @app.get("/api/transport/options")
 async def get_transport_options(
