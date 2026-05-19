@@ -9,6 +9,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, BackgroundTasks, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 from supabase import create_client, Client
@@ -16,7 +17,32 @@ from supabase import create_client, Client
 # 載入金鑰 (堅持使用環境變數，保護安全)
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Disaster Helper Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+async def root():
+    return {
+        "status": "success",
+        "message": "Disaster Helper Backend is running",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "ok",
+        "service": "disaster_helper_backend",
+        "time": datetime.now(timezone(timedelta(hours=8))).isoformat(),
+    }
 
 def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     radius = 6371.0
@@ -128,7 +154,8 @@ def normalize_event(event: dict) -> dict:
     elif ai_text is None:
         ai_text = ""
 
-    transport_type = event.get("transport_type") or determine_transport_type(event.get("url"))
+    event_url = event.get("url") or event.get("transport_ticket_link") or ""
+    transport_type = event.get("transport_type") or determine_transport_type(event_url)
 
     risk_tags = event.get("risk_tags") or []
     if isinstance(risk_tags, str):
@@ -139,8 +166,8 @@ def normalize_event(event: dict) -> dict:
         "title": event.get("title") or "",
         "start_time": event.get("start_time"),
         "end_time": event.get("end_time"),
-        "location": event.get("location") or "",
-        "url": event.get("url") or "",
+        "location": event.get("location") or event.get("location_name") or "",
+        "url": event_url,
         "transport_type": transport_type or "",
         "has_weather_risk": bool(event.get("has_weather_risk", False)),
         "ai_suggestion": str(ai_text),
