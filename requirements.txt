@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 requests
+httpx
 pydantic
 supabase
 python-dotenv

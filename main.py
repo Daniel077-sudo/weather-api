@@ -107,6 +107,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ==========================================
 async def call_gemini_raw(prompt: str):
     """非同步呼叫 Gemini AI，避免拖垮主執行緒"""
+    if not GEMINI_API_KEY:
+        return ""
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -144,6 +147,312 @@ def determine_transport_type(url: Optional[str]) -> Optional[str]:
     elif "thsrc.com.tw" in url_lower: return "thsrc"
     return None
 
+def taipei_now() -> datetime:
+    return datetime.now(timezone(timedelta(hours=8)))
+
+def parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+def extract_element_value(values: Any) -> str:
+    if isinstance(values, list) and values:
+        first = values[0]
+        if isinstance(first, dict):
+            return str(next(iter(first.values()), ""))
+        return str(first)
+    if isinstance(values, dict):
+        return str(next(iter(values.values()), ""))
+    return ""
+
+def parse_weather_periods(dist_data: Optional[dict]) -> List[Dict[str, Any]]:
+    """Normalize CWA weatherElement blocks into frontend-friendly forecast periods."""
+    if not dist_data:
+        return []
+
+    elements = dist_data.get("weatherElement") or dist_data.get("WeatherElement") or []
+    time_map: Dict[str, Dict[str, Any]] = {}
+
+    for element in elements:
+        element_name = element.get("elementName") or element.get("ElementName") or ""
+        times = element.get("time") or element.get("Time") or []
+
+        for item in times:
+            start_time = item.get("startTime") or item.get("StartTime") or item.get("dataTime") or item.get("DataTime")
+            if not start_time:
+                continue
+
+            period = time_map.setdefault(
+                start_time,
+                {
+                    "time": start_time,
+                    "start_time": start_time,
+                    "end_time": item.get("endTime") or item.get("EndTime"),
+                    "temp": 0,
+                    "pop": 0,
+                    "hum": 0,
+                    "description": "未知",
+                    "app_temp": 0,
+                    "uvi": 0,
+                    "wind_speed": "0",
+                },
+            )
+
+            value = extract_element_value(item.get("elementValue") or item.get("ElementValue") or [])
+            if not value:
+                continue
+
+            if element_name == "Wx" or "天氣現象" in element_name:
+                period["description"] = value
+            elif "PoP" in element_name or "降雨機率" in element_name:
+                period["pop"] = safe_int(value)
+            elif element_name in ["T", "MaxT", "MinT"] or "溫度" in element_name:
+                period["temp"] = safe_int(value)
+            elif element_name == "RH" or "相對濕度" in element_name:
+                period["hum"] = safe_int(value)
+            elif element_name == "AT" or "體感溫度" in element_name:
+                period["app_temp"] = safe_int(value)
+            elif element_name == "UVI" or "紫外線" in element_name:
+                period["uvi"] = safe_int(value)
+            elif element_name == "WS" or "風速" in element_name:
+                period["wind_speed"] = value
+
+    return sorted(time_map.values(), key=lambda item: item["time"])
+
+def pick_current_weather(forecast: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not forecast:
+        return {
+            "time": None,
+            "temp": 0,
+            "pop": 0,
+            "hum": 0,
+            "description": "未知",
+            "app_temp": 0,
+            "uvi": 0,
+            "wind_speed": "0",
+        }
+
+    now = taipei_now()
+    future = []
+    for period in forecast:
+        start = parse_datetime(period.get("start_time") or period.get("time"))
+        end = parse_datetime(period.get("end_time"))
+        if start and end and start <= now <= end:
+            return period
+        if start and start >= now:
+            future.append(period)
+    return future[0] if future else forecast[0]
+
+def pick_weather_for_time(forecast: List[Dict[str, Any]], target_time: Optional[datetime]) -> Dict[str, Any]:
+    if not target_time:
+        return pick_current_weather(forecast)
+
+    target = target_time.astimezone(timezone(timedelta(hours=8))) if target_time.tzinfo else target_time.replace(tzinfo=timezone(timedelta(hours=8)))
+    candidates = []
+    for period in forecast:
+        start = parse_datetime(period.get("start_time") or period.get("time"))
+        end = parse_datetime(period.get("end_time"))
+        if start and end and start <= target <= end:
+            return period
+        if start:
+            candidates.append((abs((start - target).total_seconds()), period))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+    return pick_current_weather(forecast)
+
+def analyze_weather_risk(weather: Dict[str, Any]) -> Dict[str, Any]:
+    description = str(weather.get("description") or "")
+    pop = safe_int(weather.get("pop"))
+    uvi = safe_int(weather.get("uvi"))
+    wind_speed = safe_int(weather.get("wind_speed"))
+    tags = []
+
+    if pop >= 70 or any(keyword in description for keyword in ["大雨", "豪雨", "雷雨"]):
+        tags.append("heavy_rain")
+    if any(keyword in description for keyword in ["颱風", "強風"]):
+        tags.append("strong_wind")
+    if uvi >= 8:
+        tags.append("high_uvi")
+    if wind_speed >= 10:
+        tags.append("strong_wind")
+
+    if "heavy_rain" in tags or "strong_wind" in tags:
+        level = "high"
+    elif tags or pop >= 40:
+        level = "medium"
+    else:
+        level = "low"
+
+    return {
+        "risk_level": level,
+        "risk_tags": sorted(set(tags)),
+        "has_weather_risk": level != "low",
+    }
+
+def build_weather_suggestion(city: str, district: str, message: str, weather: Dict[str, Any], risk: Dict[str, Any]) -> str:
+    location = f"{city}{district}"
+    description = weather.get("description") or "天氣未知"
+    pop = safe_int(weather.get("pop"))
+    tags = risk.get("risk_tags") or []
+
+    if "heavy_rain" in tags:
+        return f"{location}降雨機率{pop}%，建議帶雨具並避開低窪、地下道。"
+    if "strong_wind" in tags:
+        return f"{location}可能有強風，外出請避開招牌、路樹與施工圍籬。"
+    if "high_uvi" in tags:
+        return f"{location}紫外線偏高，請補水並做好防曬。"
+    if pop >= 40:
+        return f"{location}有降雨機會，行程「{message}」建議預留交通緩衝。"
+    return f"{location}目前{description}，行程「{message}」可照常，仍請留意最新天氣。"
+
+async def fetch_cwa_forecast(city: str, district: str, seven_day: bool = True) -> Dict[str, Any]:
+    dataset_map = CITY_7DAY_MAP if seven_day else CITY_MAP
+    dataset_id = dataset_map.get(city)
+    if not dataset_id:
+        raise ValueError(f"目前尚不支援 {city} 的天氣查詢")
+    if not CWA_API_KEY:
+        raise ValueError("尚未設定 CWA_API_KEY")
+
+    url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
+    params = {"Authorization": CWA_API_KEY, "format": "JSON"}
+    async with httpx.AsyncClient() as client:
+        res = await client.get(url, params=params, timeout=20.0)
+        res.raise_for_status()
+        dist_data = find_district(res.json(), district)
+
+    forecast = parse_weather_periods(dist_data)
+    if not forecast:
+        raise ValueError(f"找不到 {city}{district} 的天氣資料")
+
+    current = pick_current_weather(forecast)
+    risk = analyze_weather_risk(current)
+    return {
+        "current": current,
+        "forecast": forecast,
+        **risk,
+    }
+
+async def build_weather_snapshot(city: str, district: str, event_time: Optional[datetime] = None) -> Dict[str, Any]:
+    payload = await fetch_cwa_forecast(city, district, seven_day=True)
+    weather = pick_weather_for_time(payload.get("forecast") or [], event_time)
+    risk = analyze_weather_risk(weather)
+    return {
+        "city": city,
+        "district": district,
+        "event_time": event_time.isoformat() if event_time else None,
+        "weather": weather,
+        **risk,
+        "captured_at": taipei_now().isoformat(),
+    }
+
+def risk_rank(level: Optional[str]) -> int:
+    return {"low": 0, "medium": 1, "high": 2}.get(level or "low", 0)
+
+def compare_weather_snapshots(old_snapshot: Dict[str, Any], new_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    old_weather = old_snapshot.get("weather") or old_snapshot.get("current") or {}
+    new_weather = new_snapshot.get("weather") or new_snapshot.get("current") or {}
+    old_risk = old_snapshot.get("risk_level") or analyze_weather_risk(old_weather)["risk_level"]
+    new_risk = new_snapshot.get("risk_level") or analyze_weather_risk(new_weather)["risk_level"]
+    old_tags = set(old_snapshot.get("risk_tags") or [])
+    new_tags = set(new_snapshot.get("risk_tags") or [])
+
+    pop_delta = safe_int(new_weather.get("pop")) - safe_int(old_weather.get("pop"))
+    temp_delta = safe_int(new_weather.get("temp")) - safe_int(old_weather.get("temp"))
+    description_changed = (old_weather.get("description") or "") != (new_weather.get("description") or "")
+    added_tags = sorted(new_tags - old_tags)
+    reasons = []
+
+    if risk_rank(new_risk) > risk_rank(old_risk):
+        reasons.append(f"風險等級由 {old_risk} 升為 {new_risk}")
+    if pop_delta >= 40:
+        reasons.append(f"降雨機率增加 {pop_delta}%")
+    if abs(temp_delta) >= 6:
+        reasons.append(f"溫度變化 {temp_delta:+d} 度")
+    if added_tags:
+        reasons.append(f"新增風險: {', '.join(added_tags)}")
+    if description_changed and risk_rank(new_risk) >= 1:
+        reasons.append(f"天氣由「{old_weather.get('description', '未知')}」變為「{new_weather.get('description', '未知')}」")
+
+    should_notify = bool(reasons) or (risk_rank(new_risk) == 2 and risk_rank(old_risk) < 2)
+    return {
+        "should_notify": should_notify,
+        "severity": new_risk if should_notify else "low",
+        "reasons": reasons,
+        "diff": {
+            "pop_delta": pop_delta,
+            "temp_delta": temp_delta,
+            "old_risk_level": old_risk,
+            "new_risk_level": new_risk,
+            "old_weather": old_weather,
+            "new_weather": new_weather,
+        },
+    }
+
+def resolve_event_location_parts(event: Dict[str, Any]) -> Dict[str, str]:
+    city = event.get("city") or ""
+    district = event.get("district") or ""
+    location = event.get("location") or event.get("location_name") or ""
+
+    if city and district:
+        return {"city": city, "district": district}
+
+    for known_city, districts in TAIWAN_LOCATIONS.items():
+        if known_city in location:
+            city = city or known_city
+            for known_district in districts:
+                if known_district in location:
+                    district = district or known_district
+                    break
+            break
+
+    geocoded = geocode_fallback(location or event.get("title") or "")
+    return {
+        "city": city or geocoded.get("city") or "臺北市",
+        "district": district or geocoded.get("district") or REPRESENTATIVE_DISTRICTS.get(city or geocoded.get("city") or "臺北市", "中正區"),
+    }
+
+def build_alternative_location(city: str, district: str, risk_tags: List[str]) -> str:
+    if "heavy_rain" in risk_tags:
+        return f"{city}{district}附近的室內場館、百貨或捷運站周邊，避免低窪與地下道。"
+    if "strong_wind" in risk_tags:
+        return f"{city}{district}附近的室內空間，避免海邊、河堤、招牌與路樹旁。"
+    if "high_uvi" in risk_tags:
+        return f"{city}{district}附近有遮蔭或室內空調的地點。"
+    return f"{city}{district}附近較安全的室內備案地點。"
+
+async def build_weather_change_message(event: Dict[str, Any], comparison: Dict[str, Any], new_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    title = event.get("title") or "行程"
+    city = new_snapshot.get("city") or ""
+    district = new_snapshot.get("district") or ""
+    risk_tags = new_snapshot.get("risk_tags") or []
+    alternative = build_alternative_location(city, district, risk_tags)
+    reasons_text = "、".join(comparison.get("reasons") or ["天氣風險上升"])
+    local_message = f"「{title}」接近日期天氣變化明顯：{reasons_text}。建議改到{alternative}"
+    prompt = (
+        f"行程:{title}。地點:{city}{district}。天氣變化:{reasons_text}。"
+        f"新天氣:{json.dumps(new_snapshot.get('weather') or {}, ensure_ascii=False)}。"
+        f"請用60字內提醒使用者，並建議更換到更安全地點。"
+    )
+    ai_message = await call_gemini_raw(prompt)
+    if not ai_message or ai_message.startswith("["):
+        ai_message = local_message
+    return {
+        "message": ai_message,
+        "suggested_location": alternative,
+        "suggestion_source": "gemini" if ai_message != local_message else "local_fallback",
+    }
+
 def normalize_event(event: dict) -> dict:
     """Return the exact JSON shape expected by the iOS frontend."""
     ai_text = event.get("ai_suggestion")
@@ -167,6 +476,8 @@ def normalize_event(event: dict) -> dict:
         "start_time": event.get("start_time"),
         "end_time": event.get("end_time"),
         "location": event.get("location") or event.get("location_name") or "",
+        "city": event.get("city") or "",
+        "district": event.get("district") or "",
         "url": event_url,
         "transport_type": transport_type or "",
         "has_weather_risk": bool(event.get("has_weather_risk", False)),
@@ -174,6 +485,7 @@ def normalize_event(event: dict) -> dict:
         "risk_level": event.get("risk_level") or ("medium" if event.get("has_weather_risk") else "low"),
         "risk_tags": risk_tags,
         "recommended_action": event.get("recommended_action") or str(ai_text),
+        "weather_alert_status": event.get("weather_alert_status") or "",
     }
 
 DISASTER_CODE_ALIASES = {
@@ -422,52 +734,85 @@ class UserQuery(BaseModel):
 async def ask_assistant(query: UserQuery):
     try:
         city, district, msg = query.city, query.district, query.message
-        dataset_id = CITY_MAP.get(city)
-        if not dataset_id: return {"status": "error", "message": f"目前尚不支援 {city} 的天氣查詢"}
+        weather_payload: Dict[str, Any] = {}
+        weather_source = "cache"
 
-        weather_url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
-        params = {"Authorization": CWA_API_KEY, "format": "JSON"}
-        
-        wx, pop = "未知", "未知"
         try:
-            # 替換為 httpx 非同步請求
-            async with httpx.AsyncClient() as client:
-                res = await client.get(weather_url, params=params, timeout=15.0)
-                res.raise_for_status()
-                dist_data = find_district(res.json(), district)
-            
-            if dist_data:
-                elements = dist_data.get("weatherElement") or dist_data.get("WeatherElement") or []
-                for el in elements:
-                    en = el.get("elementName") or el.get("ElementName") or ""
-                    try:
-                        times = el.get("time") or el.get("Time") or []
-                        if not times: continue
-                        vals = times[0].get("elementValue") or times[0].get("ElementValue") or []
-                        if not vals: continue
-                        val = list(vals[0].values())[0]
+            cache_res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
+            if cache_res.data:
+                cached_weather = cache_res.data[0].get("weather_data") or {}
+                forecast = cached_weather.get("forecast") or []
+                current = cached_weather.get("current") or pick_current_weather(forecast)
+                weather_payload = {
+                    "current": current,
+                    "forecast": forecast,
+                    **analyze_weather_risk(current),
+                }
+        except Exception as cache_e:
+            print(f"天氣快取讀取失敗: {cache_e}")
 
-                        if "天氣現象" in en: wx = val
-                        elif "降雨機率" in en: pop = val
-                    except: continue
-        except Exception as e:
-            print(f"氣象解析錯誤: {e}") 
+        if not weather_payload:
+            weather_source = "cwa_live"
+            try:
+                weather_payload = await fetch_cwa_forecast(city, district, seven_day=True)
+            except Exception as weather_e:
+                print(f"氣象解析錯誤: {weather_e}")
+                weather_source = "fallback"
+                current = {
+                    "description": "未知",
+                    "pop": 0,
+                    "temp": 0,
+                    "hum": 0,
+                    "app_temp": 0,
+                    "uvi": 0,
+                    "wind_speed": "0",
+                }
+                weather_payload = {
+                    "current": current,
+                    "forecast": [],
+                    **analyze_weather_risk(current),
+                }
 
-        final_prompt = f"地點:{city}{district}，天氣:{wx}，降雨機率:{pop}%。行程:{msg}。請給40字內防災或生活建議。"
-        # 等待非同步的 Gemini 回應
+        current_weather = weather_payload.get("current") or {}
+        local_suggestion = build_weather_suggestion(city, district, msg, current_weather, weather_payload)
+        final_prompt = (
+            f"地點:{city}{district}，天氣:{current_weather.get('description', '未知')}，"
+            f"降雨機率:{safe_int(current_weather.get('pop'))}%，"
+            f"風險等級:{weather_payload.get('risk_level', 'low')}，"
+            f"行程:{msg}。請給40字內防災或生活建議，語氣自然直接。"
+        )
         ai_suggestion = await call_gemini_raw(final_prompt)
+        if not ai_suggestion or ai_suggestion.startswith("["):
+            ai_suggestion = local_suggestion
 
         try:
-            db_data = {"user_input": f"[{city}{district}] {msg}", "ai_response": ai_suggestion}
+            db_data = {
+                "user_input": f"[{city}{district}] {msg}",
+                "ai_response": ai_suggestion,
+            }
             # Supabase Python SDK 目前仍為同步，但在快速寫入下可接受
             supabase.table("chat_logs").insert(db_data).execute()
-        except Exception as db_e:
-            print(f"備份對話紀錄失敗: {db_e}")
+        except Exception as e:
+            print(f"備份對話紀錄失敗: {e}")
 
         return {
+            "status": "success",
             "target_location": f"{city}{district}",
-            "weather": {"wx": wx, "pop": f"{pop}%"},
-            "ai_suggestion": ai_suggestion
+            "weather": {
+                "wx": current_weather.get("description", "未知"),
+                "pop": f"{safe_int(current_weather.get('pop'))}%",
+                "temp": current_weather.get("temp"),
+                "hum": current_weather.get("hum"),
+                "app_temp": current_weather.get("app_temp"),
+                "uvi": current_weather.get("uvi"),
+                "wind_speed": current_weather.get("wind_speed"),
+            },
+            "risk_level": weather_payload.get("risk_level", "low"),
+            "risk_tags": weather_payload.get("risk_tags", []),
+            "has_weather_risk": weather_payload.get("has_weather_risk", False),
+            "ai_suggestion": ai_suggestion,
+            "suggestion_source": "gemini" if ai_suggestion != local_suggestion else "local_fallback",
+            "weather_source": weather_source,
         }
     except Exception as e:
         return {"status": "error", "message": f"解析失敗: {str(e)}"}
@@ -478,59 +823,17 @@ async def ask_assistant(query: UserQuery):
 async def _internal_sync(city: str, district: str):
     """內部背景核心同步邏輯 (加上單一縣市的錯誤捕捉)"""
     try:
-        dataset_id = CITY_7DAY_MAP.get(city)
-        if not dataset_id: return
-        
-        url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
-        params = {"Authorization": CWA_API_KEY, "format": "JSON"}
-        
-        # 替換為 httpx 非同步請求
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url, params=params, timeout=20.0)
-            res.raise_for_status()
-            res_json = res.json()
-        
-        dist_data = find_district(res_json, district)
-        if not dist_data: return
-
-        elements = dist_data.get("weatherElement") or dist_data.get("WeatherElement") or []
-        time_map = {}
-
-        for el in elements:
-            en = el.get("elementName") or el.get("ElementName") or ""
-            times = el.get("time") or el.get("Time") or []
-            
-            for t in times:
-                dt = t.get("dataTime") or t.get("DataTime") or t.get("startTime") or t.get("StartTime")
-                if not dt: continue
-                
-                if dt not in time_map:
-                    time_map[dt] = {
-                        "time": dt, "temp": 0, "pop": 0, "hum": 0, 
-                        "description": "未知", "app_temp": 0, "uvi": 0, "wind_speed": "0"
-                    }
-                
-                try:
-                    vals = t.get("elementValue") or t.get("ElementValue") or []
-                    if not vals: continue
-                    val = list(vals[0].values())[0]
-
-                    if "天氣現象" in en or en == "Wx": time_map[dt]["description"] = val
-                    elif "降雨機率" in en or "PoP" in en: time_map[dt]["pop"] = int(val) if str(val).isdigit() else 0
-                    elif "溫度" in en or en in ["T", "MaxT", "MinT"]: time_map[dt]["temp"] = int(val) if str(val).isdigit() else 0
-                    elif "相對濕度" in en or en == "RH": time_map[dt]["hum"] = int(val) if str(val).isdigit() else 0
-                    elif "體感溫度" in en or en == "AT": time_map[dt]["app_temp"] = int(val) if str(val).lstrip('-').isdigit() else 0 
-                    elif "紫外線" in en or en == "UVI": time_map[dt]["uvi"] = int(val) if str(val).isdigit() else 0
-                    elif "風速" in en or en == "WS": time_map[dt]["wind_speed"] = val 
-                except: continue
-
-        sorted_data = sorted(time_map.values(), key=lambda x: x["time"])
-        if not sorted_data: return
-            
-        now = datetime.now(timezone(timedelta(hours=8)))
+        weather_payload = await fetch_cwa_forecast(city, district, seven_day=True)
+        now = taipei_now()
         db_payload = {
             "city_name": f"{city}{district}",
-            "weather_data": {"current": sorted_data[0], "forecast": sorted_data},
+            "weather_data": {
+                "current": weather_payload["current"],
+                "forecast": weather_payload["forecast"],
+                "risk_level": weather_payload["risk_level"],
+                "risk_tags": weather_payload["risk_tags"],
+                "has_weather_risk": weather_payload["has_weather_risk"],
+            },
             "updated_at": now.isoformat(),
             "valid_until": (now + timedelta(hours=3)).isoformat()
         }
@@ -645,11 +948,39 @@ async def sync_all_taiwan(background_tasks: BackgroundTasks):
 
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
-    """前端讀取天氣專用 (直接從快取拿，速度最快)"""
-    res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
-    if res.data:
-        return res.data[0]
-    return {"error": "資料庫尚無此地區快取，請先觸發同步。"}
+    """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
+    try:
+        res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
+        if res.data:
+            cached = res.data[0]
+            valid_until = parse_datetime(cached.get("valid_until"))
+            cached["status"] = "success"
+            cached["source"] = "cache"
+            cached["stale"] = bool(valid_until and valid_until < taipei_now())
+            return cached
+    except Exception as cache_e:
+        print(f"讀取天氣快取失敗: {cache_e}")
+
+    try:
+        weather_payload = await fetch_cwa_forecast(city, district, seven_day=True)
+        now = taipei_now()
+        return {
+            "status": "success",
+            "source": "cwa_live",
+            "stale": False,
+            "city_name": f"{city}{district}",
+            "weather_data": {
+                "current": weather_payload["current"],
+                "forecast": weather_payload["forecast"],
+                "risk_level": weather_payload["risk_level"],
+                "risk_tags": weather_payload["risk_tags"],
+                "has_weather_risk": weather_payload["has_weather_risk"],
+            },
+            "updated_at": now.isoformat(),
+            "valid_until": (now + timedelta(hours=3)).isoformat(),
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"無法取得 {city}{district} 天氣資料: {str(e)}"}
 
 # ==========================================
 # 🚄 API 5：行程與交通工具判斷 (Events)
@@ -658,6 +989,8 @@ class EventCreate(BaseModel):
     title: str
     start_time: str
     end_time: str
+    city: Optional[str] = None
+    district: Optional[str] = None
     location: Optional[str] = None
     url: Optional[str] = None
     description: Optional[str] = None
@@ -667,6 +1000,7 @@ class EventCreate(BaseModel):
     risk_level: Optional[str] = None
     risk_tags: List[str] = Field(default_factory=list)
     recommended_action: Optional[str] = None
+    weather_snapshot: Optional[Dict[str, Any]] = None
 
 class EventRiskCheckRequest(BaseModel):
     title: Optional[str] = None
@@ -698,6 +1032,31 @@ async def create_event(event: EventCreate):
     try:
         db_payload = event.model_dump(exclude_none=True)
         db_payload["transport_type"] = event.transport_type or determine_transport_type(event.url)
+
+        location_parts = resolve_event_location_parts(db_payload)
+        db_payload["city"] = db_payload.get("city") or location_parts["city"]
+        db_payload["district"] = db_payload.get("district") or location_parts["district"]
+
+        if not db_payload.get("weather_snapshot"):
+            try:
+                event_time = parse_datetime(event.start_time)
+                snapshot = await build_weather_snapshot(db_payload["city"], db_payload["district"], event_time)
+                db_payload["weather_snapshot"] = snapshot
+                db_payload["weather_checked_at"] = snapshot["captured_at"]
+                db_payload["risk_level"] = db_payload.get("risk_level") or snapshot["risk_level"]
+                db_payload["risk_tags"] = db_payload.get("risk_tags") or snapshot["risk_tags"]
+                db_payload["has_weather_risk"] = event.has_weather_risk or snapshot["has_weather_risk"]
+                db_payload["recommended_action"] = db_payload.get("recommended_action") or build_weather_suggestion(
+                    db_payload["city"],
+                    db_payload["district"],
+                    event.title,
+                    snapshot["weather"],
+                    snapshot,
+                )
+                db_payload["ai_suggestion"] = db_payload.get("ai_suggestion") or db_payload["recommended_action"]
+            except Exception as weather_e:
+                print(f"建立行程時取得天氣快照失敗: {weather_e}")
+
         if event.risk_level or event.risk_tags:
             db_payload["has_weather_risk"] = event.has_weather_risk or event.risk_level in ["medium", "high"]
         
@@ -705,7 +1064,11 @@ async def create_event(event: EventCreate):
         try:
             res = supabase.table("events").insert(db_payload).execute()
         except Exception:
-            legacy_keys = {"title", "start_time", "end_time", "url", "description", "transport_type", "has_weather_risk", "ai_suggestion"}
+            legacy_keys = {
+                "title", "start_time", "end_time", "url", "description",
+                "transport_type", "has_weather_risk", "ai_suggestion",
+                "location", "risk_level", "risk_tags", "recommended_action",
+            }
             legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
             res = supabase.table("events").insert(legacy_payload).execute()
         if res.data:
@@ -818,6 +1181,131 @@ async def check_event_risk(payload: EventRiskCheckRequest):
         return {"status": "success", "data": risk_result}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+async def monitor_event_weather_window(hours_ahead: int = 36) -> Dict[str, Any]:
+    now = taipei_now()
+    window_end = now + timedelta(hours=hours_ahead)
+    result = {
+        "checked": 0,
+        "initialized_snapshots": 0,
+        "notifications": [],
+        "errors": [],
+        "window": {
+            "from": now.isoformat(),
+            "to": window_end.isoformat(),
+        },
+    }
+
+    try:
+        res = supabase.table("events").select("*").gte("start_time", now.isoformat()).lte("start_time", window_end.isoformat()).execute()
+        events = res.data or []
+    except Exception as e:
+        return {"status": "error", "message": f"讀取行程失敗: {str(e)}", **result}
+
+    for event in events:
+        result["checked"] += 1
+        event_id = event.get("id")
+        title = event.get("title") or "行程"
+        try:
+            event_time = parse_datetime(event.get("start_time"))
+            location_parts = resolve_event_location_parts(event)
+            new_snapshot = await build_weather_snapshot(location_parts["city"], location_parts["district"], event_time)
+            old_snapshot = event.get("weather_snapshot") or {}
+
+            if not old_snapshot:
+                try:
+                    supabase.table("events").update({
+                        "city": location_parts["city"],
+                        "district": location_parts["district"],
+                        "weather_snapshot": new_snapshot,
+                        "weather_checked_at": taipei_now().isoformat(),
+                    }).eq("id", event_id).execute()
+                except Exception as update_e:
+                    result["errors"].append({"event_id": event_id, "message": f"初始化天氣快照失敗: {update_e}"})
+                result["initialized_snapshots"] += 1
+                continue
+
+            comparison = compare_weather_snapshots(old_snapshot, new_snapshot)
+            if not comparison["should_notify"]:
+                try:
+                    supabase.table("events").update({
+                        "weather_checked_at": taipei_now().isoformat(),
+                    }).eq("id", event_id).execute()
+                except Exception:
+                    pass
+                continue
+
+            reminder = await build_weather_change_message(event, comparison, new_snapshot)
+            notification = {
+                "event_id": event_id,
+                "title": title,
+                "start_time": event.get("start_time"),
+                "location": event.get("location") or f"{location_parts['city']}{location_parts['district']}",
+                "severity": comparison["severity"],
+                "reasons": comparison["reasons"],
+                "message": reminder["message"],
+                "suggested_location": reminder["suggested_location"],
+                "suggestion_source": reminder["suggestion_source"],
+                "old_weather": comparison["diff"]["old_weather"],
+                "new_weather": comparison["diff"]["new_weather"],
+                "created_at": taipei_now().isoformat(),
+            }
+            result["notifications"].append(notification)
+
+            try:
+                supabase.table("event_weather_alerts").insert({
+                    "event_id": str(event_id) if event_id is not None else None,
+                    "title": title,
+                    "message": notification["message"],
+                    "severity": notification["severity"],
+                    "change_summary": {
+                        "reasons": notification["reasons"],
+                        "old_weather": notification["old_weather"],
+                        "new_weather": notification["new_weather"],
+                    },
+                    "suggested_location": notification["suggested_location"],
+                    "created_at": notification["created_at"],
+                    "status": "unread",
+                }).execute()
+            except Exception as insert_e:
+                result["errors"].append({"event_id": event_id, "message": f"提醒寫入失敗: {insert_e}"})
+
+            try:
+                supabase.table("events").update({
+                    "weather_snapshot": new_snapshot,
+                    "weather_checked_at": taipei_now().isoformat(),
+                    "weather_alert_status": "notified",
+                    "has_weather_risk": True,
+                    "risk_level": new_snapshot["risk_level"],
+                    "risk_tags": new_snapshot["risk_tags"],
+                    "recommended_action": notification["message"],
+                    "ai_suggestion": notification["message"],
+                }).eq("id", event_id).execute()
+            except Exception as update_e:
+                result["errors"].append({"event_id": event_id, "message": f"行程提醒狀態更新失敗: {update_e}"})
+
+        except Exception as event_e:
+            result["errors"].append({"event_id": event_id, "message": f"{title} 監測失敗: {event_e}"})
+
+    return {"status": "success", **result}
+
+@app.post("/api/events/weather-monitor")
+async def run_event_weather_monitor(background_tasks: BackgroundTasks, hours_ahead: int = Query(36, ge=1, le=168), background: bool = False):
+    if background:
+        background_tasks.add_task(monitor_event_weather_window, hours_ahead)
+        return {
+            "status": "processing",
+            "message": f"已開始背景檢查未來 {hours_ahead} 小時的行程天氣變化。",
+        }
+    return await monitor_event_weather_window(hours_ahead)
+
+@app.get("/api/events/weather-alerts")
+async def get_event_weather_alerts(limit: int = 20):
+    try:
+        res = supabase.table("event_weather_alerts").select("*").order("created_at", desc=True).limit(limit).execute()
+        return {"status": "success", "data": res.data or []}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "data": []}
 
 @app.get("/api/briefing/today")
 async def get_today_briefing():
@@ -1044,9 +1532,26 @@ async def get_nearby_shelters(lat: float, lng: float, limit: int = 5):
 async def get_database_schema_sql():
     sql = """
 alter table public.events add column if not exists location text;
+alter table public.events add column if not exists city text;
+alter table public.events add column if not exists district text;
 alter table public.events add column if not exists risk_level text default 'low';
 alter table public.events add column if not exists risk_tags jsonb default '[]'::jsonb;
 alter table public.events add column if not exists recommended_action text;
+alter table public.events add column if not exists weather_snapshot jsonb;
+alter table public.events add column if not exists weather_checked_at timestamptz;
+alter table public.events add column if not exists weather_alert_status text default 'none';
+
+create table if not exists public.event_weather_alerts (
+  id bigint generated by default as identity primary key,
+  event_id text,
+  title text,
+  message text not null,
+  severity text default 'medium',
+  change_summary jsonb default '{}'::jsonb,
+  suggested_location text,
+  status text default 'unread',
+  created_at timestamptz default now()
+);
 
 create table if not exists public.shelters (
   id text primary key,
