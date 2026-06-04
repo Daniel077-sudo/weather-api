@@ -12,11 +12,11 @@ from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from config import CRON_STATUS, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
-from gemini_service import call_gemini_raw, call_gemini_vision
+from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from schemas import EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, UserQuery
 from transport_service import build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
-from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, resolve_event_location_parts
+from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
 
 load_dotenv()
 
@@ -377,12 +377,50 @@ async def run_event_weather_monitor(background_tasks: BackgroundTasks, hours_ahe
     return await monitor_event_weather_window(hours_ahead)
 
 @app.get("/api/events/weather-alerts")
-async def get_event_weather_alerts(limit: int = 20):
+async def get_event_weather_alerts(
+    user_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
     try:
-        res = supabase.table("event_weather_alerts").select("*").order("created_at", desc=True).limit(limit).execute()
-        return {"status": "success", "data": res.data or []}
+        query = supabase.table("event_weather_alerts").select("*").order("created_at", desc=True).limit(limit)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        if status:
+            query = query.eq("status", status)
+        res = query.execute()
+        return safe_response("success", res.data or [], "weather alerts loaded", "event_weather_alerts")
     except Exception as e:
-        return {"status": "error", "message": str(e), "data": []}
+        return safe_response("error", [], str(e), "event_weather_alerts", [{"service": "supabase", "message": str(e)}])
+
+
+@app.patch("/api/events/weather-alerts/{alert_id}/read")
+async def mark_event_weather_alert_read(alert_id: int):
+    try:
+        updated = supabase.table("event_weather_alerts").update({
+            "status": "read",
+        }).eq("id", alert_id).execute()
+        return safe_response("success", updated.data or {"id": alert_id, "status": "read"}, "weather alert marked as read", "event_weather_alerts")
+    except Exception as e:
+        return safe_response("error", {"id": alert_id}, str(e), "event_weather_alerts", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/ai/usage-summary")
+async def get_ai_usage_summary():
+    return summarize_ai_usage()
+
+
+@app.get("/api/weather/cache-status")
+async def get_weather_cache_status(limit: int = Query(30, ge=1, le=100)):
+    return summarize_weather_cache(limit)
+
+
+@app.post("/api/weather/cache-refresh")
+async def refresh_weather_cache_endpoint(
+    city: str = Query(...),
+    district: str = Query(...),
+):
+    return await refresh_weather_cache_city(city, district)
 
 @app.get("/api/briefing/today")
 async def get_today_briefing():
@@ -534,6 +572,21 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
         errors.append({"service": "supabase", "message": f"emergency_kit_scans 寫入失敗: {e}"})
 
     return safe_response("success" if not errors else "partial_success", result, "emergency kit vision check completed", "gemini_vision", errors)
+
+
+@app.get("/api/emergency-kit/scans")
+async def get_emergency_kit_scans(
+    user_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    try:
+        query = supabase.table("emergency_kit_scans").select("*").order("created_at", desc=True).limit(limit)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        res = query.execute()
+        return safe_response("success", res.data or [], "emergency kit scans loaded", "emergency_kit_scans")
+    except Exception as e:
+        return safe_response("error", [], str(e), "emergency_kit_scans", [{"service": "supabase", "message": str(e)}])
      
 @app.get("/api/guidelines")
 async def get_guidelines(

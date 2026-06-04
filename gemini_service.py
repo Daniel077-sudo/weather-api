@@ -1,12 +1,62 @@
 import base64
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import httpx
 
 from config import GEMINI_API_KEY, supabase
 from utils import stable_hash, taipei_now
+
+
+def _today_start_iso() -> str:
+    return f"{taipei_now().date().isoformat()}T00:00:00+08:00"
+
+
+def _count_rows(table: str, select_expr: str, created_column: str = "created_at", start_iso: str = "") -> Dict[str, Any]:
+    try:
+        query = supabase.table(table).select(select_expr, count="exact")
+        if start_iso:
+            query = query.gte(created_column, start_iso)
+        res = query.execute()
+        return {"count": res.count if res.count is not None else len(res.data or []), "rows": res.data or []}
+    except Exception as e:
+        return {"count": 0, "rows": [], "error": str(e)}
+
+
+def summarize_ai_usage() -> Dict[str, Any]:
+    today_start = _today_start_iso()
+    cache_today = _count_rows("ai_suggestion_cache", "*", "created_at", today_start)
+    cache_total = _count_rows("ai_suggestion_cache", "*")
+    vision_today = _count_rows("emergency_kit_scans", "id,created_at", "created_at", today_start)
+
+    errors: List[Dict[str, str]] = []
+    for table_name, result in [
+        ("ai_suggestion_cache_today", cache_today),
+        ("ai_suggestion_cache_total", cache_total),
+        ("emergency_kit_scans_today", vision_today),
+    ]:
+        if result.get("error"):
+            errors.append({"table": table_name, "message": result["error"]})
+
+    data = {
+        "date": taipei_now().date().isoformat(),
+        "gemini_text_cache_created_today": cache_today["count"],
+        "gemini_text_cache_entries_total": cache_total["count"],
+        "vision_scans_today": vision_today["count"],
+        "estimated_text_calls_saved_by_cache": max(cache_total["count"] - cache_today["count"], 0),
+        "notes": [
+            "gemini_text_cache_created_today 代表今天新增的 Gemini 結構化建議快取。",
+            "目前未逐筆記錄 cache hit 次數，因此 saved_by_cache 為保守估算。",
+        ],
+    }
+    return {
+        "status": "success" if not errors else "partial_success",
+        "data": data,
+        "message": "AI usage summary loaded",
+        "source": "supabase",
+        "errors": errors,
+    }
 
 async def call_gemini_raw(prompt: str):
     """非同步呼叫 Gemini AI，避免拖垮主執行緒"""

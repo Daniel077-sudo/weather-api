@@ -352,11 +352,12 @@ async def _internal_sync(city: str, district: str):
             "valid_until": (now + timedelta(hours=3)).isoformat()
         }
         supabase.table("weather_cache").upsert(db_payload, on_conflict="city_name").execute()
-        print(f"✅ 已同步: {city}{district} (含擴充裝備)")
+        print(f"[weather_sync] synced: {city}{district}")
+        return {"success": True, "city_name": f"{city}{district}", "refreshed_at": now.isoformat()}
         
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ 同步 {city} 失敗: {error_msg}")
+        print(f"[weather_sync] failed: {city} {error_msg}")
         try:
             supabase.table("sync_logs").insert({
                 "task_name": f"weather_sync_{city}",
@@ -365,6 +366,7 @@ async def _internal_sync(city: str, district: str):
             }).execute()
         except Exception:
             pass
+        return {"success": False, "city_name": f"{city}{district}", "message": error_msg}
 
 
 async def _delayed_sync(city: str, district: str, delay_seconds: int):
@@ -376,7 +378,7 @@ async def _delayed_sync(city: str, district: str, delay_seconds: int):
 async def _master_alert_and_log():
     """📍 最終任務：抓取真實氣象署警報並寫入日誌 (移除 delay_seconds，交由 orchestrator 控制)"""
     try:
-        print("🚨 開始向氣象署請求真實警報資料...")
+        print("[weather_alerts] fetching CWA alerts")
         
         # 1. 抓取真實氣象署特報 (W-C0033-002)
         alert_url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/W-C0033-002"
@@ -414,9 +416,9 @@ async def _master_alert_and_log():
         # 3. 寫入資料庫 (weather_alerts)
         if active_alerts:
             supabase.table("weather_alerts").insert(active_alerts).execute()
-            print(f"🚨 成功寫入 {len(active_alerts)} 筆真實氣象警報！")
+            print(f"[weather_alerts] inserted {len(active_alerts)} alerts")
         else:
-            print("🌤️ 目前全台天氣穩定，無特殊氣象警報。")
+            print("[weather_alerts] no active alerts")
 
         # 4. 寫入排程總結日誌 (翊翔的需求)
         supabase.table("sync_logs").insert({
@@ -424,11 +426,11 @@ async def _master_alert_and_log():
             "status": "success",
             "message": "全台 22 縣市天氣與真實警報排程執行完畢"
         }).execute()
-        print("✅ 系統排程總結已記錄至 sync_logs")
+        print("[weather_alerts] summary logged")
 
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ 警報抓取或排程總結日誌寫入失敗: {error_msg}")
+        print(f"[weather_alerts] failed: {error_msg}")
         
         supabase.table("sync_logs").insert({
             "task_name": "weather_update_all",
@@ -490,8 +492,11 @@ async def refresh_expired_weather_cache(force: bool = False) -> Dict[str, Any]:
             continue
 
         try:
-            await _internal_sync(parts["city"], parts["district"])
-            refreshed.append({"city_name": city_name, "refreshed_at": taipei_now().isoformat()})
+            result = await _internal_sync(parts["city"], parts["district"])
+            if result.get("success"):
+                refreshed.append({"city_name": city_name, "refreshed_at": result.get("refreshed_at")})
+            else:
+                errors.append({"city_name": city_name, "message": result.get("message") or "同步失敗"})
         except Exception as e:
             errors.append({"city_name": city_name, "message": str(e)})
 
@@ -512,5 +517,89 @@ async def refresh_expired_weather_cache(force: bool = False) -> Dict[str, Any]:
     })
     log_sync("refresh_weather_cache", status, message, "cron", payload)
     return safe_response(status, payload, message, "cron", errors)
+
+
+async def refresh_weather_cache_city(city: str, district: str) -> Dict[str, Any]:
+    try:
+        result = await _internal_sync(city, district)
+        if not result.get("success"):
+            return safe_response(
+                "error",
+                {"city": city, "district": district, "city_name": result.get("city_name")},
+                f"weather_cache refresh failed: {result.get('message') or '同步失敗'}",
+                "cwa",
+                [{"service": "cwa", "message": result.get("message") or "同步失敗"}],
+            )
+        city_name = f"{city}{district}"
+        return safe_response(
+            "success",
+            {"city": city, "district": district, "city_name": city_name, "refreshed_at": result.get("refreshed_at")},
+            f"{city_name} weather_cache refreshed",
+            "cwa",
+        )
+    except Exception as e:
+        return safe_response(
+            "error",
+            {"city": city, "district": district},
+            f"weather_cache refresh failed: {e}",
+            "cwa",
+            [{"service": "cwa", "message": str(e)}],
+        )
+
+
+def summarize_weather_cache(limit: int = 30) -> Dict[str, Any]:
+    now = taipei_now()
+    try:
+        res = (
+            supabase.table("weather_cache")
+            .select("city_name,updated_at,valid_until,weather_data")
+            .order("valid_until")
+            .limit(limit)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as e:
+        return safe_response(
+            "error",
+            {"items": [], "total": 0, "expired_count": 0, "fresh_count": 0},
+            f"讀取 weather_cache 失敗: {e}",
+            "supabase",
+            [{"service": "supabase", "message": str(e)}],
+        )
+
+    items = []
+    expired_count = 0
+    fresh_count = 0
+    for row in rows:
+        valid_until = parse_datetime(row.get("valid_until"))
+        is_expired = not valid_until or valid_until <= now
+        expired_count += 1 if is_expired else 0
+        fresh_count += 0 if is_expired else 1
+        weather_data = row.get("weather_data") or {}
+        current = weather_data.get("current") or {}
+        items.append({
+            "city_name": row.get("city_name"),
+            "updated_at": row.get("updated_at"),
+            "valid_until": row.get("valid_until"),
+            "is_expired": is_expired,
+            "description": current.get("description"),
+            "pop": current.get("pop"),
+            "temp": current.get("temp"),
+            "risk_level": weather_data.get("risk_level"),
+            "risk_tags": weather_data.get("risk_tags") or [],
+        })
+
+    return safe_response(
+        "success",
+        {
+            "items": items,
+            "total": len(items),
+            "expired_count": expired_count,
+            "fresh_count": fresh_count,
+            "checked_at": now.isoformat(),
+        },
+        "weather cache status loaded",
+        "weather_cache",
+    )
 
 
