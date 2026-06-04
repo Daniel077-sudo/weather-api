@@ -1,0 +1,38 @@
+name: Incident monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scan Threads incidents
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          THREADS_PROVIDER: official
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          THREADS_API_BASE_URL: ${{ secrets.THREADS_API_BASE_URL }}
+          THREADS_SEARCH_URL: ${{ secrets.THREADS_SEARCH_URL }}
+          THREADS_KEYWORD_SEARCH_PATH: ${{ secrets.THREADS_KEYWORD_SEARCH_PATH }}
+          THREADS_SEARCH_QUERY_PARAM: ${{ secrets.THREADS_SEARCH_QUERY_PARAM }}
+          THREADS_SCAN_KEYWORDS: ${{ vars.THREADS_SCAN_KEYWORDS }}
+          THREADS_SCAN_MAX_KEYWORDS: ${{ vars.THREADS_SCAN_MAX_KEYWORDS }}
+          THREADS_SCAN_POST_LIMIT: ${{ vars.THREADS_SCAN_POST_LIMIT }}
+          THREADS_SCAN_REPLY_LIMIT: ${{ vars.THREADS_SCAN_REPLY_LIMIT }}
+          INCIDENT_NOTIFY_CONFIDENCE: ${{ vars.INCIDENT_NOTIFY_CONFIDENCE }}
+        run: python scripts/incident_scanner.py

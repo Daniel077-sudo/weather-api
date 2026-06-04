@@ -13,6 +13,7 @@ from config import CRON_STATUS, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
+from incident_service import get_incident, list_incidents, scan_threads_incidents
 from schemas import EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, UserQuery
 from transport_service import build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
@@ -408,6 +409,33 @@ async def mark_event_weather_alert_read(alert_id: int):
 @app.get("/api/ai/usage-summary")
 async def get_ai_usage_summary():
     return summarize_ai_usage()
+
+
+@app.post("/api/cron/incident-monitor")
+async def run_incident_monitor(background_tasks: BackgroundTasks, background: bool = Query(False)):
+    if background:
+        background_tasks.add_task(scan_threads_incidents)
+        return safe_response("processing", {}, "incident scan started in background", "threads")
+    return await scan_threads_incidents()
+
+
+@app.get("/api/incidents/latest")
+async def get_latest_incidents(limit: int = Query(20, ge=1, le=100)):
+    return list_incidents(limit=limit)
+
+
+@app.get("/api/incidents")
+async def get_incidents(
+    city: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    return list_incidents(limit=limit, city=city, incident_type=type)
+
+
+@app.get("/api/incidents/{incident_id}")
+async def get_incident_detail(incident_id: int):
+    return get_incident(incident_id)
 
 
 @app.get("/api/weather/cache-status")

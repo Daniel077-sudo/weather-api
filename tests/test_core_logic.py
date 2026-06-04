@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import main
 from gemini_service import parse_json_object
+from incident_service import classify_incident_type, extract_locations
 from transport_service import build_tdx_status
 from weather_service import compare_weather_snapshots, parse_weather_periods
 
@@ -60,6 +61,15 @@ class CoreLogicTests(unittest.TestCase):
         response = client.post("/api/integrations/timetree/sync")
         self.assertEqual(response.status_code, 200)
         self.assertIn(response.json()["status"], ["not_configured", "partial_success", "success"])
+
+    def test_incident_location_extraction(self):
+        locations = extract_locations(["台中市西屯區逢甲商圈附近濃煙很大", "文華路有消防車"])
+        self.assertIn("台中市西屯區", locations)
+        self.assertIn("文華路", locations)
+
+    def test_incident_type_classification(self):
+        self.assertEqual(classify_incident_type("剛剛看到消防車和濃煙"), "fire")
+        self.assertEqual(classify_incident_type("路口發生車禍大塞車"), "traffic_accident")
 
 
 if __name__ == "__main__":
