@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import math
+import base64
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -127,6 +128,69 @@ async def call_gemini_raw(prompt: str):
     except Exception as e:
         return f"[連線錯誤]: {str(e)}"
 
+def safe_response(status: str, data: Any = None, message: str = "", source: str = "backend", errors: Optional[List[Any]] = None) -> Dict[str, Any]:
+    return {
+        "status": status,
+        "data": data if data is not None else {},
+        "message": message,
+        "source": source,
+        "errors": errors or [],
+    }
+
+def parse_json_object(text: str) -> Dict[str, Any]:
+    if not text:
+        return {}
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        cleaned = cleaned.replace("json\n", "", 1).replace("JSON\n", "", 1)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end >= start:
+        cleaned = cleaned[start:end + 1]
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+async def call_gemini_json(prompt: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    text = await call_gemini_raw(prompt)
+    parsed = parse_json_object(text)
+    return parsed or fallback
+
+async def call_gemini_vision(image_bytes: bytes, mime_type: str, prompt: str) -> Dict[str, Any]:
+    if not GEMINI_API_KEY:
+        return {}
+
+    model = os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": base64.b64encode(image_bytes).decode("ascii"),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.2},
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=45.0)
+            response.raise_for_status()
+            res_json = response.json()
+            text = res_json.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            return parse_json_object(text)
+    except Exception:
+        return {}
+
 def find_district(data, target):
     if isinstance(data, dict):
         if data.get("locationName") == target or data.get("LocationName") == target: return data
@@ -145,6 +209,53 @@ def determine_transport_type(url: Optional[str]) -> Optional[str]:
     url_lower = url.lower()
     if "railway.gov.tw" in url_lower or "tra" in url_lower: return "tra"
     elif "thsrc.com.tw" in url_lower: return "thsrc"
+    return None
+
+def build_transport_links(origin: str = "", destination: str = "", transport_type: Optional[str] = None) -> List[Dict[str, str]]:
+    origin_q = quote(origin or "")
+    destination_q = quote(destination or "")
+    links = []
+    if transport_type in [None, "", "thsrc"]:
+        links.append({"transport_type": "thsrc", "title": "高鐵訂票", "url": "https://www.thsrc.com.tw/"})
+    if transport_type in [None, "", "tra"]:
+        links.append({"transport_type": "tra", "title": "台鐵訂票", "url": "https://www.railway.gov.tw/"})
+    links.append({
+        "transport_type": "maps",
+        "title": "Google Maps 路線",
+        "url": f"https://www.google.com/maps/dir/?api=1&origin={origin_q}&destination={destination_q}&travelmode=transit",
+    })
+    return links
+
+def build_traffic_risk(weather_snapshot: Dict[str, Any], transport_type: Optional[str] = None) -> Dict[str, Any]:
+    risk_tags = weather_snapshot.get("risk_tags") or []
+    weather = weather_snapshot.get("weather") or weather_snapshot.get("current") or {}
+    warnings = []
+    level = weather_snapshot.get("risk_level") or "low"
+
+    if "heavy_rain" in risk_tags:
+        warnings.append("大雨可能造成道路積水、班次延誤或步行轉乘不便。")
+    if "strong_wind" in risk_tags:
+        warnings.append("強風可能影響高架路段、機車與戶外候車安全。")
+    if safe_int(weather.get("pop")) >= 40:
+        warnings.append("有降雨機率，建議預留交通緩衝時間。")
+    if transport_type == "tra":
+        warnings.append("台鐵受天候與路線狀況影響時，請出發前確認即時營運公告。")
+    if transport_type == "thsrc":
+        warnings.append("高鐵通常較穩定，但仍建議確認班次與接駁交通。")
+
+    return {
+        "level": level,
+        "warnings": warnings or ["目前未偵測到明顯交通天氣風險。"],
+        "tdx_status": "not_configured",
+        "tdx_message": "目前未串接 TDX；先回傳高鐵/台鐵官方訂票與 Google Maps 備援連結。",
+    }
+
+def split_city_district(city_name: str) -> Optional[Dict[str, str]]:
+    for city in sorted(CITY_7DAY_MAP.keys(), key=len, reverse=True):
+        if city_name.startswith(city):
+            district = city_name[len(city):]
+            if district:
+                return {"city": city, "district": district}
     return None
 
 def taipei_now() -> datetime:
@@ -620,6 +731,19 @@ SHELTER_FALLBACKS = [
 
 GAME_SCORE_MEMORY: List[Dict[str, Any]] = []
 
+REQUIRED_EMERGENCY_KIT_ITEMS = [
+    "飲用水",
+    "乾糧",
+    "手電筒",
+    "行動電源",
+    "急救包",
+    "口罩",
+    "哨子",
+    "濕紙巾",
+    "個人藥品",
+    "身分證件影本",
+]
+
 def normalize_disaster_code(disaster: Optional[str]) -> str:
     if not disaster:
         return ""
@@ -946,6 +1070,57 @@ async def sync_all_taiwan(background_tasks: BackgroundTasks):
         "message": f"已啟動全台 {len(REPRESENTATIVE_DISTRICTS)} 縣市同步任務，將依序完成並記錄日誌。"
     }
 
+async def refresh_expired_weather_cache(force: bool = False) -> Dict[str, Any]:
+    now = taipei_now()
+    refreshed = []
+    skipped = []
+    errors = []
+
+    try:
+        res = supabase.table("weather_cache").select("city_name,valid_until").execute()
+        cache_rows = res.data or []
+    except Exception as e:
+        return safe_response("error", {"refreshed": [], "skipped": [], "errors": []}, f"讀取 weather_cache 失敗: {e}", "supabase")
+
+    for row in cache_rows:
+        city_name = row.get("city_name") or ""
+        parts = split_city_district(city_name)
+        if not parts:
+            errors.append({"city_name": city_name, "message": "無法解析 city_name"})
+            continue
+
+        valid_until = parse_datetime(row.get("valid_until"))
+        should_refresh = force or not valid_until or valid_until <= now
+        if not should_refresh:
+            skipped.append({"city_name": city_name, "valid_until": row.get("valid_until")})
+            continue
+
+        try:
+            await _internal_sync(parts["city"], parts["district"])
+            refreshed.append({"city_name": city_name, "refreshed_at": taipei_now().isoformat()})
+        except Exception as e:
+            errors.append({"city_name": city_name, "message": str(e)})
+
+    return safe_response(
+        "success" if not errors else "partial_success",
+        {
+            "refreshed": refreshed,
+            "skipped": skipped,
+            "errors": errors,
+            "checked": len(cache_rows),
+        },
+        "weather_cache refresh completed",
+        "cron",
+        errors,
+    )
+
+@app.post("/api/cron/refresh-weather-cache")
+async def cron_refresh_weather_cache(background_tasks: BackgroundTasks, force: bool = False, background: bool = True):
+    if background:
+        background_tasks.add_task(refresh_expired_weather_cache, force)
+        return safe_response("processing", {"force": force}, "weather_cache refresh started in background", "cron")
+    return await refresh_expired_weather_cache(force)
+
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
@@ -1026,6 +1201,19 @@ class GameScoreCreate(BaseModel):
 
 class GeocodeRequest(BaseModel):
     query: str
+
+class EmergencyKitVisionResult(BaseModel):
+    user_id: Optional[str] = None
+    kit_id: Optional[str] = None
+    detected_items: List[str] = Field(default_factory=list)
+    missing_items: List[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+class EmergencyKitVisionRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
+    user_id: Optional[str] = None
+    kit_id: Optional[str] = None
 
 @app.post("/events")
 async def create_event(event: EventCreate):
@@ -1128,12 +1316,18 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     location = payload.location or "".join(part for part in [payload.city, payload.district] if part) or "目的地"
     weather_text = ""
     alert_text = ""
+    weather_payload: Dict[str, Any] = {}
 
     try:
         if payload.city and payload.district:
             cache = supabase.table("weather_cache").select("*").eq("city_name", f"{payload.city}{payload.district}").execute()
             if cache.data:
                 weather_data = cache.data[0].get("weather_data") or {}
+                current = weather_data.get("current") or {}
+                weather_payload = {
+                    "weather": current,
+                    **analyze_weather_risk(current),
+                }
                 weather_text = json.dumps(weather_data, ensure_ascii=False)
     except Exception as e:
         weather_text = f"weather_cache unavailable: {e}"
@@ -1155,6 +1349,34 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     ])
     risk = analyze_text_risk(combined_text)
     action = build_recommended_action(risk["risk_level"], risk["risk_tags"], location)
+    if weather_payload:
+        risk = {
+            "has_weather_risk": weather_payload["has_weather_risk"] or risk["has_weather_risk"],
+            "risk_level": weather_payload["risk_level"] if risk_rank(weather_payload["risk_level"]) >= risk_rank(risk["risk_level"]) else risk["risk_level"],
+            "risk_tags": sorted(set(weather_payload["risk_tags"] + risk["risk_tags"])),
+        }
+        action = build_weather_suggestion(payload.city or "", payload.district or "", payload.title or payload.activity or "行程", weather_payload["weather"], risk)
+
+    fallback_ai = {
+        "intent": payload.activity or "commuting",
+        "risk_summary": action,
+        "recommended_action": action,
+        "alternative_location": build_alternative_location(payload.city or "", payload.district or "", risk["risk_tags"]),
+        "confidence": 0.65,
+    }
+    prompt = (
+        "你是防災行程助理。請只回傳 JSON，不要 markdown。\n"
+        f"行程:{payload.title or ''}\n"
+        f"時間:{payload.start_time or ''} 到 {payload.end_time or ''}\n"
+        f"地點:{location}\n"
+        f"活動:{payload.activity or ''}\n"
+        f"交通:{payload.transport_type or ''}\n"
+        f"天氣:{weather_text}\n"
+        f"警報:{alert_text}\n"
+        "JSON 欄位: intent, risk_summary, recommended_action, alternative_location, confidence。"
+    )
+    ai_structured = await call_gemini_json(prompt, fallback_ai)
+    traffic_risk = build_traffic_risk(weather_payload or risk, payload.transport_type)
 
     return {
         "event": {
@@ -1166,11 +1388,16 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
             "transport_type": payload.transport_type,
         },
         **risk,
-        "recommended_action": action,
-        "ai_suggestion": action,
+        "recommended_action": ai_structured.get("recommended_action") or action,
+        "ai_suggestion": ai_structured.get("risk_summary") or action,
+        "ai_intent": ai_structured,
+        "traffic_risk": traffic_risk,
+        "booking_links": build_transport_links("", location, payload.transport_type),
         "sources": {
             "weather_cache_used": bool(weather_text and "unavailable" not in weather_text),
             "weather_alerts_used": bool(alert_text and "unavailable" not in alert_text),
+            "gemini_used": ai_structured != fallback_ai,
+            "tdx_used": False,
         },
     }
 
@@ -1246,6 +1473,8 @@ async def monitor_event_weather_window(hours_ahead: int = 36) -> Dict[str, Any]:
                 "message": reminder["message"],
                 "suggested_location": reminder["suggested_location"],
                 "suggestion_source": reminder["suggestion_source"],
+                "traffic_risk": build_traffic_risk(new_snapshot, event.get("transport_type")),
+                "booking_links": build_transport_links("", event.get("location") or f"{location_parts['city']}{location_parts['district']}", event.get("transport_type")),
                 "old_weather": comparison["diff"]["old_weather"],
                 "new_weather": comparison["diff"]["new_weather"],
                 "created_at": taipei_now().isoformat(),
@@ -1262,6 +1491,8 @@ async def monitor_event_weather_window(hours_ahead: int = 36) -> Dict[str, Any]:
                         "reasons": notification["reasons"],
                         "old_weather": notification["old_weather"],
                         "new_weather": notification["new_weather"],
+                        "traffic_risk": notification["traffic_risk"],
+                        "booking_links": notification["booking_links"],
                     },
                     "suggested_location": notification["suggested_location"],
                     "created_at": notification["created_at"],
@@ -1363,7 +1594,85 @@ async def get_alerts():
     except Exception as e:
         print(f"❌ 讀取警報失敗: {e}")
         return {"status": "error", "message": f"伺服器錯誤: {str(e)}"}
-    
+
+@app.post("/api/emergency-kit/vision-check")
+async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if payload.mime_type not in allowed_types:
+        return safe_response(
+            "error",
+            {"detected_items": [], "missing_items": REQUIRED_EMERGENCY_KIT_ITEMS},
+            "只支援 jpeg/png/webp 圖片。",
+            "validation",
+        )
+
+    image_base64 = payload.image_base64
+    if "," in image_base64:
+        image_base64 = image_base64.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except Exception:
+        return safe_response(
+            "error",
+            {"detected_items": [], "missing_items": REQUIRED_EMERGENCY_KIT_ITEMS},
+            "image_base64 格式錯誤。",
+            "validation",
+        )
+
+    if len(image_bytes) > 8 * 1024 * 1024:
+        return safe_response(
+            "error",
+            {"detected_items": [], "missing_items": REQUIRED_EMERGENCY_KIT_ITEMS},
+            "圖片超過 8MB，請壓縮後再上傳。",
+            "validation",
+        )
+
+    prompt = (
+        "你是台灣防災避難包檢查助手。請辨識圖片中出現的避難物資。"
+        "只回傳 JSON，不要 markdown。"
+        f"必要物資清單:{json.dumps(REQUIRED_EMERGENCY_KIT_ITEMS, ensure_ascii=False)}。"
+        "JSON 欄位: detected_items(陣列), missing_items(陣列), extra_items(陣列), confidence(0到1), notes(字串)。"
+    )
+    vision_result = await call_gemini_vision(image_bytes, payload.mime_type, prompt)
+    detected_items = vision_result.get("detected_items") or []
+    if not isinstance(detected_items, list):
+        detected_items = []
+    detected_text = " ".join(str(item) for item in detected_items)
+    missing_items = [
+        item for item in REQUIRED_EMERGENCY_KIT_ITEMS
+        if item not in detected_items and item not in detected_text
+    ]
+    if isinstance(vision_result.get("missing_items"), list) and vision_result.get("missing_items"):
+        missing_items = sorted(set(missing_items + [str(item) for item in vision_result["missing_items"]]))
+
+    result = {
+        "user_id": payload.user_id,
+        "kit_id": payload.kit_id,
+        "detected_items": [str(item) for item in detected_items],
+        "missing_items": missing_items,
+        "extra_items": vision_result.get("extra_items") or [],
+        "confidence": vision_result.get("confidence") or 0,
+        "notes": vision_result.get("notes") or ("Gemini Vision 未回傳結果，請重新拍攝清楚的避難包照片。" if not vision_result else ""),
+        "checked_at": taipei_now().isoformat(),
+    }
+    errors = []
+
+    try:
+        supabase.table("emergency_kit_scans").insert({
+            "user_id": payload.user_id,
+            "kit_id": payload.kit_id,
+            "detected_items": result["detected_items"],
+            "missing_items": result["missing_items"],
+            "extra_items": result["extra_items"],
+            "confidence": result["confidence"],
+            "notes": result["notes"],
+            "created_at": result["checked_at"],
+        }).execute()
+    except Exception as e:
+        errors.append({"service": "supabase", "message": f"emergency_kit_scans 寫入失敗: {e}"})
+
+    return safe_response("success" if not errors else "partial_success", result, "emergency kit vision check completed", "gemini_vision", errors)
+     
 @app.get("/api/guidelines")
 async def get_guidelines(
     activity: Optional[str] = Query(None),
@@ -1550,6 +1859,18 @@ create table if not exists public.event_weather_alerts (
   change_summary jsonb default '{}'::jsonb,
   suggested_location text,
   status text default 'unread',
+  created_at timestamptz default now()
+);
+
+create table if not exists public.emergency_kit_scans (
+  id bigint generated by default as identity primary key,
+  user_id text,
+  kit_id text,
+  detected_items jsonb default '[]'::jsonb,
+  missing_items jsonb default '[]'::jsonb,
+  extra_items jsonb default '[]'::jsonb,
+  confidence double precision default 0,
+  notes text,
   created_at timestamptz default now()
 );
 
