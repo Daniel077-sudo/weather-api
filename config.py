@@ -49,7 +49,18 @@ THREADS_SCAN_MAX_KEYWORDS = env_int("THREADS_SCAN_MAX_KEYWORDS", 8)
 THREADS_SCAN_POST_LIMIT = env_int("THREADS_SCAN_POST_LIMIT", 5)
 THREADS_SCAN_REPLY_LIMIT = env_int("THREADS_SCAN_REPLY_LIMIT", 20)
 INCIDENT_NOTIFY_CONFIDENCE = env_float("INCIDENT_NOTIFY_CONFIDENCE", 0.75)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+class MissingSupabaseClient:
+    def table(self, *_args, **_kwargs):
+        raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is missing")
+
+
+supabase: Client | MissingSupabaseClient
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    supabase = MissingSupabaseClient()
 
 CRON_STATUS: Dict[str, Any] = {
     "last_started_at": None,
