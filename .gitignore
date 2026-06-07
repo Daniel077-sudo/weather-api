@@ -4,6 +4,7 @@
 # 隱藏 Python 執行時自動產生的暫存資料夾
 __pycache__/
 *.pyc
+venv/
 
 # Local tunneling binary for frontend testing
 ngrok.exe

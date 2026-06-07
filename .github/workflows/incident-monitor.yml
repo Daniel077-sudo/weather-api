@@ -19,12 +19,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install browser
+        run: python -m playwright install --with-deps chromium
+
       - name: Scan Threads incidents
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          THREADS_PROVIDER: duckduckgo
+          THREADS_PROVIDER: public_browser
           BING_SEARCH_BASE_URL: ${{ vars.BING_SEARCH_BASE_URL }}
           BING_SEARCH_MARKET: ${{ vars.BING_SEARCH_MARKET }}
           BING_SEARCH_TIMEOUT_SECONDS: ${{ vars.BING_SEARCH_TIMEOUT_SECONDS }}
@@ -34,4 +37,4 @@ jobs:
           THREADS_SCAN_POST_LIMIT: ${{ vars.THREADS_SCAN_POST_LIMIT }}
           THREADS_SCAN_REPLY_LIMIT: ${{ vars.THREADS_SCAN_REPLY_LIMIT }}
           INCIDENT_NOTIFY_CONFIDENCE: ${{ vars.INCIDENT_NOTIFY_CONFIDENCE }}
-        run: python scripts/incident_scanner.py
+        run: python scripts/threads_public_browser_scanner.py

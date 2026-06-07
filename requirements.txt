@@ -5,3 +5,4 @@ httpx
 pydantic
 supabase
 python-dotenv
+playwright
