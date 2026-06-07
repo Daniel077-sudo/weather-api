@@ -9,6 +9,7 @@ import httpx
 
 from config import (
     BING_SEARCH_BASE_URL,
+    BING_THREADS_SITE,
     BING_SEARCH_MARKET,
     BING_SEARCH_TIMEOUT_SECONDS,
     THREADS_ACCESS_TOKEN,
@@ -142,7 +143,11 @@ def _is_threads_url(url: str) -> bool:
         host = urlparse(url).netloc.lower()
     except Exception:
         return False
-    return host in {"threads.net", "www.threads.net"} or host.endswith(".threads.net")
+    return (
+        host in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
+        or host.endswith(".threads.com")
+        or host.endswith(".threads.net")
+    )
 
 
 def _normalize_bing_url(url: str) -> str:
@@ -270,7 +275,7 @@ async def _fetch_html(url: str) -> str:
 
 
 async def _search_bing_keyword(keyword: str, limit: int) -> Dict[str, Any]:
-    query = f"site:threads.net {keyword} 台灣"
+    query = f"site:{BING_THREADS_SITE} {keyword} 台灣"
     url = f"{BING_SEARCH_BASE_URL}?q={quote_plus(query)}&mkt={quote_plus(BING_SEARCH_MARKET)}"
     try:
         html_text = await _fetch_html(url)
