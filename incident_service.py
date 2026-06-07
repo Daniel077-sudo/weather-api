@@ -8,6 +8,7 @@ from config import (
     THREADS_SCAN_MAX_KEYWORDS,
     THREADS_SCAN_POST_LIMIT,
     THREADS_SCAN_REPLY_LIMIT,
+    THREADS_PROVIDER,
 )
 from threads_service import fetch_threads_replies, search_threads_keyword, threads_is_configured
 from utils import safe_response, stable_hash, taipei_now
@@ -115,12 +116,13 @@ def _store_incident(report: Dict[str, Any], evidence: List[Dict[str, Any]]) -> D
 
 
 async def scan_threads_incidents() -> Dict[str, Any]:
+    response_source = "bing" if THREADS_PROVIDER == "bing" else "threads"
     if not threads_is_configured():
         return safe_response(
             "not_configured",
             {"incidents": [], "keywords": incident_keywords()},
             "THREADS_ACCESS_TOKEN is missing or THREADS_PROVIDER is not official",
-            "threads",
+            response_source,
         )
 
     incidents = []
@@ -135,10 +137,13 @@ async def scan_threads_incidents() -> Dict[str, Any]:
 
         for post in search["data"]:
             checked_posts += 1
-            replies_result = await fetch_threads_replies(post.get("source_id") or "", THREADS_SCAN_REPLY_LIMIT)
-            replies = replies_result.get("data") or []
-            if replies_result["status"] == "error":
-                errors.extend(replies_result.get("errors") or [])
+            if isinstance(post.get("_replies"), list):
+                replies = post["_replies"][:THREADS_SCAN_REPLY_LIMIT]
+            else:
+                replies_result = await fetch_threads_replies(post.get("source_id") or "", THREADS_SCAN_REPLY_LIMIT)
+                replies = replies_result.get("data") or []
+                if replies_result["status"] == "error":
+                    errors.extend(replies_result.get("errors") or [])
 
             texts = [post.get("text") or ""] + [reply.get("text") or "" for reply in replies]
             locations = extract_locations(texts)
@@ -203,7 +208,7 @@ async def scan_threads_incidents() -> Dict[str, Any]:
             "created_or_updated": len(incidents),
         },
         "incident scan completed",
-        "threads",
+        response_source,
         errors,
     )
 

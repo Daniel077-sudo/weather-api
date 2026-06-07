@@ -1,8 +1,16 @@
+import html
+import json
+import re
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 
 from config import (
+    BING_SEARCH_BASE_URL,
+    BING_SEARCH_MARKET,
+    BING_SEARCH_TIMEOUT_SECONDS,
     THREADS_ACCESS_TOKEN,
     THREADS_API_BASE_URL,
     THREADS_KEYWORD_SEARCH_PATH,
@@ -13,7 +21,23 @@ from config import (
 
 
 def threads_is_configured() -> bool:
+    if THREADS_PROVIDER == "bing":
+        return True
     return THREADS_PROVIDER == "official" and bool(THREADS_ACCESS_TOKEN)
+
+
+def _provider_not_configured() -> Dict[str, Any]:
+    if THREADS_PROVIDER == "official":
+        message = "THREADS_ACCESS_TOKEN is missing or THREADS_PROVIDER is not official"
+    else:
+        message = f"THREADS_PROVIDER={THREADS_PROVIDER} is not supported"
+    return {
+        "status": "not_configured",
+        "data": [],
+        "message": message,
+        "source": "threads",
+        "errors": [],
+    }
 
 
 def _headers() -> Dict[str, str]:
@@ -85,15 +109,206 @@ def _items_from_response(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return items if isinstance(items, list) else []
 
 
-async def search_threads_keyword(keyword: str, limit: int = 5) -> Dict[str, Any]:
-    if not threads_is_configured():
+class TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts: List[str] = []
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs):
+        if tag in {"script", "style", "noscript", "svg"}:
+            self.skip_depth += 1
+
+    def handle_endtag(self, tag: str):
+        if tag in {"script", "style", "noscript", "svg"} and self.skip_depth:
+            self.skip_depth -= 1
+
+    def handle_data(self, data: str):
+        if self.skip_depth:
+            return
+        cleaned = re.sub(r"\s+", " ", data or "").strip()
+        if cleaned:
+            self.parts.append(cleaned)
+
+
+def _clean_text(value: str) -> str:
+    value = html.unescape(value or "")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _is_threads_url(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    return host in {"threads.net", "www.threads.net"} or host.endswith(".threads.net")
+
+
+def _normalize_bing_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if "bing.com" in parsed.netloc and parsed.path.startswith("/ck/a"):
+        target = parse_qs(parsed.query).get("u", [""])[0]
+        if target:
+            return unquote(target)
+    return url
+
+
+def parse_bing_threads_urls(html_text: str, limit: int = 5) -> List[str]:
+    candidates = re.findall(r'<a[^>]+href=["\']([^"\']+)["\']', html_text or "", flags=re.I)
+    urls: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        url = _normalize_bing_url(html.unescape(candidate))
+        if not _is_threads_url(url):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _extract_meta_content(html_text: str, names: List[str]) -> str:
+    for name in names:
+        pattern = (
+            r'<meta[^>]+(?:name|property)=["\']'
+            + re.escape(name)
+            + r'["\'][^>]+content=["\']([^"\']+)["\']'
+        )
+        match = re.search(pattern, html_text or "", flags=re.I)
+        if match:
+            return _clean_text(match.group(1))
+    return ""
+
+
+def _extract_title(html_text: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html_text or "", flags=re.I | re.S)
+    return _clean_text(match.group(1)) if match else ""
+
+
+def _extract_json_texts(html_text: str, max_items: int = 30) -> List[str]:
+    texts: List[str] = []
+    seen = set()
+    for match in re.finditer(r'"(?:text|caption|body|description)"\s*:\s*"((?:\\.|[^"\\])*)"', html_text or ""):
+        raw = match.group(1)
+        try:
+            value = json.loads(f'"{raw}"')
+        except Exception:
+            value = raw
+        cleaned = _clean_text(str(value))
+        if len(cleaned) < 8 or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        texts.append(cleaned)
+        if len(texts) >= max_items:
+            break
+    return texts
+
+
+def parse_threads_public_page(html_text: str, source_url: str, keyword: str) -> Dict[str, Any]:
+    meta_text = _extract_meta_content(html_text, ["og:description", "description", "twitter:description"])
+    title = _extract_title(html_text)
+    json_texts = _extract_json_texts(html_text)
+
+    parser = TextExtractor()
+    try:
+        parser.feed(html_text or "")
+    except Exception:
+        pass
+    visible_texts = [
+        text for text in parser.parts
+        if len(text) >= 8 and not text.lower().startswith(("threads", "instagram", "meta"))
+    ]
+
+    post_text = meta_text or (json_texts[0] if json_texts else title)
+    reply_candidates = json_texts[1:] + visible_texts
+    replies = []
+    seen = {post_text}
+    for text in reply_candidates:
+        cleaned = _clean_text(text)
+        if not cleaned or cleaned in seen or cleaned == title:
+            continue
+        seen.add(cleaned)
+        replies.append({
+            "source": "threads_reply",
+            "source_id": "",
+            "text": cleaned,
+            "author": None,
+            "created_at": None,
+            "raw": {"source": "public_html"},
+        })
+        if len(replies) >= 20:
+            break
+
+    return {
+        "source": "threads",
+        "source_id": source_url,
+        "source_url": source_url,
+        "keyword": keyword,
+        "text": post_text,
+        "author": None,
+        "created_at": None,
+        "raw": {"title": title, "meta_description": meta_text, "provider": "bing"},
+        "_replies": replies,
+    }
+
+
+async def _fetch_html(url: str) -> str:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    }
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        response = await client.get(url, headers=headers, timeout=BING_SEARCH_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.text
+
+
+async def _search_bing_keyword(keyword: str, limit: int) -> Dict[str, Any]:
+    query = f"site:threads.net {keyword} 台灣"
+    url = f"{BING_SEARCH_BASE_URL}?q={quote_plus(query)}&mkt={quote_plus(BING_SEARCH_MARKET)}"
+    try:
+        html_text = await _fetch_html(url)
+        threads_urls = parse_bing_threads_urls(html_text, limit)
+    except Exception as e:
         return {
-            "status": "not_configured",
+            "status": "error",
             "data": [],
-            "message": "THREADS_ACCESS_TOKEN is missing or THREADS_PROVIDER is not official",
-            "source": "threads",
-            "errors": [],
+            "message": str(e),
+            "source": "bing",
+            "errors": [{"service": "bing", "message": str(e), "keyword": keyword}],
         }
+
+    posts = []
+    errors = []
+    for source_url in threads_urls:
+        try:
+            page_html = await _fetch_html(source_url)
+            posts.append(parse_threads_public_page(page_html, source_url, keyword))
+        except Exception as e:
+            errors.append({"service": "threads_public_page", "message": str(e), "source_url": source_url})
+
+    status = "success" if not errors else "partial_success"
+    return {
+        "status": status,
+        "data": posts,
+        "message": "bing threads search completed",
+        "source": "bing",
+        "errors": errors,
+    }
+
+
+async def search_threads_keyword(keyword: str, limit: int = 5) -> Dict[str, Any]:
+    if THREADS_PROVIDER == "bing":
+        return await _search_bing_keyword(keyword, limit)
+
+    if not threads_is_configured():
+        return _provider_not_configured()
 
     params = {
         THREADS_SEARCH_QUERY_PARAM: keyword,
@@ -127,14 +342,11 @@ async def search_threads_keyword(keyword: str, limit: int = 5) -> Dict[str, Any]
 
 
 async def fetch_threads_replies(source_id: str, limit: int = 20) -> Dict[str, Any]:
+    if THREADS_PROVIDER == "bing":
+        return {"status": "success", "data": [], "message": "replies are included from public page when visible", "source": "bing", "errors": []}
+
     if not threads_is_configured():
-        return {
-            "status": "not_configured",
-            "data": [],
-            "message": "THREADS_ACCESS_TOKEN is missing or THREADS_PROVIDER is not official",
-            "source": "threads",
-            "errors": [],
-        }
+        return _provider_not_configured()
     if not source_id:
         return {"status": "success", "data": [], "message": "source_id missing", "source": "threads", "errors": []}
 

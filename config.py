@@ -41,6 +41,9 @@ THREADS_API_BASE_URL = env_str("THREADS_API_BASE_URL", "https://graph.threads.ne
 THREADS_SEARCH_URL = env_str("THREADS_SEARCH_URL", "")
 THREADS_KEYWORD_SEARCH_PATH = env_str("THREADS_KEYWORD_SEARCH_PATH", "keyword_search").strip("/")
 THREADS_SEARCH_QUERY_PARAM = env_str("THREADS_SEARCH_QUERY_PARAM", "q")
+BING_SEARCH_BASE_URL = env_str("BING_SEARCH_BASE_URL", "https://www.bing.com/search")
+BING_SEARCH_MARKET = env_str("BING_SEARCH_MARKET", "zh-TW")
+BING_SEARCH_TIMEOUT_SECONDS = env_float("BING_SEARCH_TIMEOUT_SECONDS", 20.0)
 THREADS_SCAN_KEYWORDS = env_str(
     "THREADS_SCAN_KEYWORDS",
     "火災,車禍,濃煙,爆炸,道路封閉,淹水,積水,塞車,警車,消防車,救護車,停電,瓦斯外洩",
