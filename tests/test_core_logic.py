@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 
 import main
 from gemini_service import parse_json_object
-from incident_service import classify_incident_type, extract_locations
-from threads_service import parse_bing_threads_urls, parse_threads_public_page
+from incident_service import classify_incident_type, extract_locations, infer_city_district, incident_keywords
+from threads_service import parse_bing_threads_urls, parse_duckduckgo_threads_urls, parse_threads_public_page
 from transport_service import build_tdx_status
 from weather_service import compare_weather_snapshots, parse_weather_periods
 
@@ -69,8 +69,14 @@ class CoreLogicTests(unittest.TestCase):
         self.assertIn("文華路", locations)
 
     def test_incident_type_classification(self):
+        self.assertEqual(classify_incident_type("今天午後下雨"), "rain")
+        self.assertEqual(classify_incident_type("外面大太陽很炎熱"), "sun")
         self.assertEqual(classify_incident_type("剛剛看到消防車和濃煙"), "fire")
         self.assertEqual(classify_incident_type("路口發生車禍大塞車"), "traffic_accident")
+
+    def test_incident_keywords_default_scope(self):
+        self.assertIn("下雨", incident_keywords())
+        self.assertIn("封路", incident_keywords())
 
     def test_parse_bing_threads_urls(self):
         html = '''
@@ -80,6 +86,14 @@ class CoreLogicTests(unittest.TestCase):
         '''
         urls = parse_bing_threads_urls(html, limit=5)
         self.assertEqual(urls, ["https://www.threads.net/@demo/post/abc"])
+
+    def test_parse_duckduckgo_threads_urls(self):
+        html = '''
+        <a href="/l/?uddg=https%3A%2F%2Fwww.threads.com%2F%40demo%2Fpost%2Fabc">result</a>
+        <a href="/l/?uddg=https%3A%2F%2Fexample.com%2Fskip">skip</a>
+        '''
+        urls = parse_duckduckgo_threads_urls(html, limit=5)
+        self.assertEqual(urls, ["https://www.threads.com/@demo/post/abc"])
 
     def test_parse_threads_public_page(self):
         html = '''
@@ -94,6 +108,11 @@ class CoreLogicTests(unittest.TestCase):
         parsed = parse_threads_public_page(html, "https://www.threads.net/@demo/post/abc", "火災")
         self.assertIn("台中市西屯區", parsed["text"])
         self.assertTrue(parsed["_replies"])
+
+    def test_infer_city_district(self):
+        result = infer_city_district(["臺南市永康區附近塞車"], ["永康區"])
+        self.assertEqual(result["city"], "臺南市")
+        self.assertEqual(result["district"], "永康區")
 
 
 if __name__ == "__main__":

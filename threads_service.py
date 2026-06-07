@@ -12,6 +12,7 @@ from config import (
     BING_THREADS_SITE,
     BING_SEARCH_MARKET,
     BING_SEARCH_TIMEOUT_SECONDS,
+    DUCKDUCKGO_SEARCH_BASE_URL,
     THREADS_ACCESS_TOKEN,
     THREADS_API_BASE_URL,
     THREADS_KEYWORD_SEARCH_PATH,
@@ -22,7 +23,7 @@ from config import (
 
 
 def threads_is_configured() -> bool:
-    if THREADS_PROVIDER == "bing":
+    if THREADS_PROVIDER in {"bing", "duckduckgo"}:
         return True
     return THREADS_PROVIDER == "official" and bool(THREADS_ACCESS_TOKEN)
 
@@ -161,12 +162,40 @@ def _normalize_bing_url(url: str) -> str:
     return url
 
 
+def _normalize_duckduckgo_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if (not parsed.netloc or "duckduckgo.com" in parsed.netloc) and parsed.path.startswith("/l/"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if target:
+            return unquote(target)
+    return url
+
+
 def parse_bing_threads_urls(html_text: str, limit: int = 5) -> List[str]:
     candidates = re.findall(r'<a[^>]+href=["\']([^"\']+)["\']', html_text or "", flags=re.I)
     urls: List[str] = []
     seen = set()
     for candidate in candidates:
         url = _normalize_bing_url(html.unescape(candidate))
+        if not _is_threads_url(url):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def parse_duckduckgo_threads_urls(html_text: str, limit: int = 5) -> List[str]:
+    candidates = re.findall(r'<a[^>]+href=["\']([^"\']+)["\']', html_text or "", flags=re.I)
+    urls: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        url = _normalize_duckduckgo_url(html.unescape(candidate))
         if not _is_threads_url(url):
             continue
         if url in seen:
@@ -270,6 +299,8 @@ async def _fetch_html(url: str) -> str:
     }
     async with httpx.AsyncClient(follow_redirects=True) as client:
         response = await client.get(url, headers=headers, timeout=BING_SEARCH_TIMEOUT_SECONDS)
+        if response.status_code == 202:
+            raise RuntimeError("search provider returned 202; request was accepted but no result page was served")
         response.raise_for_status()
         return response.text
 
@@ -308,7 +339,43 @@ async def _search_bing_keyword(keyword: str, limit: int) -> Dict[str, Any]:
     }
 
 
+async def _search_duckduckgo_keyword(keyword: str, limit: int) -> Dict[str, Any]:
+    query = f"site:{BING_THREADS_SITE} {keyword}"
+    url = f"{DUCKDUCKGO_SEARCH_BASE_URL}?q={quote_plus(query)}"
+    try:
+        html_text = await _fetch_html(url)
+        threads_urls = parse_duckduckgo_threads_urls(html_text, limit)
+    except Exception as e:
+        return {
+            "status": "error",
+            "data": [],
+            "message": str(e),
+            "source": "duckduckgo",
+            "errors": [{"service": "duckduckgo", "message": str(e), "keyword": keyword}],
+        }
+
+    posts = []
+    errors = []
+    for source_url in threads_urls:
+        try:
+            page_html = await _fetch_html(source_url)
+            posts.append(parse_threads_public_page(page_html, source_url, keyword))
+        except Exception as e:
+            errors.append({"service": "threads_public_page", "message": str(e), "source_url": source_url})
+
+    status = "success" if not errors else "partial_success"
+    return {
+        "status": status,
+        "data": posts,
+        "message": "duckduckgo threads search completed",
+        "source": "duckduckgo",
+        "errors": errors,
+    }
+
+
 async def search_threads_keyword(keyword: str, limit: int = 5) -> Dict[str, Any]:
+    if THREADS_PROVIDER == "duckduckgo":
+        return await _search_duckduckgo_keyword(keyword, limit)
     if THREADS_PROVIDER == "bing":
         return await _search_bing_keyword(keyword, limit)
 
@@ -347,7 +414,7 @@ async def search_threads_keyword(keyword: str, limit: int = 5) -> Dict[str, Any]
 
 
 async def fetch_threads_replies(source_id: str, limit: int = 20) -> Dict[str, Any]:
-    if THREADS_PROVIDER == "bing":
+    if THREADS_PROVIDER in {"bing", "duckduckgo"}:
         return {"status": "success", "data": [], "message": "replies are included from public page when visible", "source": "bing", "errors": []}
 
     if not threads_is_configured():

@@ -45,9 +45,10 @@ BING_SEARCH_BASE_URL = env_str("BING_SEARCH_BASE_URL", "https://www.bing.com/sea
 BING_THREADS_SITE = env_str("BING_THREADS_SITE", "threads.com")
 BING_SEARCH_MARKET = env_str("BING_SEARCH_MARKET", "zh-TW")
 BING_SEARCH_TIMEOUT_SECONDS = env_float("BING_SEARCH_TIMEOUT_SECONDS", 20.0)
+DUCKDUCKGO_SEARCH_BASE_URL = env_str("DUCKDUCKGO_SEARCH_BASE_URL", "https://html.duckduckgo.com/html/")
 THREADS_SCAN_KEYWORDS = env_str(
     "THREADS_SCAN_KEYWORDS",
-    "臺南火災,臺南車禍,臺南濃煙,臺南道路封閉,臺南淹水,臺南積水,臺南塞車,臺南消防車,臺南救護車,臺南停電",
+    "下雨,大太陽,車禍,火災,塞車,封路",
 )
 THREADS_SCAN_MAX_KEYWORDS = env_int("THREADS_SCAN_MAX_KEYWORDS", 8)
 THREADS_SCAN_POST_LIMIT = env_int("THREADS_SCAN_POST_LIMIT", 5)

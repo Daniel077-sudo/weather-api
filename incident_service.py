@@ -10,15 +10,25 @@ from config import (
     THREADS_SCAN_REPLY_LIMIT,
     THREADS_PROVIDER,
 )
+from data import TAIWAN_LOCATIONS
 from threads_service import fetch_threads_replies, search_threads_keyword, threads_is_configured
 from utils import safe_response, stable_hash, taipei_now
 
 
 INCIDENT_TYPE_KEYWORDS = {
+    "rain": ["下雨", "大雨", "豪雨", "暴雨", "雷雨"],
+    "sun": ["大太陽", "高溫", "炎熱", "曝曬", "太陽很大"],
     "fire": ["火災", "濃煙", "爆炸", "消防車", "瓦斯外洩"],
     "traffic_accident": ["車禍", "事故", "警車", "救護車", "塞車"],
     "flood": ["淹水", "積水", "道路封閉"],
     "power_outage": ["停電"],
+}
+
+CITY_ALIASES = {
+    "台北市": "臺北市",
+    "台中市": "臺中市",
+    "台南市": "臺南市",
+    "台東縣": "臺東縣",
 }
 
 CITY_DISTRICT_PATTERN = re.compile(
@@ -53,6 +63,24 @@ def extract_locations(texts: Iterable[str]) -> List[str]:
                     seen.add(value)
                     locations.append(value)
     return locations
+
+
+def normalize_city_name(value: str) -> str:
+    return CITY_ALIASES.get(value, value)
+
+
+def infer_city_district(texts: Iterable[str], locations: List[str]) -> Dict[str, str]:
+    haystack = " ".join([*(texts or []), *(locations or [])])
+    for city, districts in TAIWAN_LOCATIONS.items():
+        aliases = [city]
+        for alias, normalized in CITY_ALIASES.items():
+            if normalized == city:
+                aliases.append(alias)
+        city_hit = any(alias in haystack for alias in aliases)
+        matched_district = next((district for district in districts if district in haystack), "")
+        if city_hit or matched_district:
+            return {"city": city if city_hit or matched_district else "", "district": matched_district}
+    return {"city": "", "district": ""}
 
 
 def build_confidence(post_text: str, replies: List[Dict[str, Any]], locations: List[str]) -> float:
@@ -116,7 +144,7 @@ def _store_incident(report: Dict[str, Any], evidence: List[Dict[str, Any]]) -> D
 
 
 async def scan_threads_incidents() -> Dict[str, Any]:
-    response_source = "bing" if THREADS_PROVIDER == "bing" else "threads"
+    response_source = THREADS_PROVIDER if THREADS_PROVIDER in {"bing", "duckduckgo"} else "threads"
     if not threads_is_configured():
         return safe_response(
             "not_configured",
@@ -147,6 +175,7 @@ async def scan_threads_incidents() -> Dict[str, Any]:
 
             texts = [post.get("text") or ""] + [reply.get("text") or "" for reply in replies]
             locations = extract_locations(texts)
+            location_parts = infer_city_district(texts, locations)
             incident_type = classify_incident_type(" ".join(texts))
             confidence = build_confidence(post.get("text") or "", replies, locations)
             if confidence < 0.55:
@@ -161,6 +190,8 @@ async def scan_threads_incidents() -> Dict[str, Any]:
                 "incident_type": incident_type,
                 "title": build_summary(incident_type, locations, keyword),
                 "summary": build_summary(incident_type, locations, keyword),
+                "city": location_parts["city"],
+                "district": location_parts["district"],
                 "location_text": locations[0] if locations else "",
                 "locations": locations,
                 "confidence": confidence,
@@ -219,7 +250,7 @@ def list_incidents(limit: int = 20, city: Optional[str] = None, incident_type: O
         if incident_type:
             query = query.eq("incident_type", incident_type)
         if city:
-            query = query.ilike("location_text", f"%{city}%")
+            query = query.eq("city", city)
         res = query.execute()
         return safe_response("success", res.data or [], "incidents loaded", "incident_reports")
     except Exception as e:
