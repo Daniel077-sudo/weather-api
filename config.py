@@ -46,7 +46,7 @@ BING_SEARCH_MARKET = env_str("BING_SEARCH_MARKET", "zh-TW")
 BING_SEARCH_TIMEOUT_SECONDS = env_float("BING_SEARCH_TIMEOUT_SECONDS", 20.0)
 THREADS_SCAN_KEYWORDS = env_str(
     "THREADS_SCAN_KEYWORDS",
-    "火災,車禍,濃煙,爆炸,道路封閉,淹水,積水,塞車,警車,消防車,救護車,停電,瓦斯外洩",
+    "臺南火災,臺南車禍,臺南濃煙,臺南道路封閉,臺南淹水,臺南積水,臺南塞車,臺南消防車,臺南救護車,臺南停電",
 )
 THREADS_SCAN_MAX_KEYWORDS = env_int("THREADS_SCAN_MAX_KEYWORDS", 8)
 THREADS_SCAN_POST_LIMIT = env_int("THREADS_SCAN_POST_LIMIT", 5)
