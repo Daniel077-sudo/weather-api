@@ -1,0 +1,78 @@
+{
+  "version": "2026-06-18",
+  "default": {
+    "intent": "commuting",
+    "risk_summary": "目前未偵測到明顯風險，仍建議出門前確認最新天氣與交通狀況。",
+    "recommended_action": "行程可照常，保留彈性時間並持續留意官方資訊。",
+    "alternative_location": "目的地附近較安全的室內或有遮蔽地點。",
+    "confidence": 0.55
+  },
+  "activity_intents": [
+    {
+      "intent": "outdoor_activity",
+      "keywords": ["路跑", "跑步", "健行", "登山", "露營", "海邊", "戶外", "球賽", "運動"]
+    },
+    {
+      "intent": "commuting",
+      "keywords": ["通勤", "上班", "上課", "搭車", "開車", "高鐵", "台鐵", "捷運", "公車"]
+    },
+    {
+      "intent": "travel",
+      "keywords": ["旅遊", "旅行", "出遊", "景點", "夜市", "市集", "演唱會"]
+    }
+  ],
+  "risk_rules": [
+    {
+      "id": "heavy_rain_outdoor",
+      "risk_tags": ["heavy_rain", "flood"],
+      "activity_intents": ["outdoor_activity", "travel"],
+      "risk_summary": "{location}有明顯降雨或積水風險，戶外行程不建議照原計畫執行。",
+      "recommended_action": "建議延期、改成室內行程，並避開地下道、低窪道路與河堤周邊。",
+      "alternative_location": "{location}附近的室內場館、百貨、車站周邊或有遮蔽空間。",
+      "confidence": 0.86
+    },
+    {
+      "id": "heavy_rain_commute",
+      "risk_tags": ["heavy_rain", "flood"],
+      "activity_intents": ["commuting"],
+      "risk_summary": "{location}降雨風險偏高，交通延誤與道路積水機率上升。",
+      "recommended_action": "建議提早出門，避開低窪路段，優先選擇大眾運輸或主要幹道。",
+      "alternative_location": "{location}附近車站、捷運站或可短暫避雨的室內空間。",
+      "confidence": 0.82
+    },
+    {
+      "id": "high_uvi_outdoor",
+      "risk_tags": ["high_uvi"],
+      "activity_intents": ["outdoor_activity", "travel"],
+      "risk_summary": "{location}紫外線偏高，長時間戶外活動有曬傷與中暑風險。",
+      "recommended_action": "建議避開中午時段，補水、防曬，或改到有遮蔭與空調的地點。",
+      "alternative_location": "{location}附近有遮蔭、空調或室內展館。",
+      "confidence": 0.78
+    },
+    {
+      "id": "strong_wind",
+      "risk_tags": ["strong_wind", "typhoon"],
+      "activity_intents": ["outdoor_activity", "travel", "commuting"],
+      "risk_summary": "{location}可能有強風或颱風影響，戶外與交通安全風險升高。",
+      "recommended_action": "建議減少外出，避開海邊、橋梁、招牌、路樹與施工圍籬。",
+      "alternative_location": "{location}附近堅固建築內或官方開放避難處所。",
+      "confidence": 0.88
+    }
+  ],
+  "incident_rules": [
+    {
+      "id": "nearby_fire",
+      "incident_types": ["fire"],
+      "risk_summary": "{location}附近有火災或濃煙回報，可能影響空氣品質與道路管制。",
+      "recommended_action": "建議避開該區域，改走替代路線，並查看原文或官方消防資訊確認狀況。",
+      "confidence_boost": 0.1
+    },
+    {
+      "id": "nearby_traffic",
+      "incident_types": ["traffic_accident", "flood"],
+      "risk_summary": "{location}附近有交通事故、積水或封路回報，移動時間可能增加。",
+      "recommended_action": "建議提前出門，改走替代路線，必要時改搭大眾運輸。",
+      "confidence_boost": 0.08
+    }
+  ]
+}

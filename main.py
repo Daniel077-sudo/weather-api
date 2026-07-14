@@ -9,12 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
+from chat_service import build_chat_command
 from config import CRON_STATUS, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
-from incident_service import get_incident, list_incidents, scan_threads_incidents
-from schemas import EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, UserQuery
+from incident_service import cleanup_expired_incidents, extract_locations, get_incident, infer_city_district, list_incidents, scan_threads_incidents
+from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
+from schemas import ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, IncidentEventScanRequest, LocalAIRequest, QuizScoreSubmitRequest, ThreadsUrlAnalyzeRequest, UserQuery, WeatherSuggestionRequest
+from scripts.threads_public_browser_scanner import analyze_threads_url, scan_public_threads_browser
 from transport_service import build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
 from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
@@ -145,6 +148,35 @@ async def ask_assistant(query: UserQuery):
     except Exception as e:
         return {"status": "error", "message": f"解析失敗: {str(e)}"}
 
+
+@app.post("/api/chat")
+async def chat_command(payload: ChatRequest):
+    return await build_chat_command(payload.user_id or "", payload.message)
+
+
+@app.post("/api/weather/suggestion")
+async def weather_suggestion(payload: WeatherSuggestionRequest):
+    query = UserQuery(city=payload.city, district=payload.district, message=payload.message or payload.activity or "行程")
+    result = await ask_assistant(query)
+    if result.get("status") != "success":
+        return result
+    return {
+        "status": "success",
+        "data": {
+            "user_id": payload.user_id,
+            "city": payload.city,
+            "district": payload.district,
+            "message": payload.message,
+            "weather": result.get("weather"),
+            "risk_level": result.get("risk_level"),
+            "risk_tags": result.get("risk_tags"),
+            "has_weather_risk": result.get("has_weather_risk"),
+            "suggestion": result.get("ai_suggestion"),
+            "suggestion_source": result.get("suggestion_source"),
+            "weather_source": result.get("weather_source"),
+        },
+    }
+
 # ==========================================
 # 🚀 API 3 & 4：天氣快取機制 (含新裝備 & 背景同步防封鎖 & 系統日誌)
 # ==========================================
@@ -218,6 +250,24 @@ async def get_weather(city: str = "臺南市", district: str = "東區"):
         }
     except Exception as e:
         return {"status": "error", "message": f"無法取得 {city}{district} 天氣資料: {str(e)}"}
+
+
+@app.get("/api/weather/live")
+async def get_weather_live(
+    city: str = Query("臺南市"),
+    district: str = Query("東區"),
+    lat: Optional[float] = Query(None),
+    lng: Optional[float] = Query(None),
+):
+    response = await get_weather(city, district)
+    if isinstance(response, dict):
+        response["requested_location"] = {
+            "city": city,
+            "district": district,
+            "lat": lat,
+            "lng": lng,
+        }
+    return response
 
 # ==========================================
 # 🚄 API 5：行程與交通工具判斷 (Events)
@@ -368,14 +418,19 @@ async def check_event_risk(payload: EventRiskCheckRequest):
 
 
 @app.post("/api/events/weather-monitor")
-async def run_event_weather_monitor(background_tasks: BackgroundTasks, hours_ahead: int = Query(36, ge=1, le=168), background: bool = False):
+async def run_event_weather_monitor(
+    background_tasks: BackgroundTasks,
+    hours_ahead: int = Query(36, ge=1, le=168),
+    alert_lead_minutes: int = Query(180, ge=1, le=1440),
+    background: bool = False,
+):
     if background:
-        background_tasks.add_task(monitor_event_weather_window, hours_ahead)
+        background_tasks.add_task(monitor_event_weather_window, hours_ahead, alert_lead_minutes)
         return {
             "status": "processing",
-            "message": f"已開始背景檢查未來 {hours_ahead} 小時的行程天氣變化。",
+            "message": f"已開始背景檢查未來 {hours_ahead} 小時的行程；只會在行程前 {alert_lead_minutes} 分鐘內產生提醒。",
         }
-    return await monitor_event_weather_window(hours_ahead)
+    return await monitor_event_weather_window(hours_ahead, alert_lead_minutes)
 
 @app.get("/api/events/weather-alerts")
 async def get_event_weather_alerts(
@@ -411,12 +466,117 @@ async def get_ai_usage_summary():
     return summarize_ai_usage()
 
 
+@app.get("/api/ai/local-rules")
+async def get_local_ai_rules():
+    return safe_response("success", load_local_ai_rules(), "local AI rules loaded", "local_rules")
+
+
+@app.post("/api/ai/local-suggest")
+async def local_ai_suggest(payload: LocalAIRequest):
+    event = {
+        "title": payload.title or "",
+        "location": payload.location or "",
+        "city": payload.city or "",
+        "district": payload.district or "",
+        "activity": payload.activity or "",
+        "transport_type": payload.transport_type or "",
+    }
+    risk = {
+        "risk_level": payload.risk_level or "low",
+        "risk_tags": payload.risk_tags,
+        "has_weather_risk": payload.risk_level not in [None, "low"] or bool(payload.risk_tags),
+    }
+    data = build_local_ai_suggestion(
+        event,
+        {"weather": payload.weather},
+        risk,
+        payload.nearby_incidents,
+    )
+    return safe_response("success", data, "local AI suggestion generated", "local_rules")
+
+
 @app.post("/api/cron/incident-monitor")
-async def run_incident_monitor(background_tasks: BackgroundTasks, background: bool = Query(False)):
+async def run_incident_monitor(
+    background_tasks: BackgroundTasks,
+    background: bool = Query(False),
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
     if background:
+        background_tasks.add_task(cleanup_expired_incidents)
         background_tasks.add_task(scan_threads_incidents)
         return safe_response("processing", {}, "incident scan started in background", "threads")
+    cleanup_expired_incidents()
     return await scan_threads_incidents()
+
+
+@app.post("/api/cron/cleanup-incidents")
+async def cleanup_incidents_endpoint(
+    ttl_minutes: Optional[int] = Query(None, ge=1, le=1440),
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+    return cleanup_expired_incidents(ttl_minutes)
+
+
+def resolve_incident_scan_location(payload: IncidentEventScanRequest) -> Dict[str, str]:
+    texts = [
+        payload.city or "",
+        payload.district or "",
+        payload.location or "",
+        payload.title or "",
+    ]
+    locations = extract_locations(texts)
+    inferred = infer_city_district(texts, locations)
+    city = payload.city or inferred.get("city") or ""
+    district = payload.district or inferred.get("district") or ""
+    return {"city": city, "district": district}
+
+
+@app.post("/api/incidents/event-scan")
+async def scan_incidents_for_event(payload: IncidentEventScanRequest):
+    location_parts = resolve_incident_scan_location(payload)
+    city = location_parts["city"]
+    district = location_parts["district"]
+    if not city and (payload.location or payload.title):
+        return safe_response(
+            "error",
+            {"title": payload.title, "location": payload.location},
+            "無法從行程判斷縣市，請前端傳 city，例如 臺南市；若要全台掃描請不要傳 title/location。",
+            "validation",
+        )
+    return await scan_public_threads_browser(
+        city=city,
+        district=district,
+        keywords=payload.keywords or None,
+        store=payload.store,
+        only_today=payload.only_today,
+        max_age_minutes=payload.max_age_minutes,
+        scan_scope=payload.scan_scope,
+        batch_index=payload.batch_index,
+        batch_total=payload.batch_total,
+    )
+
+
+@app.post("/api/incidents/analyze-url")
+async def analyze_incident_threads_url(payload: ThreadsUrlAnalyzeRequest):
+    if "threads.com" not in payload.url and "threads.net" not in payload.url:
+        return safe_response(
+            "error",
+            {"url": payload.url},
+            "目前只支援 Threads 貼文網址。",
+            "validation",
+        )
+    return await analyze_threads_url(
+        payload.url,
+        store=payload.store,
+        only_today=payload.only_today,
+        max_age_minutes=payload.max_age_minutes,
+    )
 
 
 @app.get("/api/incidents/latest")
@@ -683,6 +843,57 @@ async def get_game_questions(type: str = Query("flood")):
         ],
     }
 
+
+@app.get("/api/quiz/generate")
+async def generate_quiz(topic: str = Query("flood"), user_id: Optional[str] = Query(None)):
+    quiz_type = normalize_disaster_code(topic)
+    questions = GAME_QUESTIONS.get(quiz_type) or GAME_QUESTIONS.get("flood", [])
+    return {
+        "status": "success",
+        "data": {
+            "user_id": user_id,
+            "topic": quiz_type,
+            "questions": [
+                {
+                    "id": question["id"],
+                    "question": question["question"],
+                    "choices": question["choices"],
+                }
+                for question in questions
+            ],
+        },
+    }
+
+
+@app.post("/api/quiz/submit")
+async def submit_quiz_score(payload: QuizScoreSubmitRequest):
+    score_data = {
+        "player_name": payload.user_id or "guest",
+        "game_type": normalize_disaster_code(payload.topic or "quiz"),
+        "score": payload.score,
+        "total_questions": None,
+        "correct_count": None,
+        "created_at": datetime.now(timezone(timedelta(hours=8))).isoformat(),
+        "is_verified": payload.is_verified,
+    }
+    db_payload = {key: value for key, value in score_data.items() if key != "is_verified"}
+    try:
+        res = supabase.table("game_scores").insert(db_payload).execute()
+        if res.data:
+            return {
+                "status": "success",
+                "data": {**res.data[0], "is_verified": payload.is_verified},
+                "source": "supabase",
+            }
+    except Exception:
+        GAME_SCORE_MEMORY.append(db_payload)
+
+    return {
+        "status": "success",
+        "data": score_data,
+        "source": "memory_fallback",
+    }
+
 @app.post("/api/game/submit")
 async def submit_game_answer(payload: GameSubmitRequest):
     game_types = [normalize_disaster_code(payload.game_type)] if payload.game_type else list(GAME_QUESTIONS.keys())
@@ -855,6 +1066,9 @@ create table if not exists public.game_scores (
   correct_count integer,
   created_at timestamptz default now()
 );
+
+alter table public.incident_reports add column if not exists expires_at timestamptz;
+create index if not exists incident_reports_expires_at_idx on public.incident_reports(expires_at);
 """
     return {"status": "success", "sql": sql.strip()}
 

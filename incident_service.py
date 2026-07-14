@@ -1,7 +1,9 @@
 import re
+from datetime import timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
 from config import (
+    INCIDENT_TTL_MINUTES,
     INCIDENT_NOTIFY_CONFIDENCE,
     supabase,
     THREADS_SCAN_KEYWORDS,
@@ -26,19 +28,65 @@ INCIDENT_TYPE_KEYWORDS = {
 
 CITY_ALIASES = {
     "台北市": "臺北市",
+    "台北": "臺北市",
+    "臺北": "臺北市",
     "台中市": "臺中市",
+    "台中": "臺中市",
+    "臺中": "臺中市",
     "台南市": "臺南市",
+    "台南": "臺南市",
+    "臺南": "臺南市",
     "台東縣": "臺東縣",
+    "台東": "臺東縣",
+    "臺東": "臺東縣",
+    "新北": "新北市",
+    "桃園": "桃園市",
+    "高雄": "高雄市",
+    "基隆": "基隆市",
+    "新竹": "新竹市",
+    "苗栗": "苗栗縣",
+    "彰化": "彰化縣",
+    "南投": "南投縣",
+    "雲林": "雲林縣",
+    "嘉義": "嘉義市",
+    "屏東": "屏東縣",
+    "宜蘭": "宜蘭縣",
+    "花蓮": "花蓮縣",
+    "澎湖": "澎湖縣",
+    "金門": "金門縣",
+    "連江": "連江縣",
 }
 
 CITY_DISTRICT_PATTERN = re.compile(
     r"(?:台北|臺北|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|苗栗|彰化|南投|雲林|嘉義|屏東|宜蘭|花蓮|台東|臺東|澎湖|金門|連江)[市縣]"
     r"[\u4e00-\u9fff]{1,4}(?:區|鄉|鎮|市)|"
-    r"(?:台北|臺北|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|苗栗|彰化|南投|雲林|嘉義|屏東|宜蘭|花蓮|台東|臺東|澎湖|金門|連江)[市縣]"
+    r"(?:台北|臺北|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|苗栗|彰化|南投|雲林|嘉義|屏東|宜蘭|花蓮|台東|臺東|澎湖|金門|連江)[市縣]?"
 )
 LANDMARK_PATTERN = re.compile(
     r"[\u4e00-\u9fff]{2,12}(?:路|街|大道|巷|橋|交流道|車站|捷運站|大學|高中|國小|商圈|夜市)"
 )
+
+LOCATION_NOISE_WORDS = [
+    "政府",
+    "制度",
+    "事情",
+    "政策",
+    "台灣出門",
+    "繼續上路",
+    "道路平權",
+    "我們各位道路",
+    "反正在路",
+]
+
+
+def is_location_noise(value: str) -> bool:
+    if not value:
+        return True
+    if any(word in value for word in LOCATION_NOISE_WORDS):
+        return True
+    if value in {"馬路", "道路", "上路"}:
+        return True
+    return False
 
 
 def incident_keywords() -> List[str]:
@@ -59,7 +107,7 @@ def extract_locations(texts: Iterable[str]) -> List[str]:
         for pattern in (CITY_DISTRICT_PATTERN, LANDMARK_PATTERN):
             for match in pattern.finditer(text or ""):
                 value = match.group(0).strip()
-                if value and value not in seen:
+                if value and not is_location_noise(value) and value not in seen:
                     seen.add(value)
                     locations.append(value)
     return locations
@@ -71,13 +119,25 @@ def normalize_city_name(value: str) -> str:
 
 def infer_city_district(texts: Iterable[str], locations: List[str]) -> Dict[str, str]:
     haystack = " ".join([*(texts or []), *(locations or [])])
+    all_districts = [district for districts in TAIWAN_LOCATIONS.values() for district in districts]
     for city, districts in TAIWAN_LOCATIONS.items():
         aliases = [city]
         for alias, normalized in CITY_ALIASES.items():
             if normalized == city:
                 aliases.append(alias)
         city_hit = any(alias in haystack for alias in aliases)
-        matched_district = next((district for district in districts if district in haystack), "")
+        matched_district = ""
+        for district in districts:
+            district_short = district.removesuffix("區").removesuffix("鄉").removesuffix("鎮").removesuffix("市")
+            longer_district_present = any(
+                other != district and district in other and other in haystack
+                for other in all_districts
+            )
+            if longer_district_present:
+                continue
+            if district in haystack or (len(district_short) >= 2 and district_short in haystack):
+                matched_district = district
+                break
         if city_hit or matched_district:
             return {"city": city if city_hit or matched_district else "", "district": matched_district}
     return {"city": "", "district": ""}
@@ -143,6 +203,50 @@ def _store_incident(report: Dict[str, Any], evidence: List[Dict[str, Any]]) -> D
     return {**report, "id": report_id}
 
 
+def incident_expires_at(ttl_minutes: Optional[int] = None) -> str:
+    ttl = ttl_minutes or INCIDENT_TTL_MINUTES
+    return (taipei_now() + timedelta(minutes=ttl)).isoformat()
+
+
+def cleanup_expired_incidents(ttl_minutes: Optional[int] = None) -> Dict[str, Any]:
+    ttl = ttl_minutes or INCIDENT_TTL_MINUTES
+    now = taipei_now()
+    legacy_cutoff = (now - timedelta(minutes=ttl)).isoformat()
+    errors = []
+    deleted_count = 0
+
+    try:
+        expired = supabase.table("incident_reports").delete().lt("expires_at", now.isoformat()).execute()
+        deleted_count += len(expired.data or [])
+    except Exception as e:
+        errors.append({"service": "supabase", "message": f"delete expired incidents failed: {e}"})
+
+    try:
+        legacy = (
+            supabase.table("incident_reports")
+            .delete()
+            .is_("expires_at", "null")
+            .lt("last_seen_at", legacy_cutoff)
+            .execute()
+        )
+        deleted_count += len(legacy.data or [])
+    except Exception as e:
+        errors.append({"service": "supabase", "message": f"delete legacy incidents failed: {e}"})
+
+    return safe_response(
+        "success" if not errors else "partial_success",
+        {
+            "deleted_count": deleted_count,
+            "ttl_minutes": ttl,
+            "expired_before": now.isoformat(),
+            "legacy_last_seen_before": legacy_cutoff,
+        },
+        "expired incidents cleanup completed",
+        "incident_reports",
+        errors,
+    )
+
+
 async def scan_threads_incidents() -> Dict[str, Any]:
     response_source = THREADS_PROVIDER if THREADS_PROVIDER in {"bing", "duckduckgo"} else "threads"
     if not threads_is_configured():
@@ -199,6 +303,7 @@ async def scan_threads_incidents() -> Dict[str, Any]:
                 "status": "confirmed" if confidence >= INCIDENT_NOTIFY_CONFIDENCE else "candidate",
                 "raw": {"post": post, "reply_count": len(replies), "keyword": keyword},
                 "last_seen_at": taipei_now().isoformat(),
+                "expires_at": incident_expires_at(),
             }
             evidence = [
                 {
@@ -246,7 +351,7 @@ async def scan_threads_incidents() -> Dict[str, Any]:
 
 def list_incidents(limit: int = 20, city: Optional[str] = None, incident_type: Optional[str] = None) -> Dict[str, Any]:
     try:
-        query = supabase.table("incident_reports").select("*").order("last_seen_at", desc=True).limit(limit)
+        query = supabase.table("incident_reports").select("*").gt("expires_at", taipei_now().isoformat()).order("last_seen_at", desc=True).limit(limit)
         if incident_type:
             query = query.eq("incident_type", incident_type)
         if city:
@@ -255,6 +360,38 @@ def list_incidents(limit: int = 20, city: Optional[str] = None, incident_type: O
         return safe_response("success", res.data or [], "incidents loaded", "incident_reports")
     except Exception as e:
         return safe_response("error", [], str(e), "incident_reports", [{"service": "supabase", "message": str(e)}])
+
+
+def list_active_incident_records(
+    city: str = "",
+    district: str = "",
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    query = (
+        supabase.table("incident_reports")
+        .select("*")
+        .gt("expires_at", taipei_now().isoformat())
+        .order("last_seen_at", desc=True)
+        .limit(limit)
+    )
+    if city:
+        query = query.eq("city", city)
+    if district:
+        district_query = query.eq("district", district)
+        district_res = district_query.execute()
+        if district_res.data:
+            return district_res.data or []
+        query = (
+            supabase.table("incident_reports")
+            .select("*")
+            .gt("expires_at", taipei_now().isoformat())
+            .order("last_seen_at", desc=True)
+            .limit(limit)
+        )
+        if city:
+            query = query.eq("city", city)
+    res = query.execute()
+    return res.data or []
 
 
 def get_incident(incident_id: int) -> Dict[str, Any]:

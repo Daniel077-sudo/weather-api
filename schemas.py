@@ -8,6 +8,31 @@ class UserQuery(BaseModel):
     message: str
 
 
+class WeatherSuggestionRequest(BaseModel):
+    user_id: Optional[str] = None
+    city: str = "臺南市"
+    district: str = "東區"
+    message: str = ""
+    activity: Optional[str] = None
+
+
+class ChatRequest(BaseModel):
+    user_id: Optional[str] = None
+    message: str
+
+
+class ChatCommandResponse(BaseModel):
+    reply: str = ""
+    has_alert: bool = False
+    alert_title: str = ""
+    alert_url: str = ""
+    action_type: str = "NONE"
+    event_title: str = ""
+    event_start: str = ""
+    event_end: str = ""
+    event_id_to_delete: str = ""
+
+
 class EventCreate(BaseModel):
     title: str
     start_time: str
@@ -41,12 +66,50 @@ class EventRiskCheckRequest(BaseModel):
     event_id: Optional[str] = None
 
 
+class LocalAIRequest(BaseModel):
+    title: Optional[str] = None
+    location: Optional[str] = None
+    city: Optional[str] = None
+    district: Optional[str] = None
+    activity: Optional[str] = None
+    transport_type: Optional[str] = None
+    weather: Dict[str, Any] = Field(default_factory=dict)
+    risk_level: Optional[str] = None
+    risk_tags: List[str] = Field(default_factory=list)
+    nearby_incidents: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class IncidentEventScanRequest(BaseModel):
+    title: Optional[str] = None
+    start_time: Optional[str] = None
+    location: Optional[str] = None
+    city: Optional[str] = None
+    district: Optional[str] = None
+    keywords: List[str] = Field(default_factory=list)
+    store: bool = True
+    only_today: bool = True
+    max_age_minutes: Optional[int] = None
+    scan_scope: str = "single"
+    batch_index: int = 0
+    batch_total: int = 1
+
+
+class ThreadsUrlAnalyzeRequest(BaseModel):
+    url: str
+    store: bool = False
+    only_today: bool = True
+    max_age_minutes: Optional[int] = None
+
+
 class AIIntentSuggestion(BaseModel):
     intent: str = "commuting"
     risk_summary: str = ""
     recommended_action: str = ""
     alternative_location: str = ""
     confidence: float = 0.0
+    suggestion_source: str = "local_rules"
+    matched_rules: List[str] = Field(default_factory=list)
+    cache_hit: bool = False
 
 
 class GameSubmitRequest(BaseModel):
@@ -61,6 +124,13 @@ class GameScoreCreate(BaseModel):
     score: int
     total_questions: Optional[int] = None
     correct_count: Optional[int] = None
+
+
+class QuizScoreSubmitRequest(BaseModel):
+    user_id: Optional[str] = None
+    topic: Optional[str] = None
+    score: int
+    is_verified: bool = False
 
 
 class GeocodeRequest(BaseModel):

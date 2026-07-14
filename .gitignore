@@ -5,6 +5,8 @@
 __pycache__/
 *.pyc
 venv/
+storage/
+threads_auth_state.json
 
 # Local tunneling binary for frontend testing
 ngrok.exe
