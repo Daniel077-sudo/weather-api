@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
@@ -733,7 +734,33 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
             "validation",
         )
 
+    image_hash = hashlib.sha256(image_bytes).hexdigest()
     errors = []
+    try:
+        cached_query = supabase.table("emergency_kit_scans").select("*").eq("image_hash", image_hash).order("created_at", desc=True).limit(1)
+        if payload.user_id:
+            cached_query = cached_query.eq("user_id", payload.user_id)
+        cached_scan = cached_query.execute()
+        if cached_scan.data:
+            cached = cached_scan.data[0]
+            cached_result = {
+                "user_id": payload.user_id or cached.get("user_id"),
+                "kit_id": payload.kit_id or cached.get("kit_id"),
+                "detected_items": cached.get("detected_items") or [],
+                "missing_items": cached.get("missing_items") or REQUIRED_EMERGENCY_KIT_ITEMS,
+                "extra_items": cached.get("extra_items") or [],
+                "confidence": cached.get("confidence") or 0,
+                "supplement_suggestions": [f"請補齊 {item}" for item in (cached.get("missing_items") or REQUIRED_EMERGENCY_KIT_ITEMS)],
+                "daily_limit": VISION_DAILY_LIMIT,
+                "notes": cached.get("notes") or "",
+                "checked_at": cached.get("created_at"),
+                "image_hash": image_hash,
+                "cache_hit": True,
+            }
+            return safe_response("success", cached_result, "emergency kit vision cache hit", "emergency_kit_scans")
+    except Exception as e:
+        print(f"Vision cache lookup skipped: {e}")
+
     if payload.user_id:
         try:
             today = taipei_now().date().isoformat()
@@ -777,19 +804,27 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
         "daily_limit": VISION_DAILY_LIMIT,
         "notes": vision_result.get("notes") or ("Gemini Vision 未回傳結果，請重新拍攝清楚的避難包照片。" if not vision_result else ""),
         "checked_at": taipei_now().isoformat(),
+        "image_hash": image_hash,
+        "cache_hit": False,
     }
 
     try:
-        supabase.table("emergency_kit_scans").insert({
+        scan_payload = {
             "user_id": payload.user_id,
             "kit_id": payload.kit_id,
+            "image_hash": image_hash,
             "detected_items": result["detected_items"],
             "missing_items": result["missing_items"],
             "extra_items": result["extra_items"],
             "confidence": result["confidence"],
             "notes": result["notes"],
             "created_at": result["checked_at"],
-        }).execute()
+        }
+        try:
+            supabase.table("emergency_kit_scans").insert(scan_payload).execute()
+        except Exception:
+            scan_payload.pop("image_hash", None)
+            supabase.table("emergency_kit_scans").insert(scan_payload).execute()
     except Exception as e:
         errors.append({"service": "supabase", "message": f"emergency_kit_scans 寫入失敗: {e}"})
 

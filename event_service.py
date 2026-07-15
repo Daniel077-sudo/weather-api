@@ -200,6 +200,8 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
     except Exception as e:
         return {"status": "error", "message": f"讀取行程失敗: {str(e)}", **result}
 
+    snapshot_cache: Dict[str, Dict[str, Any]] = {}
+
     for event in events:
         result["checked"] += 1
         event_id = event.get("id")
@@ -207,7 +209,12 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
         try:
             event_time = parse_datetime(event.get("start_time"))
             location_parts = resolve_event_location_parts(event)
-            new_snapshot = await build_weather_snapshot(location_parts["city"], location_parts["district"], event_time)
+            bucket_time = event_time.replace(minute=0, second=0, microsecond=0) if event_time else now
+            bucket_time = bucket_time.replace(hour=(bucket_time.hour // 3) * 3)
+            snapshot_key = f"{location_parts['city']}|{location_parts['district']}|{bucket_time.isoformat()}"
+            if snapshot_key not in snapshot_cache:
+                snapshot_cache[snapshot_key] = await build_weather_snapshot(location_parts["city"], location_parts["district"], event_time)
+            new_snapshot = snapshot_cache[snapshot_key]
             old_snapshot = event.get("weather_snapshot") or {}
 
             if not old_snapshot:
