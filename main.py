@@ -76,6 +76,26 @@ async def debug_status():
 
 # 🚀 API 1：前端地區選單
 # ==========================================
+@app.get("/api/sync-logs")
+async def get_sync_logs(
+    source: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    task_name: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    try:
+        query = supabase.table("sync_logs").select("*").order("finished_at", desc=True).limit(limit)
+        if source:
+            query = query.eq("source", source)
+        if status:
+            query = query.eq("status", status)
+        if task_name:
+            query = query.eq("task_name", task_name)
+        res = query.execute()
+        return safe_response("success", res.data or [], "sync logs loaded", "sync_logs")
+    except Exception as e:
+        return safe_response("error", [], str(e), "sync_logs", [{"service": "supabase", "message": str(e)}])
+
 @app.get("/locations")
 async def get_locations():
     return {"status": "success", "data": TAIWAN_LOCATIONS}
@@ -514,7 +534,6 @@ async def get_events(
             "data": formatted_events
         }
     except Exception as e:
-        print(f"❌ 讀取行程失敗: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -764,8 +783,16 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
     if payload.user_id:
         try:
             today = taipei_now().date().isoformat()
-            usage = supabase.table("emergency_kit_scans").select("id").eq("user_id", payload.user_id).gte("created_at", f"{today}T00:00:00+08:00").execute()
-            if len(usage.data or []) >= VISION_DAILY_LIMIT:
+            usage = (
+                supabase.table("emergency_kit_scans")
+                .select("id", count="exact")
+                .eq("user_id", payload.user_id)
+                .gte("created_at", f"{today}T00:00:00+08:00")
+                .limit(1)
+                .execute()
+            )
+            usage_count = usage.count if usage.count is not None else len(usage.data or [])
+            if usage_count >= VISION_DAILY_LIMIT:
                 return safe_response(
                     "error",
                     {"detected_items": [], "missing_items": REQUIRED_EMERGENCY_KIT_ITEMS, "daily_limit": VISION_DAILY_LIMIT},

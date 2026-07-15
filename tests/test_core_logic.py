@@ -61,6 +61,45 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(response.json()["status"], ["not_configured", "partial_success", "success"])
 
+    def test_api_smoke_health(self):
+        client = TestClient(main.app)
+        response = client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+    def test_api_smoke_debug_status(self):
+        client = TestClient(main.app)
+        response = client.get("/api/debug/status")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "partial_success", "error"])
+        self.assertIn("data", body)
+
+    def test_api_smoke_sync_logs(self):
+        client = TestClient(main.app)
+        response = client.get("/api/sync-logs?limit=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("errors", body)
+
+    def test_api_smoke_events_query(self):
+        client = TestClient(main.app)
+        response = client.get("/api/events?limit=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(response.json()["status"], ["success", "error"])
+
+    def test_api_smoke_vision_invalid_base64(self):
+        client = TestClient(main.app)
+        response = client.post(
+            "/api/emergency-kit/vision-check",
+            json={"image_base64": "not-base64", "mime_type": "image/jpeg"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["source"], "validation")
+
 
 if __name__ == "__main__":
     unittest.main()
