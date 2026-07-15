@@ -76,29 +76,6 @@ class LocalAIRequest(BaseModel):
     weather: Dict[str, Any] = Field(default_factory=dict)
     risk_level: Optional[str] = None
     risk_tags: List[str] = Field(default_factory=list)
-    nearby_incidents: List[Dict[str, Any]] = Field(default_factory=list)
-
-
-class IncidentEventScanRequest(BaseModel):
-    title: Optional[str] = None
-    start_time: Optional[str] = None
-    location: Optional[str] = None
-    city: Optional[str] = None
-    district: Optional[str] = None
-    keywords: List[str] = Field(default_factory=list)
-    store: bool = True
-    only_today: bool = True
-    max_age_minutes: Optional[int] = None
-    scan_scope: str = "single"
-    batch_index: int = 0
-    batch_total: int = 1
-
-
-class ThreadsUrlAnalyzeRequest(BaseModel):
-    url: str
-    store: bool = False
-    only_today: bool = True
-    max_age_minutes: Optional[int] = None
 
 
 class AIIntentSuggestion(BaseModel):

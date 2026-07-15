@@ -3,7 +3,6 @@ from datetime import timedelta
 from typing import Any, Dict
 
 from config import EVENT_ALERT_LEAD_MINUTES, supabase
-from incident_service import list_active_incident_records
 from local_ai_service import build_local_ai_suggestion
 from schemas import AIIntentSuggestion, EventRiskCheckRequest
 from data import TAIWAN_LOCATIONS
@@ -174,17 +173,6 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     }
 
 
-def format_incident_summary(incidents: list[Dict[str, Any]]) -> str:
-    if not incidents:
-        return ""
-    parts = []
-    for item in incidents[:3]:
-        label = item.get("summary") or item.get("title") or item.get("incident_type") or "附近即時狀況"
-        source_url = item.get("source_url") or ""
-        parts.append(f"{label}{f' ({source_url})' if source_url else ''}")
-    return "附近即時回報：" + "；".join(parts)
-
-
 async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes: int = EVENT_ALERT_LEAD_MINUTES) -> Dict[str, Any]:
     now = taipei_now()
     window_end = now + timedelta(hours=hours_ahead)
@@ -248,18 +236,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                 continue
 
             comparison = compare_weather_snapshots(old_snapshot, new_snapshot)
-            active_incidents = []
-            try:
-                active_incidents = list_active_incident_records(
-                    location_parts["city"],
-                    location_parts["district"],
-                    limit=5,
-                )
-            except Exception as incident_e:
-                result["errors"].append({"event_id": event_id, "message": f"即時災情讀取失敗: {incident_e}"})
-
-            incident_should_notify = bool(active_incidents) and event.get("weather_alert_status") != "notified"
-            if not comparison["should_notify"] and not incident_should_notify:
+            if not comparison["should_notify"]:
                 try:
                     supabase.table("events").update({
                         "weather_checked_at": taipei_now().isoformat(),
@@ -269,10 +246,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                 continue
 
             reminder = await build_weather_change_message(event, comparison, new_snapshot)
-            incident_summary = format_incident_summary(active_incidents)
             message = reminder["message"]
-            if incident_summary:
-                message = f"{message} {incident_summary}"
             traffic_risk = await build_traffic_risk_async(new_snapshot, event.get("transport_type"))
             notification = {
                 "event_id": event_id,
@@ -289,7 +263,6 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                 "tdx_status": traffic_risk.get("tdx_status"),
                 "old_weather": comparison["diff"]["old_weather"],
                 "new_weather": comparison["diff"]["new_weather"],
-                "nearby_incidents": active_incidents,
                 "created_at": taipei_now().isoformat(),
             }
             result["notifications"].append(notification)
@@ -306,7 +279,6 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                         "new_weather": notification["new_weather"],
                         "traffic_risk": notification["traffic_risk"],
                         "booking_links": notification["booking_links"],
-                        "nearby_incidents": notification["nearby_incidents"],
                     },
                     "suggested_location": notification["suggested_location"],
                     "created_at": notification["created_at"],

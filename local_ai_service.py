@@ -40,25 +40,14 @@ def _match_risk_rule(risk_tags: List[str], intent: str) -> Dict[str, Any]:
     return {}
 
 
-def _match_incident_rule(incidents: List[Dict[str, Any]]) -> Dict[str, Any]:
-    rules = load_local_ai_rules()
-    incident_types = {item.get("incident_type") for item in incidents or []}
-    for item in rules.get("incident_rules", []):
-        if incident_types.intersection(item.get("incident_types", [])):
-            return item
-    return {}
-
-
 def build_local_ai_suggestion(
     event: Dict[str, Any],
     weather_payload: Dict[str, Any] | None = None,
     risk: Dict[str, Any] | None = None,
-    nearby_incidents: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     rules = load_local_ai_rules()
     weather_payload = weather_payload or {}
     risk = risk or {}
-    nearby_incidents = nearby_incidents or []
 
     location = (
         event.get("location")
@@ -101,21 +90,6 @@ def build_local_ai_suggestion(
             "alternative_location": build_alternative_location(event.get("city") or "", event.get("district") or "", risk_tags),
             "confidence": default.get("confidence", 0.55),
         }
-
-    incident_rule = _match_incident_rule(nearby_incidents)
-    if incident_rule:
-        matched_rules.append(incident_rule.get("id", "incident_rule"))
-        suggestion["risk_summary"] = _format_template(incident_rule.get("risk_summary", suggestion["risk_summary"]), location)
-        suggestion["recommended_action"] = _format_template(incident_rule.get("recommended_action", suggestion["recommended_action"]), location)
-        suggestion["confidence"] = min(
-            0.95,
-            float(suggestion.get("confidence") or 0.55) + float(incident_rule.get("confidence_boost") or 0),
-        )
-
-    if nearby_incidents:
-        links = [item.get("source_url") for item in nearby_incidents[:3] if item.get("source_url")]
-        if links:
-            suggestion["recommended_action"] = f"{suggestion['recommended_action']} 參考連結：{'、'.join(links)}"
 
     suggestion["suggestion_source"] = "local_rules"
     suggestion["matched_rules"] = matched_rules

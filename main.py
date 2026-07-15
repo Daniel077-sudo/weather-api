@@ -14,10 +14,8 @@ from config import CRON_STATUS, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
-from incident_service import cleanup_expired_incidents, extract_locations, get_incident, infer_city_district, list_incidents, scan_threads_incidents
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, IncidentEventScanRequest, LocalAIRequest, QuizScoreSubmitRequest, ThreadsUrlAnalyzeRequest, UserQuery, WeatherSuggestionRequest
-from scripts.threads_public_browser_scanner import analyze_threads_url, scan_public_threads_browser
+from schemas import ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WeatherSuggestionRequest
 from transport_service import build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
 from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
@@ -490,112 +488,8 @@ async def local_ai_suggest(payload: LocalAIRequest):
         event,
         {"weather": payload.weather},
         risk,
-        payload.nearby_incidents,
     )
     return safe_response("success", data, "local AI suggestion generated", "local_rules")
-
-
-@app.post("/api/cron/incident-monitor")
-async def run_incident_monitor(
-    background_tasks: BackgroundTasks,
-    background: bool = Query(False),
-    x_cron_secret: Optional[str] = Header(None),
-):
-    auth_error = require_cron_secret(x_cron_secret)
-    if auth_error:
-        return auth_error
-    if background:
-        background_tasks.add_task(cleanup_expired_incidents)
-        background_tasks.add_task(scan_threads_incidents)
-        return safe_response("processing", {}, "incident scan started in background", "threads")
-    cleanup_expired_incidents()
-    return await scan_threads_incidents()
-
-
-@app.post("/api/cron/cleanup-incidents")
-async def cleanup_incidents_endpoint(
-    ttl_minutes: Optional[int] = Query(None, ge=1, le=1440),
-    x_cron_secret: Optional[str] = Header(None),
-):
-    auth_error = require_cron_secret(x_cron_secret)
-    if auth_error:
-        return auth_error
-    return cleanup_expired_incidents(ttl_minutes)
-
-
-def resolve_incident_scan_location(payload: IncidentEventScanRequest) -> Dict[str, str]:
-    texts = [
-        payload.city or "",
-        payload.district or "",
-        payload.location or "",
-        payload.title or "",
-    ]
-    locations = extract_locations(texts)
-    inferred = infer_city_district(texts, locations)
-    city = payload.city or inferred.get("city") or ""
-    district = payload.district or inferred.get("district") or ""
-    return {"city": city, "district": district}
-
-
-@app.post("/api/incidents/event-scan")
-async def scan_incidents_for_event(payload: IncidentEventScanRequest):
-    location_parts = resolve_incident_scan_location(payload)
-    city = location_parts["city"]
-    district = location_parts["district"]
-    if not city and (payload.location or payload.title):
-        return safe_response(
-            "error",
-            {"title": payload.title, "location": payload.location},
-            "無法從行程判斷縣市，請前端傳 city，例如 臺南市；若要全台掃描請不要傳 title/location。",
-            "validation",
-        )
-    return await scan_public_threads_browser(
-        city=city,
-        district=district,
-        keywords=payload.keywords or None,
-        store=payload.store,
-        only_today=payload.only_today,
-        max_age_minutes=payload.max_age_minutes,
-        scan_scope=payload.scan_scope,
-        batch_index=payload.batch_index,
-        batch_total=payload.batch_total,
-    )
-
-
-@app.post("/api/incidents/analyze-url")
-async def analyze_incident_threads_url(payload: ThreadsUrlAnalyzeRequest):
-    if "threads.com" not in payload.url and "threads.net" not in payload.url:
-        return safe_response(
-            "error",
-            {"url": payload.url},
-            "目前只支援 Threads 貼文網址。",
-            "validation",
-        )
-    return await analyze_threads_url(
-        payload.url,
-        store=payload.store,
-        only_today=payload.only_today,
-        max_age_minutes=payload.max_age_minutes,
-    )
-
-
-@app.get("/api/incidents/latest")
-async def get_latest_incidents(limit: int = Query(20, ge=1, le=100)):
-    return list_incidents(limit=limit)
-
-
-@app.get("/api/incidents")
-async def get_incidents(
-    city: Optional[str] = Query(None),
-    type: Optional[str] = Query(None),
-    limit: int = Query(20, ge=1, le=100),
-):
-    return list_incidents(limit=limit, city=city, incident_type=type)
-
-
-@app.get("/api/incidents/{incident_id}")
-async def get_incident_detail(incident_id: int):
-    return get_incident(incident_id)
 
 
 @app.get("/api/weather/cache-status")
@@ -1066,9 +960,6 @@ create table if not exists public.game_scores (
   correct_count integer,
   created_at timestamptz default now()
 );
-
-alter table public.incident_reports add column if not exists expires_at timestamptz;
-create index if not exists incident_reports_expires_at_idx on public.incident_reports(expires_at);
 """
     return {"status": "success", "sql": sql.strip()}
 

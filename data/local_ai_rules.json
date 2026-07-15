@@ -58,21 +58,5 @@
       "alternative_location": "{location}附近堅固建築內或官方開放避難處所。",
       "confidence": 0.88
     }
-  ],
-  "incident_rules": [
-    {
-      "id": "nearby_fire",
-      "incident_types": ["fire"],
-      "risk_summary": "{location}附近有火災或濃煙回報，可能影響空氣品質與道路管制。",
-      "recommended_action": "建議避開該區域，改走替代路線，並查看原文或官方消防資訊確認狀況。",
-      "confidence_boost": 0.1
-    },
-    {
-      "id": "nearby_traffic",
-      "incident_types": ["traffic_accident", "flood"],
-      "risk_summary": "{location}附近有交通事故、積水或封路回報，移動時間可能增加。",
-      "recommended_action": "建議提前出門，改走替代路線，必要時改搭大眾運輸。",
-      "confidence_boost": 0.08
-    }
   ]
 }
