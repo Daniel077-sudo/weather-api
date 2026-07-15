@@ -10,7 +10,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from chat_service import build_chat_command
-from config import CRON_STATUS, VISION_DAILY_LIMIT, supabase
+from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
@@ -48,6 +48,30 @@ async def health_check():
         "service": "disaster_helper_backend",
         "time": datetime.now(timezone(timedelta(hours=8))).isoformat(),
     }
+
+@app.get("/api/debug/status")
+async def debug_status():
+    services = {
+        "supabase": {
+            "configured": bool(SUPABASE_URL and SUPABASE_KEY),
+            "url_configured": bool(SUPABASE_URL),
+            "key_configured": bool(SUPABASE_KEY),
+        },
+        "cwa": {"configured": bool(CWA_API_KEY)},
+        "gemini": {"configured": bool(GEMINI_API_KEY)},
+        "tdx": {"configured": bool(TDX_CLIENT_ID and TDX_CLIENT_SECRET)},
+        "timetree": {"configured": bool(TIMETREE_ACCESS_TOKEN)},
+        "cron": {"configured": bool(CRON_SECRET), "last_status": CRON_STATUS.get("last_status")},
+    }
+    return safe_response(
+        "success",
+        {
+            "services": services,
+            "weather_cache": summarize_weather_cache(limit=10).get("data", {}),
+        },
+        "debug status loaded",
+        "debug",
+    )
 
 # 🚀 API 1：前端地區選單
 # ==========================================
@@ -287,6 +311,7 @@ async def get_weather(city: str = "臺南市", district: str = "東區"):
 
 @app.get("/api/weather/live")
 async def get_weather_live(
+    background_tasks: BackgroundTasks,
     city: str = Query("臺南市"),
     district: str = Query("東區"),
     lat: Optional[float] = Query(None),
@@ -300,6 +325,9 @@ async def get_weather_live(
             "lat": lat,
             "lng": lng,
         }
+        if response.get("source") == "cache" and response.get("stale"):
+            response["refresh_status"] = "queued"
+            background_tasks.add_task(refresh_weather_cache_city, city, district)
     return response
 
 # ==========================================
