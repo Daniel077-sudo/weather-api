@@ -14,6 +14,7 @@ class WeatherSuggestionRequest(BaseModel):
     district: str = "東區"
     message: str = ""
     activity: Optional[str] = None
+    weather_data: Optional[Dict[str, Any]] = None
 
 
 class ChatRequest(BaseModel):

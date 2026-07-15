@@ -2,7 +2,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from config import supabase
+from config import CHAT_GEMINI_MODE, supabase
 from gemini_service import call_gemini_json_cached
 from utils import parse_datetime, taipei_now
 
@@ -254,6 +254,9 @@ async def build_chat_command(user_id: str, message: str) -> Dict[str, Any]:
             "event_title": title,
             "event_id_to_delete": event_id,
         }
+        if CHAT_GEMINI_MODE != "always":
+            fallback["suggestion_source"] = "local_fallback"
+            return fallback
         return await parse_chat_with_gemini(user_id, message, fallback)
 
     start = parse_event_datetime(message)
@@ -270,4 +273,7 @@ async def build_chat_command(user_id: str, message: str) -> Dict[str, Any]:
         "event_start": start_iso,
         "event_end": end_iso,
     }
+    if CHAT_GEMINI_MODE != "always":
+        fallback["suggestion_source"] = "local_fallback"
+        return fallback
     return await parse_chat_with_gemini(user_id, message, fallback)

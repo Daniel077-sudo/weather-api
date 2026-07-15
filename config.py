@@ -36,6 +36,7 @@ TDX_CLIENT_ID = os.getenv("TDX_CLIENT_ID")
 TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
 VISION_DAILY_LIMIT = env_int("VISION_DAILY_LIMIT", 10)
 EVENT_ALERT_LEAD_MINUTES = env_int("EVENT_ALERT_LEAD_MINUTES", 180)
+CHAT_GEMINI_MODE = env_str("CHAT_GEMINI_MODE", "fallback_only").lower()
 
 
 class MissingSupabaseClient:

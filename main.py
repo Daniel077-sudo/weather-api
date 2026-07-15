@@ -154,6 +154,41 @@ async def chat_command(payload: ChatRequest):
 
 @app.post("/api/weather/suggestion")
 async def weather_suggestion(payload: WeatherSuggestionRequest):
+    if payload.weather_data:
+        weather_payload = payload.weather_data
+        current_weather = weather_payload.get("current") or weather_payload.get("weather") or weather_payload
+        risk_payload = {
+            **analyze_weather_risk(current_weather),
+            **{
+                key: weather_payload.get(key)
+                for key in ["risk_level", "risk_tags", "has_weather_risk"]
+                if weather_payload.get(key) is not None
+            },
+        }
+        suggestion = build_weather_suggestion(
+            payload.city,
+            payload.district,
+            payload.message or payload.activity or "",
+            current_weather,
+            risk_payload,
+        )
+        return {
+            "status": "success",
+            "data": {
+                "user_id": payload.user_id,
+                "city": payload.city,
+                "district": payload.district,
+                "message": payload.message,
+                "weather": current_weather,
+                "risk_level": risk_payload.get("risk_level"),
+                "risk_tags": risk_payload.get("risk_tags"),
+                "has_weather_risk": risk_payload.get("has_weather_risk"),
+                "suggestion": suggestion,
+                "suggestion_source": "local_fallback",
+                "weather_source": "request_payload",
+            },
+        }
+
     query = UserQuery(city=payload.city, district=payload.district, message=payload.message or payload.activity or "行程")
     result = await ask_assistant(query)
     if result.get("status") != "success":
@@ -278,8 +313,65 @@ async def get_weather_live(
 
 
 
+async def update_event_weather_snapshot(event_id: Any, event_payload: Dict[str, Any]):
+    try:
+        location_parts = resolve_event_location_parts(event_payload)
+        city = event_payload.get("city") or location_parts["city"]
+        district = event_payload.get("district") or location_parts["district"]
+        event_time = parse_datetime(event_payload.get("start_time"))
+        snapshot = await build_weather_snapshot(city, district, event_time)
+        update_payload = {
+            "city": city,
+            "district": district,
+            "weather_snapshot": snapshot,
+            "weather_checked_at": snapshot["captured_at"],
+            "risk_level": event_payload.get("risk_level") or snapshot["risk_level"],
+            "risk_tags": event_payload.get("risk_tags") or snapshot["risk_tags"],
+            "has_weather_risk": bool(event_payload.get("has_weather_risk") or snapshot["has_weather_risk"]),
+            "weather_alert_status": "checked",
+        }
+        recommendation = build_weather_suggestion(
+            city,
+            district,
+            event_payload.get("title") or "行程",
+            snapshot["weather"],
+            snapshot,
+        )
+        if not event_payload.get("recommended_action"):
+            update_payload["recommended_action"] = recommendation
+        if not event_payload.get("ai_suggestion"):
+            update_payload["ai_suggestion"] = recommendation
+        try:
+            supabase.table("events").update(update_payload).eq("id", event_id).execute()
+        except Exception:
+            legacy_payload = {
+                key: value
+                for key, value in update_payload.items()
+                if key
+                in {
+                    "weather_snapshot",
+                    "weather_checked_at",
+                    "risk_level",
+                    "risk_tags",
+                    "has_weather_risk",
+                    "recommended_action",
+                    "ai_suggestion",
+                }
+            }
+            supabase.table("events").update(legacy_payload).eq("id", event_id).execute()
+    except Exception as weather_e:
+        print(f"背景更新行程天氣快照失敗: {weather_e}")
+        try:
+            supabase.table("events").update({
+                "weather_alert_status": "weather_update_failed",
+                "weather_checked_at": taipei_now().isoformat(),
+            }).eq("id", event_id).execute()
+        except Exception:
+            pass
+
+
 @app.post("/events")
-async def create_event(event: EventCreate):
+async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
     try:
         db_payload = event.model_dump(exclude_none=True)
         db_payload["transport_type"] = event.transport_type or determine_transport_type(event.url)
@@ -288,7 +380,11 @@ async def create_event(event: EventCreate):
         db_payload["city"] = db_payload.get("city") or location_parts["city"]
         db_payload["district"] = db_payload.get("district") or location_parts["district"]
 
-        if not db_payload.get("weather_snapshot"):
+        should_refresh_weather = not db_payload.get("weather_snapshot")
+        if should_refresh_weather:
+            db_payload["weather_alert_status"] = "pending"
+
+        if False and not db_payload.get("weather_snapshot"):
             try:
                 event_time = parse_datetime(event.start_time)
                 snapshot = await build_weather_snapshot(db_payload["city"], db_payload["district"], event_time)
@@ -324,21 +420,37 @@ async def create_event(event: EventCreate):
             legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
             res = supabase.table("events").insert(legacy_payload).execute()
         if res.data:
-            return {"status": "success", "data": normalize_event(res.data[0])}
+            created_event = res.data[0]
+            event_id = created_event.get("id")
+            if should_refresh_weather and event_id and background_tasks:
+                background_tasks.add_task(update_event_weather_snapshot, event_id, {**db_payload, **created_event})
+            return {"status": "success", "data": normalize_event(created_event)}
         return {"status": "error", "message": "寫入失敗"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 # 注意：路由從 /events 改成了 /api/events 配合前端
 @app.post("/api/events")
-async def create_api_event(event: EventCreate):
-    return await create_event(event)
+async def create_api_event(event: EventCreate, background_tasks: BackgroundTasks):
+    return await create_event(event, background_tasks)
 
 @app.get("/api/events")
-async def get_events():
+async def get_events(
+    user_id: Optional[str] = Query(None),
+    from_time: Optional[str] = Query(None, alias="from"),
+    to_time: Optional[str] = Query(None, alias="to"),
+    limit: int = Query(100, ge=1, le=500),
+):
     """前端讀取行程專用：完全符合瀚霆的 SwiftUI 契約"""
     try:
-        res = supabase.table("events").select("*").execute()
+        query = supabase.table("events").select("*").order("start_time", desc=False).limit(limit)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        if from_time:
+            query = query.gte("start_time", from_time)
+        if to_time:
+            query = query.lte("start_time", to_time)
+        res = query.execute()
         events_data = res.data
         if not events_data:
             return {"status": "success", "data": []}
