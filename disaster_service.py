@@ -123,6 +123,20 @@ def get_active_disaster_alerts(city: Optional[str] = None, district: Optional[st
         return safe_response("error", [], str(e), "disaster_alerts", [{"service": "supabase", "message": str(e)}])
 
 
+def cleanup_expired_disaster_alerts() -> Dict[str, Any]:
+    now = taipei_now().isoformat()
+    try:
+        deleted = supabase.table("disaster_alerts").delete().lt("expires_at", now).execute()
+        rows = deleted.data or []
+        data = {"deleted_count": len(rows), "deleted": rows}
+        log_sync("cleanup_disaster_alerts", "success", f"deleted {len(rows)} expired disaster alerts", "disaster_alerts", data)
+        return safe_response("success", data, "expired disaster alerts cleaned", "disaster_alerts")
+    except Exception as e:
+        error = {"service": "supabase", "message": str(e)}
+        log_sync("cleanup_disaster_alerts", "error", str(e), "disaster_alerts", {"errors": [error]})
+        return safe_response("error", {"deleted_count": 0}, str(e), "disaster_alerts", [error])
+
+
 def summarize_disaster_alert_risk(alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
     severities = [str(alert.get("severity") or "low") for alert in alerts]
     if "high" in severities:

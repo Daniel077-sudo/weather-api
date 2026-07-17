@@ -98,6 +98,25 @@ class CoreLogicTests(unittest.TestCase):
         body = response.json()
         self.assertIn(body["status"], ["success", "error"])
         self.assertIn("data", body)
+        if body["status"] == "success":
+            self.assertIn("traffic_risk", body["data"])
+            self.assertIn("booking_links", body["data"])
+
+    def test_api_smoke_watch_areas(self):
+        client = TestClient(main.app)
+        response = client.get("/api/watch-areas?user_id=test-user&limit=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("errors", body)
+
+    def test_api_smoke_cleanup_disaster_alerts(self):
+        client = TestClient(main.app)
+        response = client.post("/api/cron/cleanup-disaster-alerts")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("errors", body)
 
     def test_api_smoke_events_query(self):
         client = TestClient(main.app)

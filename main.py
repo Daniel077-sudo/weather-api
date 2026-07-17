@@ -13,12 +13,12 @@ from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from chat_service import build_chat_command
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
-from disaster_service import get_active_disaster_alerts, refresh_disaster_alerts, summarize_disaster_alert_risk
+from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WeatherSuggestionRequest
-from transport_service import build_transport_links, determine_transport_type
+from schemas import ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
 from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
 
@@ -308,6 +308,13 @@ async def cron_refresh_disaster_alerts(
         return safe_response("processing", {}, "disaster alerts refresh started in background", "cron")
     return await refresh_disaster_alerts()
 
+@app.post("/api/cron/cleanup-disaster-alerts")
+async def cron_cleanup_disaster_alerts(x_cron_secret: Optional[str] = Header(None)):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+    return cleanup_expired_disaster_alerts()
+
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
@@ -386,6 +393,48 @@ async def list_disaster_alerts(
     return get_active_disaster_alerts(city, district, limit)
 
 
+@app.post("/api/watch-areas")
+async def create_watch_area(payload: WatchAreaCreate):
+    try:
+        data = payload.model_dump(exclude_none=True)
+        data["updated_at"] = taipei_now().isoformat()
+        res = supabase.table("user_watch_areas").insert(data).execute()
+        return safe_response("success", res.data[0] if res.data else data, "watch area created", "user_watch_areas")
+    except Exception as e:
+        return safe_response("error", {}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/watch-areas")
+async def list_watch_areas(
+    user_id: str = Query(...),
+    active_only: bool = Query(True),
+    limit: int = Query(20, ge=1, le=100),
+):
+    try:
+        query = supabase.table("user_watch_areas").select("*").eq("user_id", user_id).order("updated_at", desc=True).limit(limit)
+        if active_only:
+            query = query.eq("is_active", True)
+        res = query.execute()
+        return safe_response("success", res.data or [], "watch areas loaded", "user_watch_areas")
+    except Exception as e:
+        return safe_response("error", [], str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+
+
+@app.delete("/api/watch-areas/{watch_area_id}")
+async def delete_watch_area(watch_area_id: int, user_id: str = Query(...)):
+    try:
+        res = (
+            supabase.table("user_watch_areas")
+            .update({"is_active": False, "updated_at": taipei_now().isoformat()})
+            .eq("id", watch_area_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return safe_response("success", res.data or {"id": watch_area_id, "is_active": False}, "watch area disabled", "user_watch_areas")
+    except Exception as e:
+        return safe_response("error", {"id": watch_area_id}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+
+
 @app.get("/api/area/status")
 async def get_area_status(
     background_tasks: BackgroundTasks,
@@ -400,12 +449,16 @@ async def get_area_status(
     if not isinstance(alerts, list):
         alerts = []
     weather_data = (weather or {}).get("weather_data") or {}
+    traffic_risk = await build_traffic_risk_async(weather_data or summarize_disaster_alert_risk(alerts), None)
+    destination = f"{city}{district}"
     return safe_response(
         "success",
         {
             "location": {"city": city, "district": district, "lat": lat, "lng": lng},
             "weather": weather,
             "disaster_alerts": alerts,
+            "traffic_risk": traffic_risk,
+            "booking_links": build_transport_links("", destination, None),
             "risk_summary": {
                 "weather_risk_level": weather_data.get("risk_level"),
                 "weather_risk_tags": weather_data.get("risk_tags") or [],

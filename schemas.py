@@ -115,6 +115,16 @@ class GeocodeRequest(BaseModel):
     query: str
 
 
+class WatchAreaCreate(BaseModel):
+    user_id: str
+    label: Optional[str] = None
+    city: str
+    district: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    is_active: bool = True
+
+
 class EmergencyKitVisionResult(BaseModel):
     user_id: Optional[str] = None
     kit_id: Optional[str] = None
