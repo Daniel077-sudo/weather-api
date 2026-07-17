@@ -1,8 +1,9 @@
 import json
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from config import EVENT_ALERT_LEAD_MINUTES, supabase
+from disaster_service import get_active_disaster_alerts, summarize_disaster_alert_risk
 from local_ai_service import build_local_ai_suggestion
 from schemas import AIIntentSuggestion, EventRiskCheckRequest
 from data import TAIWAN_LOCATIONS
@@ -81,6 +82,16 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     except Exception as e:
         alert_text = f"weather_alerts unavailable: {e}"
 
+    disaster_alerts: List[Dict[str, Any]] = []
+    try:
+        disaster_response = get_active_disaster_alerts(payload.city, payload.district, 10)
+        if disaster_response.get("status") == "success" and isinstance(disaster_response.get("data"), list):
+            disaster_alerts = disaster_response["data"]
+            if disaster_alerts:
+                alert_text = " ".join([alert_text, json.dumps(disaster_alerts, ensure_ascii=False)]).strip()
+    except Exception as e:
+        alert_text = " ".join([alert_text, f"disaster_alerts unavailable: {e}"]).strip()
+
     combined_text = " ".join([
         payload.title or "",
         location,
@@ -98,6 +109,14 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
             "risk_tags": sorted(set(weather_payload["risk_tags"] + risk["risk_tags"])),
         }
         action = build_weather_suggestion(payload.city or "", payload.district or "", payload.title or payload.activity or "行程", weather_payload["weather"], risk)
+    disaster_risk = summarize_disaster_alert_risk(disaster_alerts)
+    if disaster_risk["has_disaster_risk"]:
+        risk = {
+            "has_weather_risk": True,
+            "risk_level": disaster_risk["risk_level"] if risk_rank(disaster_risk["risk_level"]) >= risk_rank(risk["risk_level"]) else risk["risk_level"],
+            "risk_tags": sorted(set((risk.get("risk_tags") or []) + disaster_risk["risk_tags"])),
+        }
+        action = f"{location} 有官方災防告警，請確認行程地點與交通狀況，必要時延後或改地點。"
 
     fallback_ai = build_local_ai_suggestion(
         {
@@ -164,6 +183,7 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
         "sources": {
             "weather_cache_used": bool(weather_text and "unavailable" not in weather_text),
             "weather_alerts_used": bool(alert_text and "unavailable" not in alert_text),
+            "disaster_alerts_used": bool(disaster_alerts),
             "suggestion_source": ai_structured.get("suggestion_source"),
             "gemini_used": ai_structured.get("suggestion_source") == "gemini",
             "local_rules_used": ai_structured.get("suggestion_source") == "local_rules",
@@ -242,7 +262,21 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                     pass
                 continue
 
+            disaster_alerts: List[Dict[str, Any]] = []
+            try:
+                disaster_response = get_active_disaster_alerts(location_parts["city"], location_parts["district"], 5)
+                if disaster_response.get("status") == "success" and isinstance(disaster_response.get("data"), list):
+                    disaster_alerts = disaster_response["data"]
+            except Exception as alert_e:
+                result["errors"].append({"event_id": event_id, "message": f"disaster alerts unavailable: {alert_e}"})
+
             comparison = compare_weather_snapshots(old_snapshot, new_snapshot)
+            disaster_risk = summarize_disaster_alert_risk(disaster_alerts)
+            if disaster_risk["has_disaster_risk"] and not comparison["should_notify"]:
+                comparison["should_notify"] = True
+                comparison["severity"] = disaster_risk["risk_level"]
+                comparison["reasons"] = [f"官方災防告警: {alert.get('title')}" for alert in disaster_alerts[:3]]
+
             if not comparison["should_notify"]:
                 try:
                     supabase.table("events").update({
@@ -268,6 +302,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                 "traffic_risk": traffic_risk,
                 "booking_links": build_transport_links("", event.get("location") or f"{location_parts['city']}{location_parts['district']}", event.get("transport_type")),
                 "tdx_status": traffic_risk.get("tdx_status"),
+                "disaster_alerts": disaster_alerts,
                 "old_weather": comparison["diff"]["old_weather"],
                 "new_weather": comparison["diff"]["new_weather"],
                 "created_at": taipei_now().isoformat(),
@@ -286,6 +321,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                         "new_weather": notification["new_weather"],
                         "traffic_risk": notification["traffic_risk"],
                         "booking_links": notification["booking_links"],
+                        "disaster_alerts": notification["disaster_alerts"],
                     },
                     "suggested_location": notification["suggested_location"],
                     "created_at": notification["created_at"],

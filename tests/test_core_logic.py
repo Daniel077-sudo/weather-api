@@ -83,6 +83,22 @@ class CoreLogicTests(unittest.TestCase):
         self.assertIn(body["status"], ["success", "error"])
         self.assertIn("errors", body)
 
+    def test_api_smoke_disaster_alerts(self):
+        client = TestClient(main.app)
+        response = client.get("/api/disaster-alerts?city=臺南市&limit=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("errors", body)
+
+    def test_api_smoke_area_status(self):
+        client = TestClient(main.app)
+        response = client.get("/api/area/status?city=臺南市&district=東區")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("data", body)
+
     def test_api_smoke_events_query(self):
         client = TestClient(main.app)
         response = client.get("/api/events?limit=1")

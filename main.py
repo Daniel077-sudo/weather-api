@@ -13,6 +13,7 @@ from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from chat_service import build_chat_command
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
+from disaster_service import get_active_disaster_alerts, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
@@ -293,6 +294,20 @@ async def cron_refresh_weather_cache(
 async def get_cron_status():
     return safe_response("success", CRON_STATUS, "cron status loaded", "cron")
 
+@app.post("/api/cron/refresh-disaster-alerts")
+async def cron_refresh_disaster_alerts(
+    background_tasks: BackgroundTasks,
+    background: bool = True,
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+    if background:
+        background_tasks.add_task(refresh_disaster_alerts)
+        return safe_response("processing", {}, "disaster alerts refresh started in background", "cron")
+    return await refresh_disaster_alerts()
+
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
@@ -360,6 +375,48 @@ async def get_weather_live(
 
 
 
+
+
+@app.get("/api/disaster-alerts")
+async def list_disaster_alerts(
+    city: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    return get_active_disaster_alerts(city, district, limit)
+
+
+@app.get("/api/area/status")
+async def get_area_status(
+    background_tasks: BackgroundTasks,
+    city: str = Query("臺南市"),
+    district: str = Query("東區"),
+    lat: Optional[float] = Query(None),
+    lng: Optional[float] = Query(None),
+):
+    weather = await get_weather_live(background_tasks, city, district, lat, lng)
+    alerts_response = get_active_disaster_alerts(city, district, 20)
+    alerts = alerts_response.get("data") if alerts_response.get("status") == "success" else []
+    if not isinstance(alerts, list):
+        alerts = []
+    weather_data = (weather or {}).get("weather_data") or {}
+    return safe_response(
+        "success",
+        {
+            "location": {"city": city, "district": district, "lat": lat, "lng": lng},
+            "weather": weather,
+            "disaster_alerts": alerts,
+            "risk_summary": {
+                "weather_risk_level": weather_data.get("risk_level"),
+                "weather_risk_tags": weather_data.get("risk_tags") or [],
+                **summarize_disaster_alert_risk(alerts),
+            },
+            "updated_at": taipei_now().isoformat(),
+        },
+        "area status loaded",
+        "area_status",
+        alerts_response.get("errors", []),
+    )
 
 
 async def update_event_weather_snapshot(event_id: Any, event_payload: Dict[str, Any]):
