@@ -13,7 +13,7 @@ from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from chat_service import build_chat_command
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
-from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, refresh_disaster_alerts, summarize_disaster_alert_risk
+from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
@@ -315,6 +315,16 @@ async def cron_cleanup_disaster_alerts(x_cron_secret: Optional[str] = Header(Non
         return auth_error
     return cleanup_expired_disaster_alerts()
 
+@app.post("/api/cron/monitor-watch-areas")
+async def cron_monitor_watch_areas(
+    limit: int = Query(500, ge=1, le=2000),
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+    return monitor_watch_areas(limit)
+
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
@@ -433,6 +443,69 @@ async def delete_watch_area(watch_area_id: int, user_id: str = Query(...)):
         return safe_response("success", res.data or {"id": watch_area_id, "is_active": False}, "watch area disabled", "user_watch_areas")
     except Exception as e:
         return safe_response("error", {"id": watch_area_id}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/watch-areas/status")
+async def get_watch_area_statuses(
+    background_tasks: BackgroundTasks,
+    user_id: str = Query(...),
+    limit: int = Query(20, ge=1, le=50),
+):
+    areas_response = await list_watch_areas(user_id=user_id, active_only=True, limit=limit)
+    if areas_response.get("status") != "success":
+        return areas_response
+    statuses = []
+    errors = []
+    for area in areas_response.get("data") or []:
+        try:
+            status_response = await get_area_status(
+                background_tasks,
+                area.get("city") or "",
+                area.get("district") or "",
+                area.get("lat"),
+                area.get("lng"),
+            )
+            statuses.append({"watch_area": area, "area_status": status_response.get("data", {})})
+        except Exception as e:
+            errors.append({"watch_area_id": area.get("id"), "message": str(e)})
+    return safe_response(
+        "success" if not errors else "partial_success",
+        {"items": statuses, "count": len(statuses)},
+        "watch area statuses loaded",
+        "watch_areas",
+        errors,
+    )
+
+
+@app.get("/api/area-alert-notifications")
+async def get_area_alert_notifications(
+    user_id: str = Query(...),
+    status: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    try:
+        query = supabase.table("area_alert_notifications").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit)
+        if status:
+            query = query.eq("status", status)
+        res = query.execute()
+        return safe_response("success", res.data or [], "area alert notifications loaded", "area_alert_notifications")
+    except Exception as e:
+        return safe_response("error", [], str(e), "area_alert_notifications", [{"service": "supabase", "message": str(e)}])
+
+
+@app.patch("/api/area-alert-notifications/{notification_id}/read")
+async def mark_area_alert_notification_read(notification_id: int, user_id: str = Query(...)):
+    try:
+        res = (
+            supabase.table("area_alert_notifications")
+            .update({"status": "read", "read_at": taipei_now().isoformat()})
+            .eq("id", notification_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return safe_response("success", res.data or {"id": notification_id, "status": "read"}, "area alert notification marked as read", "area_alert_notifications")
+    except Exception as e:
+        return safe_response("error", {"id": notification_id}, str(e), "area_alert_notifications", [{"service": "supabase", "message": str(e)}])
 
 
 @app.get("/api/area/status")

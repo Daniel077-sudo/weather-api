@@ -151,3 +151,79 @@ def summarize_disaster_alert_risk(alerts: List[Dict[str, Any]]) -> Dict[str, Any
         "alert_count": len(alerts),
         "risk_tags": sorted({str(alert.get("type") or "alert") for alert in alerts}),
     }
+
+
+def monitor_watch_areas(limit: int = 500) -> Dict[str, Any]:
+    try:
+        areas_res = (
+            supabase.table("user_watch_areas")
+            .select("*")
+            .eq("is_active", True)
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        watch_areas = areas_res.data or []
+    except Exception as e:
+        return safe_response("error", {"checked": 0, "created": 0}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+
+    checked = 0
+    created = 0
+    skipped = 0
+    errors: List[Dict[str, Any]] = []
+    notifications: List[Dict[str, Any]] = []
+
+    for area in watch_areas:
+        checked += 1
+        user_id = area.get("user_id")
+        watch_area_id = area.get("id")
+        city = area.get("city")
+        district = area.get("district") or ""
+        if not user_id or not city:
+            skipped += 1
+            continue
+
+        alerts_response = get_active_disaster_alerts(city, district, 10)
+        if alerts_response.get("status") != "success":
+            errors.extend(alerts_response.get("errors") or [])
+            continue
+
+        for alert in alerts_response.get("data") or []:
+            alert_hash = alert.get("alert_hash")
+            if not alert_hash:
+                skipped += 1
+                continue
+            notification = {
+                "user_id": user_id,
+                "watch_area_id": watch_area_id,
+                "alert_hash": alert_hash,
+                "city": city,
+                "district": district,
+                "title": alert.get("title") or "災防告警",
+                "message": alert.get("description") or alert.get("title") or "",
+                "severity": alert.get("severity") or "low",
+                "source": alert.get("source") or "unknown",
+                "source_url": alert.get("source_url") or "",
+                "status": "unread",
+                "created_at": taipei_now().isoformat(),
+            }
+            try:
+                supabase.table("area_alert_notifications").upsert(
+                    notification,
+                    on_conflict="user_id,watch_area_id,alert_hash",
+                ).execute()
+                created += 1
+                notifications.append(notification)
+            except Exception as e:
+                errors.append({"watch_area_id": watch_area_id, "alert_hash": alert_hash, "message": str(e)})
+
+    status = "success" if not errors else "partial_success"
+    data = {
+        "checked": checked,
+        "created": created,
+        "skipped": skipped,
+        "notifications": notifications,
+        "errors": errors,
+    }
+    log_sync("monitor_watch_areas", status, f"checked {checked} watch areas, created {created} notifications", "watch_areas", data)
+    return safe_response(status, data, "watch areas monitored", "watch_areas", errors)
