@@ -67,6 +67,32 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
 
+    def test_api_chat_contract_add_event(self):
+        client = TestClient(main.app)
+        response = client.post(
+            "/api/chat",
+            json={"user_id": "test-user", "message": "我這週末想要去阿里山露營！"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        expected_keys = {
+            "reply",
+            "has_alert",
+            "alert_title",
+            "alert_url",
+            "action_type",
+            "event_title",
+            "event_start",
+            "event_end",
+            "event_id_to_delete",
+        }
+        self.assertEqual(set(body.keys()), expected_keys)
+        self.assertIn(body["action_type"], ["ADD_EVENT", "DELETE_EVENT", "NONE"])
+        if body["action_type"] == "ADD_EVENT":
+            self.assertTrue(body["event_title"])
+            self.assertIn("+08:00", body["event_start"])
+            self.assertIn("+08:00", body["event_end"])
+
     def test_api_smoke_debug_status(self):
         client = TestClient(main.app)
         response = client.get("/api/debug/status")
