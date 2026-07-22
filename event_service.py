@@ -291,6 +291,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
             traffic_risk = await build_traffic_risk_async(new_snapshot, event.get("transport_type"))
             notification = {
                 "event_id": event_id,
+                "user_id": event.get("user_id"),
                 "title": title,
                 "start_time": event.get("start_time"),
                 "location": event.get("location") or f"{location_parts['city']}{location_parts['district']}",
@@ -312,6 +313,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
             try:
                 supabase.table("event_weather_alerts").insert({
                     "event_id": str(event_id) if event_id is not None else None,
+                    "user_id": notification["user_id"],
                     "title": title,
                     "message": notification["message"],
                     "severity": notification["severity"],

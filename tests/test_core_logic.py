@@ -152,6 +152,14 @@ class CoreLogicTests(unittest.TestCase):
         self.assertIn(body["status"], ["success", "error"])
         self.assertIn("errors", body)
 
+    def test_api_smoke_notifications_summary(self):
+        client = TestClient(main.app)
+        response = client.get("/api/notifications/summary?user_id=test-user")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "partial_success"])
+        self.assertIn("data", body)
+
     def test_api_smoke_cleanup_disaster_alerts(self):
         client = TestClient(main.app)
         response = client.post("/api/cron/cleanup-disaster-alerts")
@@ -163,6 +171,14 @@ class CoreLogicTests(unittest.TestCase):
     def test_api_smoke_monitor_watch_areas(self):
         client = TestClient(main.app)
         response = client.post("/api/cron/monitor-watch-areas?limit=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "partial_success", "error"])
+        self.assertIn("errors", body)
+
+    def test_api_smoke_disaster_pipeline(self):
+        client = TestClient(main.app)
+        response = client.post("/api/cron/disaster-pipeline?watch_area_limit=1&hours_ahead=1")
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertIn(body["status"], ["success", "partial_success", "error"])

@@ -325,6 +325,54 @@ async def cron_monitor_watch_areas(
         return auth_error
     return monitor_watch_areas(limit)
 
+@app.post("/api/cron/disaster-pipeline")
+async def cron_disaster_pipeline(
+    hours_ahead: int = Query(36, ge=1, le=168),
+    alert_lead_minutes: int = Query(180, ge=1, le=1440),
+    watch_area_limit: int = Query(500, ge=1, le=2000),
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+
+    steps = []
+    errors = []
+
+    for name, runner in [
+        ("refresh_disaster_alerts", refresh_disaster_alerts),
+        ("cleanup_expired_disaster_alerts", cleanup_expired_disaster_alerts),
+    ]:
+        try:
+            result = await runner() if name == "refresh_disaster_alerts" else runner()
+            steps.append({"name": name, "result": result})
+            errors.extend(result.get("errors") or [])
+        except Exception as e:
+            error = {"step": name, "message": str(e)}
+            steps.append({"name": name, "result": safe_response("error", {}, str(e), name, [error])})
+            errors.append(error)
+
+    try:
+        watch_result = monitor_watch_areas(watch_area_limit)
+        steps.append({"name": "monitor_watch_areas", "result": watch_result})
+        errors.extend(watch_result.get("errors") or [])
+    except Exception as e:
+        error = {"step": "monitor_watch_areas", "message": str(e)}
+        steps.append({"name": "monitor_watch_areas", "result": safe_response("error", {}, str(e), "watch_areas", [error])})
+        errors.append(error)
+
+    try:
+        event_result = await monitor_event_weather_window(hours_ahead, alert_lead_minutes)
+        steps.append({"name": "monitor_event_weather_window", "result": event_result})
+        errors.extend(event_result.get("errors") or [])
+    except Exception as e:
+        error = {"step": "monitor_event_weather_window", "message": str(e)}
+        steps.append({"name": "monitor_event_weather_window", "result": {"status": "error", "errors": [error]}})
+        errors.append(error)
+
+    status = "success" if not errors else "partial_success"
+    return safe_response(status, {"steps": steps, "error_count": len(errors)}, "disaster pipeline completed", "cron", errors)
+
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
@@ -506,6 +554,36 @@ async def mark_area_alert_notification_read(notification_id: int, user_id: str =
         return safe_response("success", res.data or {"id": notification_id, "status": "read"}, "area alert notification marked as read", "area_alert_notifications")
     except Exception as e:
         return safe_response("error", {"id": notification_id}, str(e), "area_alert_notifications", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/notifications/summary")
+async def get_notifications_summary(user_id: str = Query(...)):
+    errors = []
+
+    def count_table(table_name: str) -> int:
+        try:
+            res = (
+                supabase.table(table_name)
+                .select("id", count="exact")
+                .eq("user_id", user_id)
+                .eq("status", "unread")
+                .limit(1)
+                .execute()
+            )
+            return res.count if res.count is not None else len(res.data or [])
+        except Exception as e:
+            errors.append({"service": table_name, "message": str(e)})
+            return 0
+
+    area_count = count_table("area_alert_notifications")
+    event_count = count_table("event_weather_alerts")
+    data = {
+        "user_id": user_id,
+        "unread_total": area_count + event_count,
+        "area_alert_unread": area_count,
+        "event_weather_alert_unread": event_count,
+    }
+    return safe_response("success" if not errors else "partial_success", data, "notification summary loaded", "notifications", errors)
 
 
 @app.get("/api/area/status")
