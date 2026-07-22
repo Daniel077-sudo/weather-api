@@ -325,17 +325,11 @@ async def cron_monitor_watch_areas(
         return auth_error
     return monitor_watch_areas(limit)
 
-@app.post("/api/cron/disaster-pipeline")
-async def cron_disaster_pipeline(
+async def run_disaster_pipeline(
     hours_ahead: int = Query(36, ge=1, le=168),
     alert_lead_minutes: int = Query(180, ge=1, le=1440),
     watch_area_limit: int = Query(500, ge=1, le=2000),
-    x_cron_secret: Optional[str] = Header(None),
 ):
-    auth_error = require_cron_secret(x_cron_secret)
-    if auth_error:
-        return auth_error
-
     steps = []
     errors = []
 
@@ -372,6 +366,29 @@ async def cron_disaster_pipeline(
 
     status = "success" if not errors else "partial_success"
     return safe_response(status, {"steps": steps, "error_count": len(errors)}, "disaster pipeline completed", "cron", errors)
+
+
+@app.post("/api/cron/disaster-pipeline")
+async def cron_disaster_pipeline(
+    background_tasks: BackgroundTasks,
+    hours_ahead: int = Query(36, ge=1, le=168),
+    alert_lead_minutes: int = Query(180, ge=1, le=1440),
+    watch_area_limit: int = Query(500, ge=1, le=2000),
+    background: bool = Query(True),
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+    if background:
+        background_tasks.add_task(run_disaster_pipeline, hours_ahead, alert_lead_minutes, watch_area_limit)
+        return safe_response(
+            "processing",
+            {"hours_ahead": hours_ahead, "alert_lead_minutes": alert_lead_minutes, "watch_area_limit": watch_area_limit},
+            "disaster pipeline started in background",
+            "cron",
+        )
+    return await run_disaster_pipeline(hours_ahead, alert_lead_minutes, watch_area_limit)
 
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
@@ -559,6 +576,7 @@ async def mark_area_alert_notification_read(notification_id: int, user_id: str =
 @app.get("/api/notifications/summary")
 async def get_notifications_summary(user_id: str = Query(...)):
     errors = []
+    latest = {"area_alerts": [], "event_weather_alerts": []}
 
     def count_table(table_name: str) -> int:
         try:
@@ -577,11 +595,29 @@ async def get_notifications_summary(user_id: str = Query(...)):
 
     area_count = count_table("area_alert_notifications")
     event_count = count_table("event_weather_alerts")
+    for table_name, key in [
+        ("area_alert_notifications", "area_alerts"),
+        ("event_weather_alerts", "event_weather_alerts"),
+    ]:
+        try:
+            latest_res = (
+                supabase.table(table_name)
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("status", "unread")
+                .order("created_at", desc=True)
+                .limit(3)
+                .execute()
+            )
+            latest[key] = latest_res.data or []
+        except Exception as e:
+            errors.append({"service": table_name, "message": f"latest lookup failed: {e}"})
     data = {
         "user_id": user_id,
         "unread_total": area_count + event_count,
         "area_alert_unread": area_count,
         "event_weather_alert_unread": event_count,
+        "latest": latest,
     }
     return safe_response("success" if not errors else "partial_success", data, "notification summary loaded", "notifications", errors)
 

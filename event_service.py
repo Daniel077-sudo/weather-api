@@ -9,7 +9,7 @@ from schemas import AIIntentSuggestion, EventRiskCheckRequest
 from data import TAIWAN_LOCATIONS
 from gemini_service import call_gemini_json_cached
 from transport_service import build_transport_links, build_traffic_risk_async, determine_transport_type
-from utils import analyze_text_risk, build_recommended_action, geocode_fallback, parse_datetime, safe_response, taipei_now
+from utils import analyze_text_risk, build_recommended_action, geocode_fallback, parse_datetime, safe_response, stable_hash, taipei_now
 from weather_service import (
     analyze_weather_risk, build_alternative_location, build_weather_change_message,
     build_weather_snapshot, build_weather_suggestion, compare_weather_snapshots,
@@ -308,10 +308,19 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                 "new_weather": comparison["diff"]["new_weather"],
                 "created_at": taipei_now().isoformat(),
             }
+            notification_key = stable_hash({
+                "event_id": event_id,
+                "user_id": event.get("user_id"),
+                "severity": notification["severity"],
+                "reasons": notification["reasons"],
+                "disaster_alert_hashes": [alert.get("alert_hash") for alert in disaster_alerts],
+            })
+            notification["notification_key"] = notification_key
             result["notifications"].append(notification)
 
             try:
-                supabase.table("event_weather_alerts").insert({
+                supabase.table("event_weather_alerts").upsert({
+                    "notification_key": notification_key,
                     "event_id": str(event_id) if event_id is not None else None,
                     "user_id": notification["user_id"],
                     "title": title,
@@ -328,7 +337,7 @@ async def monitor_event_weather_window(hours_ahead: int = 36, alert_lead_minutes
                     "suggested_location": notification["suggested_location"],
                     "created_at": notification["created_at"],
                     "status": "unread",
-                }).execute()
+                }, on_conflict="notification_key").execute()
             except Exception as insert_e:
                 result["errors"].append({"event_id": event_id, "message": f"提醒寫入失敗: {insert_e}"})
 

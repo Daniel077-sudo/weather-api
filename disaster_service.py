@@ -172,6 +172,7 @@ def monitor_watch_areas(limit: int = 500) -> Dict[str, Any]:
     skipped = 0
     errors: List[Dict[str, Any]] = []
     notifications: List[Dict[str, Any]] = []
+    alerts_cache: Dict[str, Dict[str, Any]] = {}
 
     for area in watch_areas:
         checked += 1
@@ -183,7 +184,10 @@ def monitor_watch_areas(limit: int = 500) -> Dict[str, Any]:
             skipped += 1
             continue
 
-        alerts_response = get_active_disaster_alerts(city, district, 10)
+        cache_key = f"{city}|{district}"
+        if cache_key not in alerts_cache:
+            alerts_cache[cache_key] = get_active_disaster_alerts(city, district, 10)
+        alerts_response = alerts_cache[cache_key]
         if alerts_response.get("status") != "success":
             errors.extend(alerts_response.get("errors") or [])
             continue
@@ -222,6 +226,7 @@ def monitor_watch_areas(limit: int = 500) -> Dict[str, Any]:
         "checked": checked,
         "created": created,
         "skipped": skipped,
+        "area_cache_entries": len(alerts_cache),
         "notifications": notifications,
         "errors": errors,
     }
