@@ -93,6 +93,22 @@ class CoreLogicTests(unittest.TestCase):
             self.assertIn("+08:00", body["event_start"])
             self.assertIn("+08:00", body["event_end"])
 
+    def test_api_smoke_chat_history(self):
+        client = TestClient(main.app)
+        response = client.get("/api/chat/history?user_id=test-user&limit=5")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("errors", body)
+
+    def test_api_smoke_chat_memory(self):
+        client = TestClient(main.app)
+        response = client.get("/api/chat/memory?user_id=test-user")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn(body["status"], ["success", "error"])
+        self.assertIn("data", body)
+
     def test_api_smoke_debug_status(self):
         client = TestClient(main.app)
         response = client.get("/api/debug/status")

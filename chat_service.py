@@ -5,11 +5,12 @@ from typing import Any, Dict, Optional
 from config import supabase
 from disaster_service import get_active_disaster_alerts
 from gemini_service import call_gemini_json_cached
-from utils import parse_datetime, taipei_now
+from utils import parse_datetime, safe_response, taipei_now
 
 
 CHAT_ACTIONS = {"ADD_EVENT", "DELETE_EVENT", "NONE"}
 TAIPEI_TZ = timezone(timedelta(hours=8))
+MEMORY_MAX_CHARS = 4000
 
 
 def empty_chat_response(reply: str = "收到，我可以協助你查天氣、整理災防提醒，或解析新增/刪除行程。") -> Dict[str, Any]:
@@ -24,6 +25,117 @@ def empty_chat_response(reply: str = "收到，我可以協助你查天氣、整
         "event_end": "",
         "event_id_to_delete": "",
     }
+
+
+def get_user_memory(user_id: str) -> Dict[str, Any]:
+    if not user_id:
+        return {"memory_markdown": "", "summary_json": {}}
+    try:
+        res = supabase.table("user_memory_profiles").select("*").eq("user_id", user_id).limit(1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+    return {"memory_markdown": "", "summary_json": {}}
+
+
+def compact_memory(existing_markdown: str, message: str, response: Dict[str, Any]) -> str:
+    existing = existing_markdown or ""
+    now = taipei_now().isoformat(timespec="seconds")
+    action = response.get("action_type") or "NONE"
+    event_title = response.get("event_title") or ""
+    event_start = response.get("event_start") or ""
+    alert_title = response.get("alert_title") or ""
+    facts = []
+    if event_title:
+        facts.append(f"行程: {event_title}")
+    if event_start:
+        facts.append(f"時間: {event_start}")
+    if alert_title:
+        facts.append(f"告警: {alert_title}")
+    fact_text = "；".join(facts) if facts else "一般對話"
+    entry = f"- {now}：使用者說「{message[:120]}」；判斷 {action}；{fact_text}"
+    if not existing.strip():
+        memory = "# 使用者記憶摘要\n\n## 最近互動\n" + entry
+    else:
+        memory = existing.rstrip() + "\n" + entry
+    if len(memory) > MEMORY_MAX_CHARS:
+        header = "# 使用者記憶摘要\n\n## 最近互動\n"
+        tail = memory[-(MEMORY_MAX_CHARS - len(header)) :]
+        memory = header + tail.lstrip()
+    return memory
+
+
+def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
+    if not user_id:
+        return
+    now = taipei_now().isoformat()
+    try:
+        supabase.table("chat_messages").insert({
+            "user_id": user_id,
+            "role": "user",
+            "content": message,
+            "created_at": now,
+        }).execute()
+        supabase.table("chat_messages").insert({
+            "user_id": user_id,
+            "role": "assistant",
+            "content": response.get("reply") or "",
+            "response_payload": response,
+            "action_type": response.get("action_type") or "NONE",
+            "event_title": response.get("event_title") or "",
+            "event_start": response.get("event_start") or None,
+            "event_end": response.get("event_end") or None,
+            "has_alert": bool(response.get("has_alert")),
+            "alert_title": response.get("alert_title") or "",
+            "alert_url": response.get("alert_url") or "",
+            "created_at": now,
+        }).execute()
+    except Exception:
+        pass
+
+    try:
+        current_memory = get_user_memory(user_id)
+        memory_markdown = compact_memory(current_memory.get("memory_markdown") or "", message, response)
+        summary_json = {
+            "last_action_type": response.get("action_type") or "NONE",
+            "last_event_title": response.get("event_title") or "",
+            "last_event_start": response.get("event_start") or "",
+            "last_has_alert": bool(response.get("has_alert")),
+            "last_alert_title": response.get("alert_title") or "",
+        }
+        supabase.table("user_memory_profiles").upsert({
+            "user_id": user_id,
+            "memory_markdown": memory_markdown,
+            "summary_json": summary_json,
+            "last_interaction_at": now,
+            "updated_at": now,
+        }, on_conflict="user_id").execute()
+    except Exception:
+        pass
+
+
+def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
+    try:
+        res = (
+            supabase.table("chat_messages")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return safe_response("success", res.data or [], "chat history loaded", "chat_messages")
+    except Exception as e:
+        return safe_response("error", [], str(e), "chat_messages", [{"service": "supabase", "message": str(e)}])
+
+
+def get_user_memory_response(user_id: str) -> Dict[str, Any]:
+    try:
+        memory = get_user_memory(user_id)
+        return safe_response("success", memory, "user memory loaded", "user_memory_profiles")
+    except Exception as e:
+        return safe_response("error", {}, str(e), "user_memory_profiles", [{"service": "supabase", "message": str(e)}])
 
 
 def normalize_text(value: str) -> str:
@@ -234,6 +346,8 @@ def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Di
 
 async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
     now = taipei_now()
+    memory = get_user_memory(user_id)
+    memory_markdown = memory.get("memory_markdown") or ""
     prompt = (
         "你是 FastAPI 後端的行事曆與災防助理。請只回傳 JSON object，不要 markdown。\n"
         "任務：解析使用者是否要新增行程、刪除行程，或只是一般聊天。\n"
@@ -245,6 +359,7 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
         "必須包含欄位：reply, has_alert, alert_title, alert_url, action_type, event_title, event_start, event_end, event_id_to_delete。\n"
         f"現在時間 Asia/Taipei: {now.isoformat()}\n"
         f"user_id: {user_id}\n"
+        f"user_memory_markdown: {memory_markdown}\n"
         f"message: {message}\n"
         f"fallback_json: {fallback}"
     )
@@ -261,4 +376,6 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
 async def build_chat_command(user_id: str, message: str) -> Dict[str, Any]:
     normalized = normalize_text(message)
     fallback = build_local_fallback(user_id, normalized)
-    return await parse_chat_with_gemini(user_id, normalized, fallback)
+    response = await parse_chat_with_gemini(user_id, normalized, fallback)
+    persist_chat_turn(user_id, normalized, response)
+    return response

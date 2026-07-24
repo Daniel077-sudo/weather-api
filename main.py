@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
-from chat_service import build_chat_command
+from chat_service import build_chat_command, get_chat_history, get_user_memory_response
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -196,6 +196,17 @@ async def ask_assistant(query: UserQuery):
 @app.post("/api/chat")
 async def chat_command(payload: ChatRequest):
     return await build_chat_command(payload.user_id or "", payload.message)
+
+@app.get("/api/chat/history")
+async def get_chat_history_endpoint(
+    user_id: str = Query(...),
+    limit: int = Query(30, ge=1, le=100),
+):
+    return get_chat_history(user_id, limit)
+
+@app.get("/api/chat/memory")
+async def get_chat_memory_endpoint(user_id: str = Query(...)):
+    return get_user_memory_response(user_id)
 
 
 @app.post("/api/weather/suggestion")
