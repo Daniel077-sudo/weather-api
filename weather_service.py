@@ -10,6 +10,26 @@ from data import CITY_7DAY_MAP, CITY_MAP, REPRESENTATIVE_DISTRICTS, TAIWAN_LOCAT
 from gemini_service import call_gemini_raw
 from utils import log_sync, parse_datetime, safe_int, safe_response, taipei_now
 
+CWA_SSL_ERROR_MARKERS = ("CERTIFICATE_VERIFY_FAILED", "Missing Subject Key Identifier")
+
+
+async def fetch_cwa_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Fetch CWA JSON, retrying once for the CWA certificate-chain issue seen on Render."""
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, params=params, timeout=20.0)
+            res.raise_for_status()
+            return res.json()
+    except httpx.TransportError as e:
+        message = str(e)
+        if not any(marker in message for marker in CWA_SSL_ERROR_MARKERS):
+            raise
+        async with httpx.AsyncClient(verify=False) as client:
+            res = await client.get(url, params=params, timeout=20.0)
+            res.raise_for_status()
+            return res.json()
+
+
 def find_district(data, target):
     if isinstance(data, dict):
         if data.get("locationName") == target or data.get("LocationName") == target: return data
@@ -200,10 +220,8 @@ async def fetch_cwa_forecast(city: str, district: str, seven_day: bool = True) -
 
     url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}"
     params = {"Authorization": CWA_API_KEY, "format": "JSON"}
-    async with httpx.AsyncClient() as client:
-        res = await client.get(url, params=params, timeout=20.0)
-        res.raise_for_status()
-        dist_data = find_district(res.json(), district)
+    payload = await fetch_cwa_json(url, params)
+    dist_data = find_district(payload, district)
 
     forecast = parse_weather_periods(dist_data)
     if not forecast:
@@ -384,11 +402,7 @@ async def _master_alert_and_log():
         alert_url = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/W-C0033-002"
         alert_params = {"Authorization": CWA_API_KEY, "format": "JSON"}
         
-        # 替換為 httpx 非同步請求
-        async with httpx.AsyncClient() as client:
-            alert_res_http = await client.get(alert_url, params=alert_params, timeout=20.0)
-            alert_res_http.raise_for_status()
-            alert_res = alert_res_http.json()
+        alert_res = await fetch_cwa_json(alert_url, alert_params)
 
         # 2. 解析警報資料 (防呆處理)
         records = alert_res.get("records", {})

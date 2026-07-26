@@ -11,6 +11,7 @@ from utils import parse_datetime, safe_response, taipei_now
 CHAT_ACTIONS = {"ADD_EVENT", "DELETE_EVENT", "NONE"}
 TAIPEI_TZ = timezone(timedelta(hours=8))
 MEMORY_MAX_CHARS = 4000
+CHAT_LOGS_TABLE = "chat_logs"
 
 
 def empty_chat_response(reply: str = "收到，我可以協助你查天氣、整理災防提醒，或解析新增/刪除行程。") -> Dict[str, Any]:
@@ -70,29 +71,40 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
     if not user_id:
         return
     now = taipei_now().isoformat()
+    assistant_payload = {
+        "user_id": user_id,
+        "role": "assistant",
+        "content": response.get("reply") or "",
+        "response_payload": response,
+        "action_type": response.get("action_type") or "NONE",
+        "event_title": response.get("event_title") or "",
+        "event_start": response.get("event_start") or None,
+        "event_end": response.get("event_end") or None,
+        "has_alert": bool(response.get("has_alert")),
+        "alert_title": response.get("alert_title") or "",
+        "alert_url": response.get("alert_url") or "",
+        "user_input": message,
+        "ai_response": response.get("reply") or "",
+        "created_at": now,
+    }
     try:
-        supabase.table("chat_messages").insert({
+        supabase.table(CHAT_LOGS_TABLE).insert({
             "user_id": user_id,
             "role": "user",
             "content": message,
+            "user_input": message,
+            "ai_response": "",
             "created_at": now,
         }).execute()
-        supabase.table("chat_messages").insert({
-            "user_id": user_id,
-            "role": "assistant",
-            "content": response.get("reply") or "",
-            "response_payload": response,
-            "action_type": response.get("action_type") or "NONE",
-            "event_title": response.get("event_title") or "",
-            "event_start": response.get("event_start") or None,
-            "event_end": response.get("event_end") or None,
-            "has_alert": bool(response.get("has_alert")),
-            "alert_title": response.get("alert_title") or "",
-            "alert_url": response.get("alert_url") or "",
-            "created_at": now,
-        }).execute()
+        supabase.table(CHAT_LOGS_TABLE).insert(assistant_payload).execute()
     except Exception:
-        pass
+        try:
+            supabase.table(CHAT_LOGS_TABLE).insert({
+                "user_input": f"[{user_id}] {message}",
+                "ai_response": response.get("reply") or "",
+            }).execute()
+        except Exception:
+            pass
 
     try:
         current_memory = get_user_memory(user_id)
@@ -118,16 +130,16 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
 def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
     try:
         res = (
-            supabase.table("chat_messages")
+            supabase.table(CHAT_LOGS_TABLE)
             .select("*")
             .eq("user_id", user_id)
             .order("created_at", desc=True)
             .limit(limit)
             .execute()
         )
-        return safe_response("success", res.data or [], "chat history loaded", "chat_messages")
+        return safe_response("success", res.data or [], "chat history loaded", CHAT_LOGS_TABLE)
     except Exception as e:
-        return safe_response("error", [], str(e), "chat_messages", [{"service": "supabase", "message": str(e)}])
+        return safe_response("error", [], str(e), CHAT_LOGS_TABLE, [{"service": "supabase", "message": str(e)}])
 
 
 def get_user_memory_response(user_id: str) -> Dict[str, Any]:

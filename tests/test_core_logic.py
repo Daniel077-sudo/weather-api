@@ -4,9 +4,10 @@ import unittest
 from fastapi.testclient import TestClient
 
 import main
+from chat_service import CHAT_LOGS_TABLE
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
-from weather_service import compare_weather_snapshots, parse_weather_periods
+from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods
 
 
 class CoreLogicTests(unittest.TestCase):
@@ -100,6 +101,14 @@ class CoreLogicTests(unittest.TestCase):
         body = response.json()
         self.assertIn(body["status"], ["success", "error"])
         self.assertIn("errors", body)
+        self.assertNotEqual(body.get("source"), "chat_messages")
+
+    def test_chat_history_uses_existing_chat_logs_table(self):
+        self.assertEqual(CHAT_LOGS_TABLE, "chat_logs")
+
+    def test_cwa_ssl_fallback_is_scoped_to_certificate_errors(self):
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", CWA_SSL_ERROR_MARKERS)
+        self.assertIn("Missing Subject Key Identifier", CWA_SSL_ERROR_MARKERS)
 
     def test_api_smoke_chat_memory(self):
         client = TestClient(main.app)
