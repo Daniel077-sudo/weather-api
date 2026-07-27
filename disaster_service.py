@@ -156,7 +156,7 @@ def summarize_disaster_alert_risk(alerts: List[Dict[str, Any]]) -> Dict[str, Any
 def monitor_watch_areas(limit: int = 500) -> Dict[str, Any]:
     try:
         areas_res = (
-            supabase.table("user_watch_areas")
+            supabase.table("watch_areas")
             .select("*")
             .eq("is_active", True)
             .order("updated_at", desc=True)
@@ -165,7 +165,7 @@ def monitor_watch_areas(limit: int = 500) -> Dict[str, Any]:
         )
         watch_areas = areas_res.data or []
     except Exception as e:
-        return safe_response("error", {"checked": 0, "created": 0}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+        return safe_response("error", {"checked": 0, "created": 0}, str(e), "watch_areas", [{"service": "supabase", "message": str(e)}])
 
     checked = 0
     created = 0

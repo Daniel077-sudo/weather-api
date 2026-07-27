@@ -484,10 +484,10 @@ async def create_watch_area(payload: WatchAreaCreate):
     try:
         data = payload.model_dump(exclude_none=True)
         data["updated_at"] = taipei_now().isoformat()
-        res = supabase.table("user_watch_areas").insert(data).execute()
-        return safe_response("success", res.data[0] if res.data else data, "watch area created", "user_watch_areas")
+        res = supabase.table("watch_areas").insert(data).execute()
+        return safe_response("success", res.data[0] if res.data else data, "watch area created", "watch_areas")
     except Exception as e:
-        return safe_response("error", {}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+        return safe_response("error", {}, str(e), "watch_areas", [{"service": "supabase", "message": str(e)}])
 
 
 @app.get("/api/watch-areas")
@@ -497,28 +497,28 @@ async def list_watch_areas(
     limit: int = Query(20, ge=1, le=100),
 ):
     try:
-        query = supabase.table("user_watch_areas").select("*").eq("user_id", user_id).order("updated_at", desc=True).limit(limit)
+        query = supabase.table("watch_areas").select("*").eq("user_id", user_id).order("updated_at", desc=True).limit(limit)
         if active_only:
             query = query.eq("is_active", True)
         res = query.execute()
-        return safe_response("success", res.data or [], "watch areas loaded", "user_watch_areas")
+        return safe_response("success", res.data or [], "watch areas loaded", "watch_areas")
     except Exception as e:
-        return safe_response("error", [], str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+        return safe_response("error", [], str(e), "watch_areas", [{"service": "supabase", "message": str(e)}])
 
 
 @app.delete("/api/watch-areas/{watch_area_id}")
 async def delete_watch_area(watch_area_id: int, user_id: str = Query(...)):
     try:
         res = (
-            supabase.table("user_watch_areas")
+            supabase.table("watch_areas")
             .update({"is_active": False, "updated_at": taipei_now().isoformat()})
             .eq("id", watch_area_id)
             .eq("user_id", user_id)
             .execute()
         )
-        return safe_response("success", res.data or {"id": watch_area_id, "is_active": False}, "watch area disabled", "user_watch_areas")
+        return safe_response("success", res.data or {"id": watch_area_id, "is_active": False}, "watch area disabled", "watch_areas")
     except Exception as e:
-        return safe_response("error", {"id": watch_area_id}, str(e), "user_watch_areas", [{"service": "supabase", "message": str(e)}])
+        return safe_response("error", {"id": watch_area_id}, str(e), "watch_areas", [{"service": "supabase", "message": str(e)}])
 
 
 @app.get("/api/watch-areas/status")
