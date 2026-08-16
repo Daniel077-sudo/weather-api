@@ -4,7 +4,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 import main
-from chat_service import CHAT_LOGS_TABLE
+from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_response
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
 from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods
@@ -93,6 +93,24 @@ class CoreLogicTests(unittest.TestCase):
             self.assertTrue(body["event_title"])
             self.assertIn("+08:00", body["event_start"])
             self.assertIn("+08:00", body["event_end"])
+
+    def test_chat_local_fallback_detects_complete_event(self):
+        body = build_local_fallback("test-user", "明天下午三點我要去台南市東區的公園跑步")
+        self.assertEqual(body["action_type"], "ADD_EVENT")
+        self.assertTrue(body["event_title"])
+        self.assertIn("+08:00", body["event_start"])
+        self.assertIn("15:00:00", body["event_start"])
+
+    def test_chat_local_fallback_answers_disaster_qa(self):
+        body = build_local_fallback("test-user", "地震來的時候應該怎麼辦")
+        self.assertEqual(body["action_type"], "NONE")
+        self.assertIn("趴下", body["reply"])
+        self.assertNotIn("目前不會更動行事曆", body["reply"])
+
+    def test_chat_normalizer_does_not_downgrade_local_event(self):
+        fallback = build_local_fallback("test-user", "明天下午三點我要去台南市東區的公園跑步")
+        body = normalize_chat_response({"action_type": "NONE", "reply": "一般對話"}, fallback)
+        self.assertEqual(body["action_type"], "ADD_EVENT")
 
     def test_api_smoke_chat_history(self):
         client = TestClient(main.app)

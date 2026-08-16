@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from config import supabase
+from data import TAIWAN_LOCATIONS
 from disaster_service import get_active_disaster_alerts
 from gemini_service import call_gemini_json_cached
 from utils import parse_datetime, safe_response, taipei_now
@@ -12,6 +13,24 @@ CHAT_ACTIONS = {"ADD_EVENT", "DELETE_EVENT", "NONE"}
 TAIPEI_TZ = timezone(timedelta(hours=8))
 MEMORY_MAX_CHARS = 4000
 CHAT_LOGS_TABLE = "chat_logs"
+TIME_HINTS = ["今天", "明天", "後天", "週末", "周末", "上午", "早上", "下午", "晚上", "中午", "點"]
+GO_HINTS = ["要去", "我要去", "會去", "去", "前往", "到"]
+ACTIVITY_HINTS = ["跑步", "露營", "開會", "上課", "買菜", "看診", "旅遊", "出遊", "考試", "聚餐", "通勤"]
+CHINESE_HOUR_MAP = {
+    "一": 1,
+    "二": 2,
+    "兩": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "十一": 11,
+    "十二": 12,
+}
 
 
 def empty_chat_response(reply: str = "收到，我可以協助你查天氣、整理災防提醒，或解析新增/刪除行程。") -> Dict[str, Any]:
@@ -137,7 +156,17 @@ def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
             .limit(limit)
             .execute()
         )
-        return safe_response("success", res.data or [], "chat history loaded", CHAT_LOGS_TABLE)
+        rows = res.data or []
+        if not rows:
+            legacy = (
+                supabase.table(CHAT_LOGS_TABLE)
+                .select("*")
+                .ilike("user_input", f"[{user_id}]%")
+                .limit(limit)
+                .execute()
+            )
+            rows = legacy.data or []
+        return safe_response("success", rows, "chat history loaded", CHAT_LOGS_TABLE)
     except Exception as e:
         return safe_response("error", [], str(e), CHAT_LOGS_TABLE, [{"service": "supabase", "message": str(e)}])
 
@@ -171,10 +200,12 @@ def next_weekday(now: datetime, weekday: int) -> datetime:
 
 def infer_action_type(message: str) -> str:
     delete_keywords = ["刪除", "取消", "移除", "不要去了", "刪掉行程"]
-    add_keywords = ["新增", "加入", "排入", "安排", "建立", "想去", "想要去", "週末", "周末", "露營", "行程"]
+    add_keywords = ["新增", "加入", "排入", "安排", "建立", "幫我記", "幫我排", "行程"]
     if any(keyword in message for keyword in delete_keywords):
         return "DELETE_EVENT"
     if any(keyword in message for keyword in add_keywords):
+        return "ADD_EVENT"
+    if has_time_hint(message) and has_location_hint(message) and has_trip_or_activity_hint(message):
         return "ADD_EVENT"
     return "NONE"
 
@@ -194,10 +225,53 @@ def infer_location(message: str) -> Dict[str, str]:
         "宜蘭": {"city": "宜蘭縣", "district": ""},
         "嘉義": {"city": "嘉義縣", "district": ""},
     }
+    normalized = message.replace("台", "臺")
+    for city, districts in TAIWAN_LOCATIONS.items():
+        if city in normalized:
+            matched_district = ""
+            for district in districts:
+                if district in normalized:
+                    matched_district = district
+                    break
+            return {"city": city, "district": matched_district}
     for keyword, parts in location_map.items():
         if keyword in message:
             return parts
     return {"city": "", "district": ""}
+
+
+def has_time_hint(message: str) -> bool:
+    if any(hint in message for hint in TIME_HINTS):
+        return True
+    return bool(re.search(r"(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2}", message))
+
+
+def has_location_hint(message: str) -> bool:
+    location = infer_location(message)
+    return bool(location.get("city") or location.get("district"))
+
+
+def has_trip_or_activity_hint(message: str) -> bool:
+    return any(hint in message for hint in GO_HINTS + ACTIVITY_HINTS)
+
+
+def build_disaster_qa_response(message: str) -> Optional[Dict[str, Any]]:
+    if not any(keyword in message for keyword in ["地震", "颱風", "豪雨", "大雨", "火災", "淹水", "停電", "土石流"]):
+        return None
+    if not any(keyword in message for keyword in ["怎麼辦", "怎麼做", "應該", "處理", "準備", "注意"]):
+        return None
+
+    if "地震" in message:
+        reply = "地震時先趴下、掩護、穩住，遠離玻璃與櫃子；搖晃停止後再關火源、穿鞋、帶手機與避難包移動。"
+    elif "火災" in message:
+        reply = "火災時先低姿勢避煙，摸門把確認熱度，能逃就往安全出口走；不能逃就關門塞縫、到窗邊求救。"
+    elif any(keyword in message for keyword in ["豪雨", "大雨", "淹水"]):
+        reply = "豪雨或淹水時避免地下道、河堤與低窪路段，不涉水通行；先確認氣象警特報並準備雨具、行動電源。"
+    elif "颱風" in message:
+        reply = "颱風前先固定門窗與陽台物品，準備飲水、食物、手電筒與行動電源；期間避免外出與靠近海邊河岸。"
+    else:
+        reply = "先確認官方警報，備妥手機、行動電源、飲水、藥品與證件；若所在地有風險，提早往安全地點移動。"
+    return empty_chat_response(reply)
 
 
 def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, str]:
@@ -222,10 +296,11 @@ def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, 
     else:
         start = (base + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
 
-    time_match = re.search(r"(上午|早上|下午|晚上|中午)?\s*(\d{1,2})\s*[點:：]\s*(\d{1,2})?", message)
+    time_match = re.search(r"(上午|早上|下午|晚上|中午)?\s*(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*(\d{1,2})?", message)
     if time_match:
         period = time_match.group(1) or ""
-        hour = int(time_match.group(2))
+        hour_text = time_match.group(2)
+        hour = int(hour_text) if hour_text.isdigit() else CHINESE_HOUR_MAP.get(hour_text, 9)
         minute = int(time_match.group(3) or 0)
         if period in ["下午", "晚上"] and hour < 12:
             hour += 12
@@ -241,7 +316,23 @@ def infer_event_title(message: str, action_type: str) -> str:
     text = normalize_text(message)
     for token in ["幫我", "請", "新增", "加入", "排入", "安排", "建立", "行程", "我", "想要", "想"]:
         text = text.replace(token, " ")
-    text = re.sub(r"(今天|明天|這週末|本週末|週末|周末|上午|早上|下午|晚上|中午|\d{1,2}\s*[點:：]\s*\d{0,2})", " ", text)
+    text = re.sub(r"(今天|明天|後天|這週末|本週末|週末|周末|上午|早上|下午|晚上|中午|(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2})", " ", text)
+    location = infer_location(message)
+    normalized_city = (location.get("city") or "").replace("臺", "台")
+    for token in [
+        location.get("city", ""),
+        normalized_city,
+        location.get("district", ""),
+        "台南市",
+        "臺南市",
+        "台南",
+        "臺南",
+        "的公園",
+        "公園",
+    ]:
+        if token:
+            text = text.replace(token, " ")
+    text = re.sub(r"(要去|我要去|會去|前往|到)", " ", text)
     text = normalize_text(text).strip("，。！! ")
     if not text and action_type == "DELETE_EVENT":
         return ""
@@ -287,6 +378,10 @@ def lookup_alert(message: str) -> Dict[str, Any]:
 
 
 def build_local_fallback(user_id: str, message: str) -> Dict[str, Any]:
+    disaster_qa = build_disaster_qa_response(message)
+    if disaster_qa:
+        return disaster_qa
+
     action_type = infer_action_type(message)
     if action_type == "NONE":
         return empty_chat_response("收到。這則訊息我判斷是一般對話，目前不會更動行事曆。")
@@ -323,6 +418,8 @@ def build_local_fallback(user_id: str, message: str) -> Dict[str, Any]:
 def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
     action_type = str(raw.get("action_type") or fallback.get("action_type") or "NONE").upper()
     if action_type not in CHAT_ACTIONS:
+        action_type = fallback.get("action_type") or "NONE"
+    if fallback.get("action_type") in ["ADD_EVENT", "DELETE_EVENT"] and action_type == "NONE":
         action_type = fallback.get("action_type") or "NONE"
 
     response = {
