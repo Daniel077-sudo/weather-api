@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
-from chat_service import build_chat_command, get_chat_history, get_user_memory_response
+from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -195,7 +195,46 @@ async def ask_assistant(query: UserQuery):
 
 @app.post("/api/chat", response_model=ChatCommandResponse)
 async def chat_command(payload: ChatRequest):
-    return await build_chat_command(payload.user_id or "", payload.message, payload.current_location)
+    try:
+        return await build_chat_command(payload.user_id or "", payload.message, payload.current_location)
+    except Exception as e:
+        return {
+            "status": "error",
+            "reply": f"小藍暫時無法完成這次操作，但服務沒有中斷。原因：{str(e)}",
+            "action_type": "NONE",
+        }
+
+
+@app.get("/api/assistant/profile")
+async def get_assistant_profile():
+    return safe_response(
+        "success",
+        {
+            "name": "小藍",
+            "persona": XIAOLAN_PERSONA,
+            "supported_actions": [
+                "NONE",
+                "CLARIFY",
+                "CREATE_EVENT",
+                "UPDATE_EVENT",
+                "DELETE_EVENT",
+                "WEATHER_QUERY",
+                "DISASTER_GUIDE",
+                "GAME_START",
+            ],
+            "capabilities": [
+                "自然語言建立行程",
+                "多輪追問補齊時間、地點、標題",
+                "依行程地點與時間查詢天氣風險",
+                "修改既有行程時間或地點",
+                "防災情境指引",
+                "防災小遊戲入口",
+                "主動行程天氣提醒",
+            ],
+        },
+        "assistant profile loaded",
+        "assistant",
+    )
 
 @app.get("/api/chat/history")
 async def get_chat_history_endpoint(
@@ -859,6 +898,29 @@ async def get_events(
         return {"status": "error", "message": str(e)}
 
 
+@app.delete("/api/events/{event_id}")
+async def delete_event(
+    event_id: str,
+    user_id: Optional[str] = Query(None),
+):
+    try:
+        query = supabase.table("events").delete().eq("id", event_id)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        res = query.execute()
+        return {
+            "status": "success",
+            "data": {
+                "id": event_id,
+                "deleted": True,
+                "user_id": user_id,
+                "deleted_rows": len(res.data or []),
+            },
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e), "data": {"id": event_id, "deleted": False}}
+
+
 
 @app.post("/api/integrations/timetree/sync")
 async def sync_timetree_events():
@@ -912,6 +974,29 @@ async def run_event_weather_monitor(
         }
     return await monitor_event_weather_window(hours_ahead, alert_lead_minutes)
 
+
+@app.post("/api/cron/assistant-alerts")
+async def cron_assistant_alerts(
+    background_tasks: BackgroundTasks,
+    hours_ahead: int = Query(36, ge=1, le=168),
+    alert_lead_minutes: int = Query(180, ge=1, le=1440),
+    background: bool = Query(True),
+    x_cron_secret: Optional[str] = Header(None),
+):
+    auth_error = require_cron_secret(x_cron_secret)
+    if auth_error:
+        return auth_error
+    if background:
+        background_tasks.add_task(monitor_event_weather_window, hours_ahead, alert_lead_minutes)
+        return safe_response(
+            "processing",
+            {"hours_ahead": hours_ahead, "alert_lead_minutes": alert_lead_minutes},
+            "assistant alert monitor started",
+            "assistant",
+        )
+    return await monitor_event_weather_window(hours_ahead, alert_lead_minutes)
+
+
 @app.get("/api/events/weather-alerts")
 async def get_event_weather_alerts(
     user_id: Optional[str] = Query(None),
@@ -928,6 +1013,81 @@ async def get_event_weather_alerts(
         return safe_response("success", res.data or [], "weather alerts loaded", "event_weather_alerts")
     except Exception as e:
         return safe_response("error", [], str(e), "event_weather_alerts", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/assistant/alerts")
+async def get_assistant_alerts(
+    user_id: Optional[str] = Query(None),
+    hours_ahead: int = Query(36, ge=1, le=168),
+    limit: int = Query(20, ge=1, le=100),
+):
+    now = taipei_now()
+    window_end = now + timedelta(hours=hours_ahead)
+    alerts = []
+    errors = []
+
+    try:
+        query = supabase.table("event_weather_alerts").select("*").order("created_at", desc=True).limit(limit)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        alert_res = query.eq("status", "unread").execute()
+        for item in alert_res.data or []:
+            alerts.append({
+                "type": "weather_alert",
+                "severity": item.get("severity") or "medium",
+                "title": item.get("title") or "行程天氣提醒",
+                "message": item.get("message") or "",
+                "event_id": item.get("event_id"),
+                "created_at": item.get("created_at"),
+                "source": "event_weather_alerts",
+            })
+    except Exception as e:
+        errors.append({"service": "event_weather_alerts", "message": str(e)})
+
+    try:
+        event_query = (
+            supabase.table("events")
+            .select("*")
+            .gte("start_time", now.isoformat())
+            .lte("start_time", window_end.isoformat())
+            .order("start_time", desc=False)
+            .limit(limit)
+        )
+        if user_id:
+            event_query = event_query.eq("user_id", user_id)
+        event_res = event_query.execute()
+        for raw_event in event_res.data or []:
+            event = normalize_event(raw_event)
+            if not event.get("has_weather_risk"):
+                continue
+            alerts.append({
+                "type": "upcoming_event_risk",
+                "severity": event.get("risk_level") or "medium",
+                "title": event.get("title") or "行程風險提醒",
+                "message": event.get("recommended_action") or event.get("ai_suggestion") or "小藍提醒你，這筆行程可能有天氣風險。",
+                "event_id": event.get("id"),
+                "start_time": event.get("start_time"),
+                "location": event.get("location"),
+                "risk_tags": event.get("risk_tags") or [],
+                "source": "events",
+            })
+    except Exception as e:
+        errors.append({"service": "events", "message": str(e)})
+
+    severity_rank = {"high": 0, "medium": 1, "low": 2}
+    alerts = sorted(alerts, key=lambda item: severity_rank.get(item.get("severity") or "low", 2))[:limit]
+    return safe_response(
+        "success" if not errors else "partial_success",
+        {
+            "user_id": user_id,
+            "hours_ahead": hours_ahead,
+            "alerts": alerts,
+            "count": len(alerts),
+        },
+        "assistant alerts loaded",
+        "assistant",
+        errors,
+    )
 
 
 @app.patch("/api/events/weather-alerts/{alert_id}/read")
@@ -1413,6 +1573,7 @@ async def get_nearby_shelters(lat: float, lng: float, limit: int = 5):
 async def get_database_schema_sql():
     sql = """
 alter table public.events add column if not exists location text;
+alter table public.events add column if not exists user_id text;
 alter table public.events add column if not exists city text;
 alter table public.events add column if not exists district text;
 alter table public.events add column if not exists risk_level text default 'low';
@@ -1424,6 +1585,27 @@ alter table public.events add column if not exists weather_alert_status text def
 alter table public.events add column if not exists external_source text;
 alter table public.events add column if not exists external_event_id text;
 alter table public.events add column if not exists last_synced_at timestamptz;
+
+alter table public.chat_logs add column if not exists user_id text;
+alter table public.chat_logs add column if not exists role text;
+alter table public.chat_logs add column if not exists content text;
+alter table public.chat_logs add column if not exists response_payload jsonb default '{}'::jsonb;
+alter table public.chat_logs add column if not exists action_type text;
+alter table public.chat_logs add column if not exists event_title text;
+alter table public.chat_logs add column if not exists event_start timestamptz;
+alter table public.chat_logs add column if not exists event_end timestamptz;
+alter table public.chat_logs add column if not exists has_alert boolean default false;
+alter table public.chat_logs add column if not exists alert_title text;
+alter table public.chat_logs add column if not exists alert_url text;
+alter table public.chat_logs add column if not exists created_at timestamptz default now();
+
+create table if not exists public.user_memory_profiles (
+  user_id text primary key,
+  memory_markdown text default '',
+  summary_json jsonb default '{}'::jsonb,
+  last_interaction_at timestamptz,
+  updated_at timestamptz default now()
+);
 
 alter table public.sync_logs add column if not exists source text default 'backend';
 alter table public.sync_logs add column if not exists payload jsonb default '{}'::jsonb;
@@ -1440,7 +1622,9 @@ create table if not exists public.ai_suggestion_cache (
 
 create table if not exists public.event_weather_alerts (
   id bigint generated by default as identity primary key,
+  notification_key text unique,
   event_id text,
+  user_id text,
   title text,
   message text not null,
   severity text default 'medium',

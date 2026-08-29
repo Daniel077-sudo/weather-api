@@ -28,6 +28,15 @@ def normalize_event(event: dict) -> dict:
 
     event_url = event.get("url") or event.get("transport_ticket_link") or ""
     transport_type = event.get("transport_type") or determine_transport_type(event_url)
+    location = event.get("location") or event.get("location_name") or ""
+    city = event.get("city") or ""
+    district = event.get("district") or ""
+    if location and not (city and district):
+        resolved_location = resolve_event_location_parts({**event, "location": location})
+        city = city or resolved_location.get("city") or ""
+        district = district or resolved_location.get("district") or ""
+    start_time = parse_datetime(event.get("start_time"))
+    end_time = parse_datetime(event.get("end_time"))
 
     risk_tags = event.get("risk_tags") or []
     if isinstance(risk_tags, str):
@@ -37,11 +46,11 @@ def normalize_event(event: dict) -> dict:
         "id": event.get("id"),
         "user_id": event.get("user_id") or "",
         "title": event.get("title") or "",
-        "start_time": event.get("start_time"),
-        "end_time": event.get("end_time"),
-        "location": event.get("location") or event.get("location_name") or "",
-        "city": event.get("city") or "",
-        "district": event.get("district") or "",
+        "start_time": start_time.astimezone(taipei_now().tzinfo).isoformat(timespec="seconds") if start_time else event.get("start_time"),
+        "end_time": end_time.astimezone(taipei_now().tzinfo).isoformat(timespec="seconds") if end_time else event.get("end_time"),
+        "location": location,
+        "city": city,
+        "district": district,
         "url": event_url,
         "transport_type": transport_type or "",
         "has_weather_risk": bool(event.get("has_weather_risk", False)),

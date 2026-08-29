@@ -28,11 +28,26 @@ class ChatCommandResponse(BaseModel):
     has_alert: bool = False
     alert_title: str = ""
     alert_url: str = ""
-    action_type: Literal["NONE", "ADD_EVENT", "CREATE_EVENT", "DELETE_EVENT", "CLARIFY", "EVENT_SYNCED"] = "NONE"
+    action_type: Literal[
+        "NONE",
+        "ADD_EVENT",
+        "CREATE_EVENT",
+        "UPDATE_EVENT",
+        "DELETE_EVENT",
+        "CLARIFY",
+        "EVENT_SYNCED",
+        "WEATHER_QUERY",
+        "DISASTER_GUIDE",
+        "GAME_START",
+    ] = "NONE"
     missing_slots: List[str] = Field(default_factory=list)
     clarify_slot: str = ""
     event_created: Dict[str, Any] = Field(default_factory=dict)
+    event_updated: Dict[str, Any] = Field(default_factory=dict)
     weather_summary: Dict[str, Any] = Field(default_factory=dict)
+    guideline: Dict[str, Any] = Field(default_factory=dict)
+    game: Dict[str, Any] = Field(default_factory=dict)
+    assistant_alerts: List[Dict[str, Any]] = Field(default_factory=list)
     event_title: str = ""
     event_start: str = ""
     event_end: str = ""

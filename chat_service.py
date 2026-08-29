@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from config import supabase
-from data import TAIWAN_LOCATIONS
+from data import GAME_QUESTIONS, TAIWAN_LOCATIONS
 from disaster_service import get_active_disaster_alerts
 from event_service import normalize_event
 from gemini_service import call_gemini_json_cached
@@ -11,13 +11,31 @@ from utils import parse_datetime, safe_response, taipei_now
 from weather_service import build_weather_snapshot, build_weather_suggestion, resolve_event_location_parts
 
 
-CHAT_ACTIONS = {"ADD_EVENT", "CREATE_EVENT", "DELETE_EVENT", "EVENT_SYNCED", "CLARIFY", "NONE"}
+CHAT_ACTIONS = {
+    "ADD_EVENT",
+    "CREATE_EVENT",
+    "UPDATE_EVENT",
+    "DELETE_EVENT",
+    "EVENT_SYNCED",
+    "CLARIFY",
+    "WEATHER_QUERY",
+    "DISASTER_GUIDE",
+    "GAME_START",
+    "NONE",
+}
+XIAOLAN_PERSONA = (
+    "你是小藍，智行天氣與防災專用助理。回答要簡短、自然、主動提醒風險；"
+    "不得編造天氣、警報、交通或資料庫結果，缺資料時要追問。"
+)
 TAIPEI_TZ = timezone(timedelta(hours=8))
 MEMORY_MAX_CHARS = 4000
 CHAT_LOGS_TABLE = "chat_logs"
-TIME_HINTS = ["今天", "明天", "後天", "週末", "周末", "上午", "早上", "下午", "晚上", "中午", "點"]
+TIME_HINTS = ["今天", "明天", "後天", "週末", "周末", "星期", "禮拜", "上午", "早上", "下午", "晚上", "中午", "點"]
 GO_HINTS = ["要去", "我要去", "會去", "去", "前往", "到"]
 ACTIVITY_HINTS = ["跑步", "打球", "爬山", "露營", "開會", "上課", "買菜", "看診", "旅遊", "出遊", "考試", "聚餐", "通勤"]
+WEATHER_QUERY_HINTS = ["會下雨", "天氣", "氣溫", "降雨", "熱不熱", "冷不冷", "適合去", "適合騎車", "適合出門"]
+GAME_HINTS = ["小遊戲", "遊戲", "測驗", "quiz", "答題"]
+UPDATE_EVENT_HINTS = ["改成", "改到", "改為", "改一下", "更新行程", "修改行程", "地點改", "時間改"]
 DISTRICT_SUFFIXES = ("區", "鄉", "鎮", "市")
 CHINESE_HOUR_MAP = {
     "一": 1,
@@ -47,7 +65,11 @@ def empty_chat_response(reply: str = "收到，我可以協助你查天氣、整
         "missing_slots": [],
         "clarify_slot": "",
         "event_created": {},
+        "event_updated": {},
         "weather_summary": {},
+        "guideline": {},
+        "game": {},
+        "assistant_alerts": [],
         "event_title": "",
         "event_start": "",
         "event_end": "",
@@ -161,27 +183,60 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
 
 def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
     try:
-        res = (
-            supabase.table(CHAT_LOGS_TABLE)
-            .select("*")
-            .eq("user_id", user_id)
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        rows = res.data or []
-        if not rows:
-            legacy = (
+        rows = []
+        try:
+            res = (
                 supabase.table(CHAT_LOGS_TABLE)
                 .select("*")
-                .ilike("user_input", f"[{user_id}]%")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
                 .limit(limit)
                 .execute()
             )
-            rows = legacy.data or []
-        return safe_response("success", rows, "chat history loaded", CHAT_LOGS_TABLE)
+            rows = res.data or []
+        except Exception:
+            rows = []
+        if not rows:
+            try:
+                legacy = (
+                    supabase.table(CHAT_LOGS_TABLE)
+                    .select("*")
+                    .ilike("user_input", f"[{user_id}]%")
+                    .limit(limit)
+                    .execute()
+                )
+                rows = legacy.data or []
+            except Exception:
+                rows = []
+        return safe_response("success", [normalize_chat_history_row(row, user_id) for row in reversed(rows)], "chat history loaded", CHAT_LOGS_TABLE)
     except Exception as e:
         return safe_response("error", [], str(e), CHAT_LOGS_TABLE, [{"service": "supabase", "message": str(e)}])
+
+
+def normalize_chat_history_row(row: Dict[str, Any], requested_user_id: str = "") -> Dict[str, Any]:
+    role = row.get("role") or ""
+    raw_user_input = str(row.get("user_input") or "")
+    legacy_user_id = ""
+    legacy_match = re.match(r"^\[([^\]]+)\]\s*(.*)$", raw_user_input)
+    if legacy_match:
+        legacy_user_id = legacy_match.group(1)
+        raw_user_input = legacy_match.group(2)
+
+    is_ai = role == "assistant" or bool(row.get("ai_response") and not row.get("content"))
+    message = row.get("content") or (row.get("ai_response") if is_ai else raw_user_input) or ""
+    sender = "assistant" if is_ai else "user"
+    normalized_user_id = row.get("user_id") or requested_user_id or legacy_user_id
+
+    return {
+        "id": str(row.get("id") or ""),
+        "user_id": str(normalized_user_id or ""),
+        "sender": sender,
+        "message": str(message or ""),
+        "is_ai": is_ai,
+        "created_at": row.get("created_at"),
+        "action_type": row.get("action_type") or "",
+        "response_payload": row.get("response_payload") or {},
+    }
 
 
 def get_user_memory_response(user_id: str) -> Dict[str, Any]:
@@ -204,11 +259,32 @@ def taipei_iso(value: Optional[datetime]) -> str:
     return value.astimezone(TAIPEI_TZ).isoformat(timespec="seconds")
 
 
+def ensure_taipei_iso(value: Any) -> str:
+    parsed = parse_datetime(str(value)) if value else None
+    return taipei_iso(parsed) if parsed else str(value or "")
+
+
 def next_weekday(now: datetime, weekday: int) -> datetime:
     days = (weekday - now.weekday()) % 7
     if days == 0:
         days = 7
     return now + timedelta(days=days)
+
+
+def parse_weekday_hint(message: str) -> Optional[int]:
+    match = re.search(r"(?:星期|禮拜|週|周)([一二三四五六日天])", message)
+    if not match:
+        return None
+    return {
+        "一": 0,
+        "二": 1,
+        "三": 2,
+        "四": 3,
+        "五": 4,
+        "六": 5,
+        "日": 6,
+        "天": 6,
+    }.get(match.group(1))
 
 
 def infer_action_type(message: str) -> str:
@@ -219,6 +295,8 @@ def infer_action_type(message: str) -> str:
     if any(keyword in message for keyword in add_keywords):
         return "ADD_EVENT"
     if has_time_hint(message) and has_location_hint(message) and has_trip_or_activity_hint(message):
+        return "ADD_EVENT"
+    if has_time_hint(message) and has_trip_or_activity_hint(message):
         return "ADD_EVENT"
     return "NONE"
 
@@ -276,12 +354,75 @@ def has_trip_or_activity_hint(message: str) -> bool:
     return any(hint in message for hint in GO_HINTS + ACTIVITY_HINTS)
 
 
-def build_disaster_qa_response(message: str) -> Optional[Dict[str, Any]]:
+def has_weather_query_hint(message: str) -> bool:
+    return any(hint in message for hint in WEATHER_QUERY_HINTS)
+
+
+def is_weather_question(message: str) -> bool:
+    return has_weather_query_hint(message) and any(token in message for token in ["嗎", "?", "？", "會", "適合", "如何", "怎樣"])
+
+
+def has_game_hint(message: str) -> bool:
+    return any(hint in message.lower() for hint in GAME_HINTS)
+
+
+def has_update_event_hint(message: str) -> bool:
+    return any(hint in message for hint in UPDATE_EVENT_HINTS)
+
+
+def infer_disaster_type(message: str) -> str:
+    if "地震" in message:
+        return "earthquake"
+    if any(keyword in message for keyword in ["豪雨", "大雨"]):
+        return "heavy_rain"
+    if any(keyword in message for keyword in ["淹水", "洪水"]):
+        return "flood"
+    if "颱風" in message or "台風" in message:
+        return "typhoon"
+    if "火災" in message:
+        return "fire"
+    if "濃霧" in message:
+        return "fog"
+    if "強風" in message:
+        return "strong_wind"
+    return ""
+
+
+def infer_game_type(message: str) -> str:
+    disaster_type = infer_disaster_type(message)
+    if disaster_type in GAME_QUESTIONS:
+        return disaster_type
+    return "flood"
+
+
+def build_game_start_response(message: str) -> Dict[str, Any]:
+    game_type = infer_game_type(message)
+    questions = GAME_QUESTIONS.get(game_type) or GAME_QUESTIONS.get("flood", [])
+    return {
+        **empty_chat_response(f"小藍已準備好 {game_type} 防災測驗，共 {len(questions)} 題。"),
+        "action_type": "GAME_START",
+        "game": {
+            "game_type": game_type,
+            "questions": [
+                {
+                    "id": question["id"],
+                    "question": question["question"],
+                    "choices": question["choices"],
+                }
+                for question in questions
+            ],
+        },
+    }
+
+
+def build_disaster_guide_response(message: str) -> Optional[Dict[str, Any]]:
     if not any(keyword in message for keyword in ["地震", "颱風", "豪雨", "大雨", "火災", "淹水", "停電", "土石流"]):
         return None
     if not any(keyword in message for keyword in ["怎麼辦", "怎麼做", "應該", "處理", "準備", "注意"]):
         return None
 
+    disaster_type = infer_disaster_type(message) or "general"
+    user_activity = "driving" if any(keyword in message for keyword in ["開車", "騎車", "通勤", "路上"]) else "general"
     if "地震" in message:
         reply = "地震時先趴下、掩護、穩住，遠離玻璃與櫃子；搖晃停止後再關火源、穿鞋、帶手機與避難包移動。"
     elif "火災" in message:
@@ -292,7 +433,52 @@ def build_disaster_qa_response(message: str) -> Optional[Dict[str, Any]]:
         reply = "颱風前先固定門窗與陽台物品，準備飲水、食物、手電筒與行動電源；期間避免外出與靠近海邊河岸。"
     else:
         reply = "先確認官方警報，備妥手機、行動電源、飲水、藥品與證件；若所在地有風險，提早往安全地點移動。"
-    return empty_chat_response(reply)
+    return {
+        **empty_chat_response(reply),
+        "action_type": "DISASTER_GUIDE",
+        "guideline": {
+            "disaster_type": disaster_type,
+            "user_activity": user_activity,
+            "instruction": reply,
+            "priority": "high" if disaster_type in ["flood", "typhoon", "fire"] else "medium",
+        },
+    }
+
+
+async def build_weather_query_response(message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
+    location = infer_location(message)
+    if not (location.get("city") or location.get("district")) and current_location:
+        location = infer_location(current_location)
+    city = location.get("city") or "臺南市"
+    district = location.get("district") or "東區"
+    event_time = infer_event_time(message)["event_start"] if has_time_hint(message) else ""
+    parsed_time = parse_datetime(event_time)
+
+    try:
+        snapshot = await build_weather_snapshot(city, district, parsed_time)
+        weather = snapshot.get("weather") or {}
+        suggestion = build_weather_suggestion(city, district, "天氣查詢", weather, snapshot)
+        weather_summary = {
+            "city": city,
+            "district": district,
+            "temp": weather.get("temp"),
+            "pop": weather.get("pop"),
+            "wx": weather.get("description") or weather.get("wx") or "未知",
+            "risk_level": snapshot.get("risk_level") or "low",
+            "risk_tags": snapshot.get("risk_tags") or [],
+            "has_weather_risk": bool(snapshot.get("has_weather_risk")),
+            "target_time": event_time,
+        }
+        reply = f"小藍查到{city}{district}天氣「{weather_summary['wx']}」，降雨機率 {weather_summary['pop']}%。{suggestion}"
+    except Exception as e:
+        weather_summary = {"city": city, "district": district, "error": str(e), "target_time": event_time}
+        reply = f"小藍目前查不到{city}{district}的即時天氣資料，請稍後再試或確認地點。"
+
+    return {
+        **empty_chat_response(reply),
+        "action_type": "WEATHER_QUERY",
+        "weather_summary": weather_summary,
+    }
 
 
 def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, str]:
@@ -305,12 +491,14 @@ def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, 
         end = start + timedelta(hours=2) if start else None
         return {"event_start": taipei_iso(start), "event_end": taipei_iso(end)}
 
-    if "週末" in message or "周末" in message:
+    weekday = parse_weekday_hint(message)
+    if weekday is not None:
+        start = next_weekday(base, weekday).replace(hour=9, minute=0, second=0, microsecond=0)
+    elif "週末" in message or "周末" in message:
         saturday = next_weekday(base, 5).replace(hour=9, minute=0, second=0, microsecond=0)
         sunday = saturday + timedelta(days=1, hours=8)
         return {"event_start": taipei_iso(saturday), "event_end": taipei_iso(sunday)}
-
-    if "明天" in message:
+    elif "明天" in message:
         start = (base + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
     elif "今天" in message:
         start = base.replace(hour=max(base.hour + 1, 9), minute=0, second=0, microsecond=0)
@@ -337,7 +525,7 @@ def infer_event_title(message: str, action_type: str) -> str:
     text = normalize_text(message)
     for token in ["幫我", "請", "新增", "加入", "排入", "安排", "建立", "行程", "我", "想要", "想"]:
         text = text.replace(token, " ")
-    text = re.sub(r"(今天|明天|後天|這週末|本週末|週末|周末|上午|早上|下午|晚上|中午|(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2})", " ", text)
+    text = re.sub(r"(今天|明天|後天|這週末|本週末|週末|周末|星期[一二三四五六日天]|禮拜[一二三四五六日天]|週[一二三四五六日天]|周[一二三四五六日天]|上午|早上|下午|晚上|中午|(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2})", " ", text)
     location = infer_location(message)
     normalized_city = (location.get("city") or "").replace("臺", "台")
     district = location.get("district", "")
@@ -356,7 +544,7 @@ def infer_event_title(message: str, action_type: str) -> str:
     ]:
         if token:
             text = text.replace(token, " ")
-    text = re.sub(r"(要去|我要去|會去|前往|到)", " ", text)
+    text = re.sub(r"(要去|我要去|會去|前往|到|去)", " ", text)
     text = normalize_text(text).strip("，。！! ")
     if not text and action_type == "DELETE_EVENT":
         return ""
@@ -380,6 +568,121 @@ def find_event_id_to_delete(user_id: str, title: str) -> str:
     except Exception:
         return ""
     return ""
+
+
+def find_event_to_update(user_id: str, title: str = "") -> Dict[str, Any]:
+    try:
+        query = supabase.table("events").select("*").order("start_time", desc=True).limit(5)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        res = query.execute()
+        rows = res.data or []
+        if not rows:
+            return {}
+        if title:
+            for row in rows:
+                if title in str(row.get("title") or "") or str(row.get("title") or "") in title:
+                    return row
+        return rows[0]
+    except Exception:
+        return {}
+
+
+async def update_event_from_chat(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
+    title = infer_event_title(message, "ADD_EVENT")
+    existing = find_event_to_update(user_id, title)
+    if not existing:
+        return {
+            **empty_chat_response("小藍找不到可修改的行程，請提供行程名稱或先建立行程。"),
+            "action_type": "CLARIFY",
+            "missing_slots": ["event"],
+            "clarify_slot": "event",
+        }
+
+    update_payload: Dict[str, Any] = {}
+    if has_time_hint(message):
+        event_time = infer_event_time(message)
+        update_payload["start_time"] = event_time["event_start"]
+        update_payload["end_time"] = event_time["event_end"]
+
+    location = infer_location(message)
+    if not (location.get("city") or location.get("district")) and current_location and "地點" in message:
+        location = infer_location(current_location)
+    if location.get("city") or location.get("district"):
+        update_payload["city"] = location.get("city") or existing.get("city")
+        update_payload["district"] = location.get("district") or existing.get("district")
+        update_payload["location"] = "".join(part for part in [update_payload.get("city"), update_payload.get("district")] if part)
+
+    if not update_payload:
+        return {
+            **empty_chat_response("要把這個行程的時間、地點或標題改成什麼？"),
+            "action_type": "CLARIFY",
+            "missing_slots": ["update_fields"],
+            "clarify_slot": "update_fields",
+        }
+
+    if update_payload.get("city") or update_payload.get("start_time"):
+        try:
+            event_for_weather = {**existing, **update_payload}
+            parts = resolve_event_location_parts(event_for_weather)
+            event_time = parse_datetime(event_for_weather.get("start_time"))
+            snapshot = await build_weather_snapshot(parts["city"], parts["district"], event_time)
+            suggestion = build_weather_suggestion(
+                parts["city"],
+                parts["district"],
+                event_for_weather.get("title") or "行程",
+                snapshot.get("weather") or {},
+                snapshot,
+            )
+            update_payload.update({
+                "city": parts["city"],
+                "district": parts["district"],
+                "weather_snapshot": snapshot,
+                "weather_checked_at": snapshot.get("captured_at"),
+                "risk_level": snapshot.get("risk_level"),
+                "risk_tags": snapshot.get("risk_tags"),
+                "has_weather_risk": snapshot.get("has_weather_risk"),
+                "recommended_action": suggestion,
+                "ai_suggestion": suggestion,
+            })
+        except Exception:
+            pass
+
+    event_id = existing.get("id")
+    try:
+        res = supabase.table("events").update(update_payload).eq("id", event_id).execute()
+    except Exception:
+        legacy_payload = {
+            key: value
+            for key, value in update_payload.items()
+            if key in {"start_time", "end_time", "location", "has_weather_risk", "ai_suggestion"}
+        }
+        res = supabase.table("events").update(legacy_payload).eq("id", event_id).execute()
+
+    updated = normalize_event(res.data[0]) if res.data else normalize_event({**existing, **update_payload})
+    event_updated = {
+        "id": str(updated.get("id") or ""),
+        "title": updated.get("title") or "",
+        "start_time": ensure_taipei_iso(updated.get("start_time")),
+        "end_time": ensure_taipei_iso(updated.get("end_time")),
+        "city": updated.get("city") or "",
+        "district": updated.get("district") or "",
+        "location": updated.get("location") or "",
+        "has_weather_risk": bool(updated.get("has_weather_risk")),
+        "risk_level": updated.get("risk_level") or "low",
+    }
+    return {
+        **empty_chat_response(f"小藍已更新行程：{event_updated['title']}。"),
+        "action_type": "UPDATE_EVENT",
+        "event_updated": event_updated,
+        "event_id": event_updated["id"],
+        "event_title": event_updated["title"],
+        "event_start": event_updated["start_time"],
+        "event_end": event_updated["end_time"],
+        "event_city": event_updated["city"],
+        "event_district": event_updated["district"],
+        "event_location": event_updated["location"],
+    }
 
 
 def lookup_alert(message: str) -> Dict[str, Any]:
@@ -514,7 +817,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         "city": slots.get("event_city") or None,
         "district": slots.get("event_district") or None,
         "location": slots.get("event_location") or None,
-        "source": "chat",
+        "external_source": "chat",
     }
     location_parts = resolve_event_location_parts(event_payload)
     event_payload["city"] = event_payload.get("city") or location_parts["city"]
@@ -556,25 +859,49 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         print(f"聊天建立行程天氣查詢失敗: {e}")
 
     try:
-        res = supabase.table("events").insert(event_payload).execute()
-    except Exception:
-        event_payload["location_name"] = event_payload.get("location")
-        compatible_keys = {
-            "user_id", "city", "district", "title", "start_time", "end_time",
-            "location_name", "has_weather_risk", "ai_suggestion",
-            "risk_level", "risk_tags", "recommended_action", "weather_snapshot",
-            "weather_checked_at", "source",
+        duplicate_query = supabase.table("events").select("*").eq("title", event_payload["title"]).eq("start_time", event_payload["start_time"]).limit(1)
+        if user_id:
+            duplicate_query = duplicate_query.eq("user_id", user_id)
+        duplicate = duplicate_query.execute()
+        if duplicate.data:
+            res = duplicate
+        else:
+            try:
+                res = supabase.table("events").insert(event_payload).execute()
+            except Exception:
+                event_payload["location_name"] = event_payload.get("location")
+                compatible_keys = {
+                    "user_id", "city", "district", "title", "start_time", "end_time",
+                    "location_name", "has_weather_risk", "ai_suggestion",
+                    "risk_level", "risk_tags", "recommended_action", "weather_snapshot",
+                    "weather_checked_at", "external_source",
+                }
+                compatible_payload = {key: value for key, value in event_payload.items() if key in compatible_keys}
+                try:
+                    res = supabase.table("events").insert(compatible_payload).execute()
+                except Exception:
+                    legacy_keys = {
+                        "user_id", "title", "start_time", "end_time",
+                        "location_name", "has_weather_risk", "ai_suggestion", "external_source",
+                    }
+                    legacy_payload = {key: value for key, value in event_payload.items() if key in legacy_keys}
+                    res = supabase.table("events").insert(legacy_payload).execute()
+    except Exception as e:
+        return {
+            **empty_chat_response(f"小藍聽懂了，要建立「{event_payload['title']}」，但目前暫時沒能加進行事曆。原因：{str(e)}"),
+            "status": "partial_success",
+            "action_type": "CLARIFY",
+            "missing_slots": [],
+            "clarify_slot": "db_write_failed",
+            "event_title": event_payload["title"],
+            "event_start": event_payload.get("start_time") or "",
+            "event_end": event_payload.get("end_time") or "",
+            "event_city": event_payload.get("city") or "",
+            "event_district": event_payload.get("district") or "",
+            "event_location": event_payload.get("location") or "",
+            "weather_summary": weather_summary,
+            "pending_event": slots,
         }
-        compatible_payload = {key: value for key, value in event_payload.items() if key in compatible_keys}
-        try:
-            res = supabase.table("events").insert(compatible_payload).execute()
-        except Exception:
-            legacy_keys = {
-                "user_id", "title", "start_time", "end_time",
-                "location_name", "has_weather_risk", "ai_suggestion", "source",
-            }
-            legacy_payload = {key: value for key, value in event_payload.items() if key in legacy_keys}
-            res = supabase.table("events").insert(legacy_payload).execute()
 
     created = normalize_event(res.data[0]) if res.data else event_payload
     reply = f"已幫你加入行程到行事曆了：{created.get('title')}。{weather_text}"
@@ -584,8 +911,8 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
     event_created = {
         "id": str(created.get("id") or ""),
         "title": created.get("title") or "",
-        "start_time": created.get("start_time") or "",
-        "end_time": created.get("end_time") or "",
+        "start_time": ensure_taipei_iso(created.get("start_time")),
+        "end_time": ensure_taipei_iso(created.get("end_time")),
         "city": created_city,
         "district": created_district,
         "location": created_location,
@@ -599,8 +926,8 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         "weather_summary": weather_summary,
         "event_id": str(created.get("id") or ""),
         "event_title": created.get("title") or "",
-        "event_start": created.get("start_time") or "",
-        "event_end": created.get("end_time") or "",
+        "event_start": event_created["start_time"],
+        "event_end": event_created["end_time"],
         "event_city": created_city,
         "event_district": created_district,
         "event_location": created_location,
@@ -609,9 +936,12 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
 
 
 def build_local_fallback(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
-    disaster_qa = build_disaster_qa_response(message)
+    disaster_qa = build_disaster_guide_response(message)
     if disaster_qa:
         return disaster_qa
+
+    if has_game_hint(message):
+        return build_game_start_response(message)
 
     pending = get_pending_event(user_id)
     if pending:
@@ -715,7 +1045,11 @@ def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Di
         "missing_slots": raw.get("missing_slots") or fallback.get("missing_slots") or [],
         "clarify_slot": str(raw.get("clarify_slot") or fallback.get("clarify_slot") or ""),
         "event_created": raw.get("event_created") or fallback.get("event_created") or {},
+        "event_updated": raw.get("event_updated") or fallback.get("event_updated") or {},
         "weather_summary": raw.get("weather_summary") or fallback.get("weather_summary") or {},
+        "guideline": raw.get("guideline") or fallback.get("guideline") or {},
+        "game": raw.get("game") or fallback.get("game") or {},
+        "assistant_alerts": raw.get("assistant_alerts") or fallback.get("assistant_alerts") or [],
         "event_title": str(raw.get("event_title") or fallback.get("event_title") or ""),
         "event_start": str(raw.get("event_start") or fallback.get("event_start") or ""),
         "event_end": str(raw.get("event_end") or fallback.get("event_end") or ""),
@@ -756,13 +1090,13 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
     prompt = (
         "你是 FastAPI 後端的行事曆與災防助理。請只回傳 JSON object，不要 markdown。\n"
         "任務：解析使用者是否要新增行程、刪除行程，或只是一般聊天。\n"
-        "action_type 只能是 ADD_EVENT、DELETE_EVENT、CLARIFY、NONE。不要輸出 CREATE_EVENT 或 EVENT_SYNCED，CREATE_EVENT 由後端建立 DB 後產生。\n"
+        "action_type 只能是 ADD_EVENT、UPDATE_EVENT、DELETE_EVENT、WEATHER_QUERY、DISASTER_GUIDE、GAME_START、CLARIFY、NONE。不要輸出 CREATE_EVENT 或 EVENT_SYNCED，CREATE_EVENT 由後端建立 DB 後產生。\n"
         "若 ADD_EVENT，請填 event_title、event_start、event_end、event_city、event_district、event_location。時間必須是 Asia/Taipei 的 ISO8601，例如 2026-07-25T09:00:00+08:00。\n"
         "若缺少新增行程必填 slot，請輸出 CLARIFY，並填 missing_slots 與 clarify_slot。\n"
         "若 DELETE_EVENT，請填 event_title；event_id_to_delete 若不知道請留空字串。\n"
         "若 NONE，行程欄位留空。\n"
         "has_alert/alert_title/alert_url 若無法確認，請沿用 fallback 或 false/空字串。\n"
-        "必須包含欄位：status, reply, has_alert, alert_title, alert_url, action_type, missing_slots, clarify_slot, event_created, weather_summary, event_title, event_start, event_end, event_id, event_city, event_district, event_location, event_id_to_delete。\n"
+        "必須包含欄位：status, reply, has_alert, alert_title, alert_url, action_type, missing_slots, clarify_slot, event_created, event_updated, weather_summary, guideline, game, assistant_alerts, event_title, event_start, event_end, event_id, event_city, event_district, event_location, event_id_to_delete。\n"
         f"現在時間 Asia/Taipei: {now.isoformat()}\n"
         f"user_id: {user_id}\n"
         f"user_memory_markdown: {memory_markdown}\n"
@@ -781,8 +1115,38 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
 
 async def build_chat_command(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
     normalized = normalize_text(message)
+
+    if has_game_hint(normalized):
+        response = build_game_start_response(normalized)
+        persist_chat_turn(user_id, normalized, response)
+        return response
+
+    disaster_guide = build_disaster_guide_response(normalized)
+    if disaster_guide:
+        persist_chat_turn(user_id, normalized, disaster_guide)
+        return disaster_guide
+
+    if has_update_event_hint(normalized):
+        response = await update_event_from_chat(user_id, normalized, current_location)
+        persist_chat_turn(user_id, normalized, response)
+        return response
+
+    if is_weather_question(normalized) or (has_weather_query_hint(normalized) and infer_action_type(normalized) == "NONE"):
+        response = await build_weather_query_response(normalized, current_location)
+        persist_chat_turn(user_id, normalized, response)
+        return response
+
     fallback = build_local_fallback(user_id, normalized, current_location)
     response = await parse_chat_with_gemini(user_id, normalized, fallback)
+
+    if response.get("action_type") == "WEATHER_QUERY":
+        response = await build_weather_query_response(normalized, current_location)
+    elif response.get("action_type") == "DISASTER_GUIDE":
+        response = build_disaster_guide_response(normalized) or response
+    elif response.get("action_type") == "GAME_START":
+        response = build_game_start_response(normalized)
+    elif response.get("action_type") == "UPDATE_EVENT":
+        response = await update_event_from_chat(user_id, normalized, current_location)
 
     if response.get("action_type") == "ADD_EVENT":
         slots = {
