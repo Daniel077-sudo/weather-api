@@ -1,5 +1,4 @@
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 class UserQuery(BaseModel):
@@ -20,21 +19,32 @@ class WeatherSuggestionRequest(BaseModel):
 class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     message: str
+    current_location: Optional[str] = None
 
 
 class ChatCommandResponse(BaseModel):
+    status: str = "success"
     reply: str = ""
     has_alert: bool = False
     alert_title: str = ""
     alert_url: str = ""
-    action_type: str = "NONE"
+    action_type: Literal["NONE", "ADD_EVENT", "CREATE_EVENT", "DELETE_EVENT", "CLARIFY", "EVENT_SYNCED"] = "NONE"
+    missing_slots: List[str] = Field(default_factory=list)
+    clarify_slot: str = ""
+    event_created: Dict[str, Any] = Field(default_factory=dict)
+    weather_summary: Dict[str, Any] = Field(default_factory=dict)
     event_title: str = ""
     event_start: str = ""
     event_end: str = ""
+    event_id: str = ""
+    event_city: str = ""
+    event_district: str = ""
+    event_location: str = ""
     event_id_to_delete: str = ""
 
 
 class EventCreate(BaseModel):
+    user_id: Optional[str] = None
     title: str
     start_time: str
     end_time: str

@@ -17,7 +17,7 @@ from disaster_service import cleanup_expired_disaster_alerts, get_active_disaste
 from event_service import build_event_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
 from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
@@ -193,9 +193,9 @@ async def ask_assistant(query: UserQuery):
         return {"status": "error", "message": f"解析失敗: {str(e)}"}
 
 
-@app.post("/api/chat")
+@app.post("/api/chat", response_model=ChatCommandResponse)
 async def chat_command(payload: ChatRequest):
-    return await build_chat_command(payload.user_id or "", payload.message)
+    return await build_chat_command(payload.user_id or "", payload.message, payload.current_location)
 
 @app.get("/api/chat/history")
 async def get_chat_history_endpoint(
@@ -730,7 +730,7 @@ async def update_event_weather_snapshot(event_id: Any, event_payload: Dict[str, 
 @app.post("/events")
 async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
     try:
-        db_payload = event.model_dump(exclude_none=True)
+        db_payload = event.model_dump(mode="json", exclude_none=True)
         db_payload["transport_type"] = event.transport_type or determine_transport_type(event.url)
 
         location_parts = resolve_event_location_parts(db_payload)
@@ -768,14 +768,28 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
         try:
             res = supabase.table("events").insert(db_payload).execute()
         except Exception:
-            legacy_keys = {
-                "title", "start_time", "end_time", "url", "description",
-                "transport_type", "has_weather_risk", "ai_suggestion",
-                "location", "risk_level", "risk_tags", "recommended_action",
+            db_payload["location_name"] = db_payload.get("location") or f"{db_payload.get('city', '')}{db_payload.get('district', '')}"
+            if db_payload.get("url"):
+                db_payload["transport_ticket_link"] = db_payload["url"]
+
+            compatible_keys = {
+                "user_id", "city", "district",
+                "title", "start_time", "end_time", "location_name",
+                "transport_ticket_link", "has_weather_risk", "ai_suggestion",
+                "risk_level", "risk_tags", "recommended_action",
                 "external_source", "external_event_id", "last_synced_at",
             }
-            legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
-            res = supabase.table("events").insert(legacy_payload).execute()
+            compatible_payload = {key: value for key, value in db_payload.items() if key in compatible_keys}
+            try:
+                res = supabase.table("events").insert(compatible_payload).execute()
+            except Exception:
+                legacy_keys = {
+                    "user_id", "title", "start_time", "end_time", "location_name",
+                    "transport_ticket_link", "has_weather_risk", "ai_suggestion",
+                    "external_source", "external_event_id", "last_synced_at",
+                }
+                legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
+                res = supabase.table("events").insert(legacy_payload).execute()
         if res.data:
             created_event = res.data[0]
             event_id = created_event.get("id")

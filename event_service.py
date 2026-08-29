@@ -35,6 +35,7 @@ def normalize_event(event: dict) -> dict:
 
     return {
         "id": event.get("id"),
+        "user_id": event.get("user_id") or "",
         "title": event.get("title") or "",
         "start_time": event.get("start_time"),
         "end_time": event.get("end_time"),
@@ -129,7 +130,6 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
         },
         weather_payload,
         risk,
-        [],
     )
     prompt = (
         "你是防災行程助理。請只回傳 JSON，不要 markdown。\n"

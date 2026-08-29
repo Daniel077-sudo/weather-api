@@ -8,7 +8,7 @@ import httpx
 from config import CRON_STATUS, CWA_API_KEY, supabase
 from data import CITY_7DAY_MAP, CITY_MAP, REPRESENTATIVE_DISTRICTS, TAIWAN_LOCATIONS
 from gemini_service import call_gemini_raw
-from utils import log_sync, parse_datetime, safe_int, safe_response, taipei_now
+from utils import geocode_fallback, log_sync, parse_datetime, safe_int, safe_response, taipei_now
 
 CWA_SSL_ERROR_MARKERS = ("CERTIFICATE_VERIFY_FAILED", "Missing Subject Key Identifier")
 
