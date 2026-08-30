@@ -1,0 +1,265 @@
+@iOS / Android 前端同學：
+
+後端已完成本輪小藍 /api/chat 與行程 API 修正，最新 commit 已 push 到 main：
+
+commit: 9adb298 Fix chat event flow and event API contract
+
+一、P0：/api/chat 建立行程 HTTP 500
+
+已修正。
+
+現在 /api/chat 判斷為建立行程時，如果查天氣或寫入 Supabase 失敗，不會讓整支 API 直接 500。
+後端會回正常 JSON，例如：
+
+{
+  "status": "partial_success",
+  "action_type": "CLARIFY",
+  "reply": "小藍聽懂了，要建立「打球」，但目前暫時沒能加進行事曆...",
+  "event_title": "打球",
+  "event_start": "2026-08-30T14:00:00+08:00",
+  "event_end": "2026-08-30T16:00:00+08:00"
+}
+
+如果資料庫寫入成功，會回：
+
+{
+  "status": "success",
+  "action_type": "CREATE_EVENT",
+  "reply": "已幫你加入行程到行事曆了...",
+  "event_created": {
+    "id": "...",
+    "title": "打球",
+    "start_time": "2026-08-30T14:00:00+08:00",
+    "end_time": "2026-08-30T16:00:00+08:00",
+    "city": "臺南市",
+    "district": "安平區",
+    "location": "臺南市安平區",
+    "has_weather_risk": false,
+    "risk_level": "low"
+  },
+  "weather_summary": {
+    "temp": 31,
+    "pop": 70,
+    "wx": "午後短暫雷陣雨"
+  }
+}
+
+二、P0：CLARIFY 多輪補資料
+
+已修正。
+
+測試句：
+
+我禮拜六想去爬山
+
+現在會回：
+
+{
+  "status": "success",
+  "action_type": "CLARIFY",
+  "missing_slots": ["location"],
+  "clarify_slot": "location",
+  "event_title": "爬山",
+  "event_start": "2026-09-05T09:00:00+08:00",
+  "event_end": "2026-09-05T11:00:00+08:00"
+}
+
+後端會用 user_id 記住 pending_event，下一句使用者補地點後會繼續完成同一筆行程，不會當成全新行程。
+
+三、P1：時間格式
+
+已修正。
+
+後端回傳給前端的時間會盡量統一為 Asia/Taipei：
+
+2026-08-30T14:00:00+08:00
+
+不會把「台灣下午兩點」回成 2026-08-30T14:00:00Z，避免前端顯示成台灣晚上十點。
+
+影響範圍：
+
+- /api/chat 的 event_start
+- /api/chat 的 event_created.start_time
+- /api/chat 的 event_updated.start_time
+- GET /api/events 的 start_time / end_time
+
+四、P1：POST /api/events city / district 保存與 round-trip
+
+已加強。
+
+後端現在寫入 events 時會保留：
+
+- user_id
+- city
+- district
+- location
+
+讀取 GET /api/events 時，如果資料庫舊欄位沒有 city / district，但 location 或 location_name 有類似「臺南市安平區」的字串，後端會嘗試解析補回：
+
+{
+  "city": "臺南市",
+  "district": "安平區"
+}
+
+但 Supabase events 表仍建議確認有以下欄位：
+
+alter table public.events add column if not exists user_id text;
+alter table public.events add column if not exists city text;
+alter table public.events add column if not exists district text;
+alter table public.events add column if not exists location text;
+
+五、P2：DELETE /api/events/{id}
+
+已新增。
+
+刪除行程 API：
+
+DELETE /api/events/{event_id}?user_id=xxx
+
+回傳：
+
+{
+  "status": "success",
+  "data": {
+    "id": "event_id",
+    "deleted": true,
+    "user_id": "xxx",
+    "deleted_rows": 1
+  }
+}
+
+如果前端有 user_id，建議一定帶上，避免刪到其他使用者資料。
+
+六、P2：/api/chat/history 格式
+
+已修正。
+
+目前聊天紀錄仍寫在：
+
+chat_logs
+
+不是 chat_messages。
+
+GET /api/chat/history?user_id=xxx 現在會回結構化資料：
+
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "1",
+      "user_id": "xxx",
+      "sender": "user",
+      "message": "我明天下午兩點要去台南安平打球",
+      "is_ai": false,
+      "created_at": "...",
+      "action_type": "",
+      "response_payload": {}
+    },
+    {
+      "id": "2",
+      "user_id": "xxx",
+      "sender": "assistant",
+      "message": "已幫你加入行程到行事曆了...",
+      "is_ai": true,
+      "created_at": "...",
+      "action_type": "CREATE_EVENT",
+      "response_payload": {}
+    }
+  ]
+}
+
+後端也兼容舊資料格式：
+
+user_input: "[uuid] 訊息"
+
+會自動把 uuid 解析回 user_id。
+
+七、current_location 格式確認
+
+iOS 目前送「縣市+行政區」合在一起可以，例如：
+
+{
+  "current_location": "臺南市東區"
+}
+
+後端已支援這種格式，不需要拆成 current_city / current_district。
+
+八、重複建立行程去重
+
+已加簡單去重。
+
+/api/chat 建立行程前會用：
+
+user_id + title + start_time
+
+查詢是否已有相同行程。
+
+如果已有相同資料，就回既有 event，不再新增第二筆。
+
+九、小藍新增 action_type
+
+/api/chat 目前支援：
+
+- NONE
+- CLARIFY
+- CREATE_EVENT
+- UPDATE_EVENT
+- DELETE_EVENT
+- WEATHER_QUERY
+- DISASTER_GUIDE
+- GAME_START
+- EVENT_SYNCED
+- ADD_EVENT
+
+其中：
+
+- ADD_EVENT 是後端內部解析階段使用
+- CREATE_EVENT 代表後端已完成資料庫建立
+- CLARIFY 代表缺欄位，需要前端繼續讓使用者補資料
+
+十、新增的小藍 API
+
+1. 小藍能力資訊：
+
+GET /api/assistant/profile
+
+用途：前端可取得小藍名稱、persona、支援 actions、能力清單。
+
+2. 小藍主動提醒：
+
+GET /api/assistant/alerts?user_id=xxx
+
+用途：前端可拉取行程天氣風險提醒。
+
+3. 產生小藍提醒的 cron：
+
+POST /api/cron/assistant-alerts
+
+用途：Render cron 或手動觸發，檢查未來行程天氣風險。
+
+十一、已驗證
+
+後端本地已跑：
+
+venv\Scripts\python.exe -m py_compile main.py schemas.py chat_service.py weather_service.py event_service.py
+
+測試通過項目：
+
+- /api/chat 建行程 DB 失敗時不會 500
+- 我禮拜六想去爬山 -> CLARIFY
+- 我明天下午兩點要去台南安平打球 -> 可解析為臺南市 / 安平區 / 打球 / +08:00 時間
+- DELETE /api/events/{event_id} 已出現在 OpenAPI
+- /api/chat/history 可回前端需要的 sender/message/is_ai 結構
+
+十二、前端建議
+
+iOS / Android 接 /api/chat 時建議以 action_type 分流：
+
+- CREATE_EVENT：不要自己寫 DB，只刷新行事曆列表
+- CLARIFY：顯示 reply，下一句繼續送同一個 user_id
+- WEATHER_QUERY：讀 weather_summary
+- DISASTER_GUIDE：讀 guideline
+- GAME_START：讀 game.questions
+- UPDATE_EVENT：刷新行事曆列表
+- DELETE_EVENT：可搭配 DELETE /api/events/{id}
+

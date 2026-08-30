@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>小藍 AI 助理測試</title>
+  <style>
+    :root {
+      --bg: #eef4fb;
+      --panel: #ffffff;
+      --text: #162033;
+      --muted: #64748b;
+      --line: #d7e0ec;
+      --blue: #2563eb;
+      --blue-dark: #1d4ed8;
+      --soft-blue: #dbeafe;
+      --red: #dc2626;
+      --green: #15803d;
+      --amber: #b45309;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 14px;
+      width: min(1240px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 14px;
+    }
+    .chat, .side {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .chat {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: calc(100vh - 28px);
+    }
+    header {
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 22px; }
+    .subtitle { margin-top: 5px; color: var(--muted); font-size: 14px; }
+    .setup {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 9px 10px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+    }
+    .messages {
+      padding: 18px;
+      overflow: auto;
+      background: #f8fbff;
+    }
+    .bubble {
+      width: fit-content;
+      max-width: 76%;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      border-radius: 8px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .bubble.user { margin-left: auto; background: var(--soft-blue); }
+    .bubble.ai { margin-right: auto; background: #fff; border: 1px solid var(--line); }
+    .badge {
+      display: inline-block;
+      margin-bottom: 6px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .composer {
+      padding: 14px;
+      border-top: 1px solid var(--line);
+      background: #fff;
+    }
+    .composer-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: end;
+    }
+    textarea { min-height: 58px; max-height: 160px; resize: vertical; }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font: inherit;
+      color: #fff;
+      background: var(--blue);
+      cursor: pointer;
+    }
+    button:hover { background: var(--blue-dark); }
+    button.secondary { background: #e8eef8; color: #1e3a8a; }
+    button.danger { background: var(--red); margin-top: 8px; }
+    .quick { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .side {
+      min-height: calc(100vh - 28px);
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .side-header { padding: 16px; border-bottom: 1px solid var(--line); }
+    .side-body { padding: 14px; overflow: auto; }
+    .panel { border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 14px; }
+    .panel:last-child { border-bottom: 0; }
+    h2 { margin: 0 0 10px; font-size: 15px; }
+    .item {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      margin-bottom: 8px;
+      background: #fff;
+    }
+    .item strong { display: block; margin-bottom: 4px; }
+    .meta { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .risk-high { color: var(--red); }
+    .risk-medium { color: var(--amber); }
+    .risk-low { color: var(--green); }
+    .status {
+      padding: 9px 10px;
+      border-radius: 6px;
+      background: #eff6ff;
+      color: #1e3a8a;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .raw {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 260px;
+      overflow: auto;
+      background: #0f172a;
+      color: #dbeafe;
+      border-radius: 6px;
+      padding: 10px;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    @media (max-width: 920px) {
+      .app { grid-template-columns: 1fr; }
+      .chat, .side { min-height: auto; }
+      .setup { grid-template-columns: 1fr; }
+      .bubble { max-width: 90%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="chat">
+      <header>
+        <h1>小藍 AI 助理</h1>
+        <div class="subtitle">你只要聊天，小藍會自動建立行程、查天氣、給防災指引或開啟小遊戲。</div>
+        <div class="setup">
+          <div>
+            <label for="baseUrl">API Base URL</label>
+            <input id="baseUrl" placeholder="留空 = 目前網域" />
+          </div>
+          <div>
+            <label for="userId">user_id</label>
+            <input id="userId" value="demo-user-001" />
+          </div>
+          <div>
+            <label for="currentLocation">目前位置</label>
+            <input id="currentLocation" value="臺南市東區" />
+          </div>
+        </div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="composer">
+        <div class="composer-row">
+          <textarea id="message" placeholder="輸入：我明天下午兩點要去台南安平打球">我明天下午兩點要去台南安平打球</textarea>
+          <button id="send">送出</button>
+        </div>
+        <div class="quick">
+          <button class="secondary" data-msg="我明天下午兩點要去台南安平打球">建立行程</button>
+          <button class="secondary" data-msg="我禮拜六想去爬山">多輪追問</button>
+          <button class="secondary" data-msg="明天適合去阿里山嗎">查天氣</button>
+          <button class="secondary" data-msg="淹水怎麼辦">防災指引</button>
+          <button class="secondary" data-msg="我想玩淹水小遊戲">防災小遊戲</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="side-header">
+        <h2>小藍自動整理</h2>
+        <div id="status" class="status">尚未送出訊息。</div>
+      </div>
+      <div class="side-body">
+        <div class="panel">
+          <h2>最新動作</h2>
+          <div id="latestAction" class="item meta">等待小藍回覆。</div>
+        </div>
+        <div class="panel">
+          <h2>行事曆</h2>
+          <div id="events" class="meta">尚未讀取。</div>
+        </div>
+        <div class="panel">
+          <h2>天氣 / 風險</h2>
+          <div id="weather" class="item meta">尚無資料。</div>
+        </div>
+        <div class="panel">
+          <h2>防災 / 遊戲</h2>
+          <div id="guideGame" class="item meta">尚無資料。</div>
+        </div>
+        <div class="panel">
+          <h2>原始回應</h2>
+          <div id="raw" class="raw">{}</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const messages = $("messages");
+
+    function baseUrl() {
+      return $("baseUrl").value.trim().replace(/\/$/, "") || window.location.origin;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function setStatus(text) { $("status").textContent = text; }
+    function showRaw(data) { $("raw").textContent = JSON.stringify(data, null, 2); }
+
+    function addBubble(kind, text, action = "") {
+      const el = document.createElement("div");
+      el.className = `bubble ${kind}`;
+      el.innerHTML = `${action ? `<span class="badge">${escapeHtml(action)}</span><br>` : ""}${escapeHtml(text)}`;
+      messages.appendChild(el);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(`${baseUrl()}${path}`, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      showRaw(data);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return data;
+    }
+
+    async function sendMessage() {
+      const message = $("message").value.trim();
+      if (!message) return;
+
+      addBubble("user", message);
+      $("message").value = "";
+      setStatus("小藍處理中...");
+
+      try {
+        const data = await api("/api/chat", {
+          method: "POST",
+          body: JSON.stringify({
+            user_id: $("userId").value.trim(),
+            message,
+            current_location: $("currentLocation").value.trim(),
+          }),
+        });
+        addBubble("ai", data.reply || "(沒有 reply)", data.action_type || data.status);
+        renderAction(data);
+        await refreshEvents();
+        setStatus(`完成：${data.action_type || data.status}`);
+      } catch (err) {
+        addBubble("ai", `呼叫失敗：${err.message}`, "ERROR");
+        setStatus(`錯誤：${err.message}`);
+      }
+    }
+
+    function renderAction(data) {
+      const action = data.action_type || "NONE";
+      const event = data.event_created || data.event_updated || {};
+      $("latestAction").innerHTML = `
+        <strong>${escapeHtml(action)}</strong>
+        <div class="meta">${escapeHtml(data.reply || "")}</div>
+        ${event.title ? `<div class="meta">行程：${escapeHtml(event.title)}<br>${escapeHtml(event.start_time || "")}<br>${escapeHtml(event.city || "")}${escapeHtml(event.district || "")}</div>` : ""}
+      `;
+
+      if (data.weather_summary && Object.keys(data.weather_summary).length) {
+        const w = data.weather_summary;
+        $("weather").innerHTML = `
+          <strong>${escapeHtml(w.city || event.city || "天氣摘要")}${escapeHtml(w.district || event.district || "")}</strong>
+          <div class="meta">
+            天氣：${escapeHtml(w.wx || "未知")}<br>
+            降雨：${escapeHtml(w.pop ?? "-")}%<br>
+            溫度：${escapeHtml(w.temp ?? "-")}<br>
+            風險：${escapeHtml(w.risk_level || event.risk_level || "-")}
+          </div>
+        `;
+      }
+
+      if (data.guideline && Object.keys(data.guideline).length) {
+        $("guideGame").innerHTML = `
+          <strong>防災指引：${escapeHtml(data.guideline.disaster_type || "")}</strong>
+          <div class="meta">${escapeHtml(data.guideline.instruction || "")}</div>
+        `;
+      }
+
+      if (data.game && data.game.questions) {
+        $("guideGame").innerHTML = `
+          <strong>防災小遊戲：${escapeHtml(data.game.game_type || "")}</strong>
+          ${data.game.questions.map((q, index) => `
+            <div class="item">
+              <strong>${index + 1}. ${escapeHtml(q.question)}</strong>
+              <div class="meta">${(q.choices || []).map((c, i) => `${i + 1}. ${escapeHtml(c)}`).join("<br>")}</div>
+            </div>
+          `).join("")}
+        `;
+      }
+    }
+
+    async function refreshEvents() {
+      const userId = encodeURIComponent($("userId").value.trim());
+      try {
+        const data = await api(`/api/events?user_id=${userId}`);
+        const events = data.data || [];
+        $("events").innerHTML = events.length ? events.map(renderEvent).join("") : "目前沒有行程。";
+      } catch (err) {
+        $("events").textContent = `讀取行程失敗：${err.message}`;
+      }
+    }
+
+    function renderEvent(event) {
+      const risk = event.risk_level || "low";
+      return `
+        <div class="item">
+          <strong>${escapeHtml(event.title || "未命名行程")}</strong>
+          <div class="meta">
+            ${escapeHtml(event.start_time || "")}<br>
+            ${escapeHtml(event.city || "")}${escapeHtml(event.district || "")} ${escapeHtml(event.location || "")}<br>
+            <span class="risk-${escapeHtml(risk)}">risk: ${escapeHtml(risk)}</span>
+          </div>
+          <button class="danger" onclick="deleteEvent('${escapeHtml(event.id)}')">刪除</button>
+        </div>
+      `;
+    }
+
+    async function deleteEvent(id) {
+      if (!id) return;
+      setStatus("刪除行程中...");
+      try {
+        const userId = encodeURIComponent($("userId").value.trim());
+        await api(`/api/events/${encodeURIComponent(id)}?user_id=${userId}`, { method: "DELETE" });
+        addBubble("ai", `已刪除行程 ${id}`, "DELETE_EVENT");
+        renderAction({ action_type: "DELETE_EVENT", reply: `已刪除行程 ${id}` });
+        await refreshEvents();
+        setStatus("刪除完成");
+      } catch (err) {
+        setStatus(`刪除失敗：${err.message}`);
+      }
+    }
+
+    $("send").addEventListener("click", sendMessage);
+    $("message").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    });
+    document.querySelectorAll("[data-msg]").forEach((button) => {
+      button.addEventListener("click", () => {
+        $("message").value = button.dataset.msg;
+        $("message").focus();
+      });
+    });
+    window.deleteEvent = deleteEvent;
+
+    addBubble("ai", "我是小藍。你可以直接說要去哪、什麼時候、做什麼；我會幫你建立行程並整理天氣風險。", "READY");
+    refreshEvents();
+  </script>
+</body>
+</html>

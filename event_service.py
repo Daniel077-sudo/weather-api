@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import timedelta
 from typing import Any, Dict, List
 
@@ -15,6 +16,47 @@ from weather_service import (
     build_weather_snapshot, build_weather_suggestion, compare_weather_snapshots,
     pick_current_weather, resolve_event_location_parts, risk_rank,
 )
+
+LOCAL_EVENT_MEMORY: List[Dict[str, Any]] = []
+
+
+def create_memory_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    memory_event = {
+        **event,
+        "id": event.get("id") or f"local-{uuid.uuid4().hex[:12]}",
+        "created_at": event.get("created_at") or taipei_now().isoformat(),
+        "source": "memory_fallback",
+    }
+    LOCAL_EVENT_MEMORY.append(memory_event)
+    return memory_event
+
+
+def list_memory_events(
+    user_id: str = "",
+    from_time: str = "",
+    to_time: str = "",
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    events = LOCAL_EVENT_MEMORY
+    if user_id:
+        events = [event for event in events if (event.get("user_id") or "") == user_id]
+    if from_time:
+        events = [event for event in events if str(event.get("start_time") or "") >= from_time]
+    if to_time:
+        events = [event for event in events if str(event.get("start_time") or "") <= to_time]
+    return events[:limit]
+
+
+def delete_memory_event(event_id: str, user_id: str = "") -> bool:
+    for index, event in enumerate(list(LOCAL_EVENT_MEMORY)):
+        if str(event.get("id")) != str(event_id):
+            continue
+        if user_id and (event.get("user_id") or "") != user_id:
+            continue
+        del LOCAL_EVENT_MEMORY[index]
+        return True
+    return False
+
 
 def normalize_event(event: dict) -> dict:
     """Return the exact JSON shape expected by the iOS frontend."""

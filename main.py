@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
@@ -14,7 +15,7 @@ from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, 
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
-from event_service import build_event_risk, monitor_event_weather_window, normalize_event
+from event_service import build_event_risk, create_memory_event, delete_memory_event, list_memory_events, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
@@ -42,6 +43,12 @@ async def root():
         "docs": "/docs",
         "health": "/health",
     }
+
+
+@app.get("/test-ui")
+async def test_ui():
+    return FileResponse("test_ui.html")
+
 
 @app.get("/health")
 async def health_check():
@@ -835,9 +842,14 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
             if should_refresh_weather and event_id and background_tasks:
                 background_tasks.add_task(update_event_weather_snapshot, event_id, {**db_payload, **created_event})
             return {"status": "success", "data": normalize_event(created_event)}
-        return {"status": "error", "message": "寫入失敗"}
+        memory_event = create_memory_event(db_payload)
+        return {"status": "success", "data": normalize_event(memory_event), "source": "memory_fallback"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        try:
+            memory_event = create_memory_event(db_payload if "db_payload" in locals() else event.model_dump(mode="json", exclude_none=True))
+            return {"status": "success", "data": normalize_event(memory_event), "source": "memory_fallback", "message": str(e)}
+        except Exception:
+            return {"status": "error", "message": str(e)}
 
 # 注意：路由從 /events 改成了 /api/events 配合前端
 @app.post("/api/events")
@@ -862,12 +874,14 @@ async def get_events(
             query = query.lte("start_time", to_time)
         res = query.execute()
         events_data = res.data
-        if not events_data:
+        memory_events = list_memory_events(user_id or "", from_time or "", to_time or "", limit)
+        combined_events = (events_data or []) + memory_events
+        if not combined_events:
             return {"status": "success", "data": []}
 
         return {
             "status": "success",
-            "data": [normalize_event(event) for event in events_data],
+            "data": [normalize_event(event) for event in combined_events],
         }
 
         formatted_events = []
@@ -895,7 +909,8 @@ async def get_events(
             "data": formatted_events
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        memory_events = list_memory_events(user_id or "", from_time or "", to_time or "", limit)
+        return {"status": "success", "data": [normalize_event(event) for event in memory_events], "source": "memory_fallback", "message": str(e)}
 
 
 @app.delete("/api/events/{event_id}")
@@ -908,16 +923,20 @@ async def delete_event(
         if user_id:
             query = query.eq("user_id", user_id)
         res = query.execute()
+        memory_deleted = delete_memory_event(event_id, user_id or "")
         return {
             "status": "success",
             "data": {
                 "id": event_id,
                 "deleted": True,
                 "user_id": user_id,
-                "deleted_rows": len(res.data or []),
+                "deleted_rows": len(res.data or []) + (1 if memory_deleted else 0),
             },
         }
     except Exception as e:
+        memory_deleted = delete_memory_event(event_id, user_id or "")
+        if memory_deleted:
+            return {"status": "success", "data": {"id": event_id, "deleted": True, "user_id": user_id, "deleted_rows": 1}, "source": "memory_fallback", "message": str(e)}
         return {"status": "error", "message": str(e), "data": {"id": event_id, "deleted": False}}
 
 
