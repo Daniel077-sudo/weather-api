@@ -107,6 +107,57 @@ def normalize_event(event: dict) -> dict:
     }
 
 
+def build_event_risk_update_payload(event_payload: Dict[str, Any]) -> Dict[str, Any]:
+    keys = {
+        "city",
+        "district",
+        "weather_snapshot",
+        "weather_checked_at",
+        "risk_level",
+        "risk_tags",
+        "has_weather_risk",
+        "weather_alert_status",
+        "recommended_action",
+        "ai_suggestion",
+    }
+    return {key: event_payload.get(key) for key in keys if key in event_payload}
+
+
+def persist_event_risk_fields(event_id: Any, event_payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not event_id:
+        return {}
+
+    full_payload = build_event_risk_update_payload(event_payload)
+    without_snapshot = {
+        key: value
+        for key, value in full_payload.items()
+        if key not in {"weather_snapshot", "weather_checked_at"}
+    }
+    core_payload = {
+        key: value
+        for key, value in full_payload.items()
+        if key in {
+            "risk_level",
+            "risk_tags",
+            "has_weather_risk",
+            "weather_alert_status",
+            "recommended_action",
+            "ai_suggestion",
+        }
+    }
+
+    for payload in [full_payload, without_snapshot, core_payload]:
+        if not payload:
+            continue
+        try:
+            res = supabase.table("events").update(payload).eq("id", event_id).execute()
+            updated = (res.data or [{}])[0] if hasattr(res, "data") else {}
+            return {**payload, **updated}
+        except Exception:
+            continue
+    return {}
+
+
 async def enrich_event_payload_with_risk(
     event_payload: Dict[str, Any],
     explicit_risk_level: str = "",

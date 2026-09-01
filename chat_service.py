@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from config import supabase
 from data import GAME_QUESTIONS, TAIWAN_LOCATIONS
 from disaster_service import get_active_disaster_alerts
-from event_service import create_memory_event, enrich_event_payload_with_risk, normalize_event
+from event_service import create_memory_event, enrich_event_payload_with_risk, normalize_event, persist_event_risk_fields
 from gemini_service import call_gemini_json_cached
 from utils import parse_datetime, safe_response, taipei_now
 from weather_service import build_weather_snapshot, build_weather_suggestion, resolve_event_location_parts
@@ -320,7 +320,7 @@ def normalize_chat_history_row(row: Dict[str, Any], requested_user_id: str = "")
 
 def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     deduped = []
-    seen = set()
+    seen: Dict[Any, int] = {}
     for row in rows:
         message = normalize_text(row.get("message") or "")
         sender = row.get("sender") or ""
@@ -329,12 +329,18 @@ def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         response_payload = row.get("response_payload") or {}
         action_type = row.get("action_type") or response_payload.get("action_type") or ""
         if sender == "assistant":
-            key = (row.get("user_id") or "", sender, message, action_type)
+            key = (row.get("user_id") or "", sender, message)
         else:
             key = (row.get("user_id") or "", sender, message, row.get("created_at") or "")
         if key in seen:
+            existing_index = seen[key]
+            existing = deduped[existing_index]
+            existing_payload = existing.get("response_payload") or {}
+            existing_action = existing.get("action_type") or existing_payload.get("action_type") or ""
+            if sender == "assistant" and not existing_action and action_type:
+                deduped[existing_index] = {**row, "message": message}
             continue
-        seen.add(key)
+        seen[key] = len(deduped)
         deduped.append({**row, "message": message})
     return deduped
 
@@ -1025,7 +1031,9 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
             "pending_event": None,
         }
 
-    created = normalize_event(res.data[0]) if res.data else event_payload
+    created_row = res.data[0] if res.data else event_payload
+    persisted_risk = persist_event_risk_fields(created_row.get("id"), event_payload)
+    created = normalize_event({**created_row, **event_payload, **persisted_risk})
     reply = f"已幫你加入行程到行事曆了：{created.get('title')}。{weather_text}"
     created_city = created.get("city") or event_payload.get("city") or ""
     created_district = created.get("district") or event_payload.get("district") or ""

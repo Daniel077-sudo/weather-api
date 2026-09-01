@@ -15,7 +15,7 @@ from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, 
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
-from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event
+from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event, persist_event_risk_fields
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
@@ -820,6 +820,8 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
         if res.data:
             created_event = res.data[0]
             event_id = created_event.get("id")
+            persisted_risk = persist_event_risk_fields(event_id, db_payload)
+            created_event = {**created_event, **db_payload, **persisted_risk}
             if should_refresh_weather and db_payload.get("weather_alert_status") == "pending" and event_id and background_tasks:
                 background_tasks.add_task(update_event_weather_snapshot, event_id, {**db_payload, **created_event})
             return {"status": "success", "data": normalize_event(created_event)}
