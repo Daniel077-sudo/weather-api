@@ -107,6 +107,82 @@ def normalize_event(event: dict) -> dict:
     }
 
 
+async def enrich_event_payload_with_risk(
+    event_payload: Dict[str, Any],
+    explicit_risk_level: str = "",
+    explicit_risk_tags: List[str] = None,
+    explicit_has_weather_risk: bool = False,
+    log_prefix: str = "行程",
+) -> Dict[str, Any]:
+    explicit_risk_tags = explicit_risk_tags or []
+    location_parts = resolve_event_location_parts(event_payload)
+    event_payload["city"] = event_payload.get("city") or location_parts["city"]
+    event_payload["district"] = event_payload.get("district") or location_parts["district"]
+    snapshot: Dict[str, Any] = {}
+
+    if not event_payload.get("weather_snapshot"):
+        try:
+            event_time = parse_datetime(event_payload.get("start_time"))
+            snapshot = await build_weather_snapshot(event_payload["city"], event_payload["district"], event_time)
+            event_payload["weather_snapshot"] = snapshot
+            event_payload["weather_checked_at"] = snapshot.get("captured_at")
+        except Exception as weather_e:
+            print(f"{log_prefix}取得天氣快照失敗: {weather_e}")
+            event_payload["weather_alert_status"] = "weather_update_failed"
+    elif isinstance(event_payload.get("weather_snapshot"), dict):
+        snapshot = event_payload["weather_snapshot"]
+
+    try:
+        raw_event_id = event_payload.get("external_event_id") or event_payload.get("id")
+        risk_payload = EventRiskCheckRequest(
+            title=event_payload.get("title") or "行程",
+            start_time=event_payload.get("start_time"),
+            end_time=event_payload.get("end_time"),
+            location=event_payload.get("location") or event_payload.get("location_name") or f"{event_payload.get('city', '')}{event_payload.get('district', '')}",
+            city=event_payload.get("city"),
+            district=event_payload.get("district"),
+            activity=event_payload.get("description") or event_payload.get("title") or "行程",
+            transport_type=event_payload.get("transport_type"),
+            event_id=str(raw_event_id) if raw_event_id is not None else None,
+        )
+        risk_result = await build_event_risk(risk_payload)
+        snapshot_level = snapshot.get("risk_level") if snapshot else None
+        result_level = risk_result.get("risk_level")
+        selected_level = result_level if risk_rank(result_level) >= risk_rank(snapshot_level) else snapshot_level
+        event_payload["risk_level"] = selected_level or "low"
+        event_payload["risk_tags"] = sorted(set((snapshot.get("risk_tags") if snapshot else []) or []) | set(risk_result.get("risk_tags") or []))
+        event_payload["has_weather_risk"] = bool(risk_result.get("has_weather_risk") or (snapshot.get("has_weather_risk") if snapshot else False))
+        event_payload["weather_alert_status"] = "checked"
+
+        recommended_action = risk_result.get("recommended_action") or event_payload.get("recommended_action")
+        ai_suggestion = risk_result.get("ai_suggestion") or recommended_action or event_payload.get("ai_suggestion")
+        if recommended_action:
+            event_payload["recommended_action"] = recommended_action
+        if ai_suggestion:
+            event_payload["ai_suggestion"] = ai_suggestion
+    except Exception as risk_e:
+        print(f"{log_prefix}執行完整風險檢查失敗: {risk_e}")
+        event_payload["weather_alert_status"] = event_payload.get("weather_alert_status") or "weather_update_failed"
+        if snapshot:
+            event_payload["risk_level"] = event_payload.get("risk_level") or snapshot.get("risk_level")
+            event_payload["risk_tags"] = event_payload.get("risk_tags") or snapshot.get("risk_tags") or []
+            event_payload["has_weather_risk"] = bool(explicit_has_weather_risk or snapshot.get("has_weather_risk"))
+            event_payload["recommended_action"] = event_payload.get("recommended_action") or build_weather_suggestion(
+                event_payload["city"],
+                event_payload["district"],
+                event_payload.get("title") or "行程",
+                snapshot.get("weather") or {},
+                snapshot,
+            )
+            event_payload["ai_suggestion"] = event_payload.get("ai_suggestion") or event_payload["recommended_action"]
+
+    if explicit_risk_level or explicit_risk_tags:
+        event_payload["risk_level"] = explicit_risk_level or event_payload.get("risk_level")
+        event_payload["risk_tags"] = explicit_risk_tags or event_payload.get("risk_tags") or []
+        event_payload["has_weather_risk"] = explicit_has_weather_risk or explicit_risk_level in ["medium", "high"] or bool(explicit_risk_tags)
+    return event_payload
+
+
 async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     location = payload.location or "".join(part for part in [payload.city, payload.district] if part) or "目的地"
     weather_text = ""

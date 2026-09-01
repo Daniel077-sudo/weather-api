@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from config import supabase
 from data import GAME_QUESTIONS, TAIWAN_LOCATIONS
 from disaster_service import get_active_disaster_alerts
-from event_service import create_memory_event, normalize_event
+from event_service import create_memory_event, enrich_event_payload_with_risk, normalize_event
 from gemini_service import call_gemini_json_cached
 from utils import parse_datetime, safe_response, taipei_now
 from weather_service import build_weather_snapshot, build_weather_suggestion, resolve_event_location_parts
@@ -234,13 +234,14 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
 def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
     try:
         rows = []
+        fetch_limit = min(max(limit * 3, limit), 100)
         try:
             res = (
                 supabase.table(CHAT_LOGS_TABLE)
                 .select("*")
                 .eq("user_id", user_id)
                 .order("created_at", desc=True)
-                .limit(limit)
+                .limit(fetch_limit)
                 .execute()
             )
             rows = res.data or []
@@ -252,7 +253,7 @@ def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
                     supabase.table(CHAT_LOGS_TABLE)
                     .select("*")
                     .ilike("user_input", f"[{user_id}]%")
-                    .limit(limit)
+                    .limit(fetch_limit)
                     .execute()
                 )
                 rows = legacy.data or []
@@ -327,14 +328,10 @@ def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         response_payload = row.get("response_payload") or {}
         action_type = row.get("action_type") or response_payload.get("action_type") or ""
-        event_id = response_payload.get("event_id") or (response_payload.get("event_created") or {}).get("id") or ""
-        key = (
-            row.get("user_id") or "",
-            sender,
-            message,
-            action_type,
-            str(event_id),
-        )
+        if sender == "assistant":
+            key = (row.get("user_id") or "", sender, message, action_type)
+        else:
+            key = (row.get("user_id") or "", sender, message, row.get("created_at") or "")
         if key in seen:
             continue
         seen.add(key)
@@ -613,6 +610,8 @@ def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, 
         return {"event_start": taipei_iso(saturday), "event_end": taipei_iso(sunday)}
     elif "下週" in message or "下周" in message or "下星期" in message:
         start = (base + timedelta(days=7)).replace(hour=9, minute=0, second=0, microsecond=0)
+    elif "後天" in message:
+        start = (base + timedelta(days=2)).replace(hour=9, minute=0, second=0, microsecond=0)
     elif "明天" in message:
         start = (base + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
     elif "今天" in message:
@@ -944,33 +943,23 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
     weather_summary: Dict[str, Any] = {}
     weather_text = "目前天氣資料暫時無法取得，已先建立行程。"
     try:
-        event_time = parse_datetime(event_payload.get("start_time"))
-        snapshot = await build_weather_snapshot(event_payload["city"], event_payload["district"], event_time)
-        event_payload["weather_snapshot"] = snapshot
-        event_payload["weather_checked_at"] = snapshot.get("captured_at")
-        event_payload["risk_level"] = snapshot.get("risk_level")
-        event_payload["risk_tags"] = snapshot.get("risk_tags")
-        event_payload["has_weather_risk"] = snapshot.get("has_weather_risk")
-        suggestion = build_weather_suggestion(
-            event_payload["city"],
-            event_payload["district"],
-            event_payload["title"],
-            snapshot.get("weather") or {},
-            snapshot,
-        )
-        event_payload["recommended_action"] = suggestion
-        event_payload["ai_suggestion"] = suggestion
+        event_payload = await enrich_event_payload_with_risk(event_payload, log_prefix="聊天建立行程")
+        snapshot = event_payload.get("weather_snapshot") or {}
         weather = snapshot.get("weather") or {}
         weather_summary = {
             "temp": weather.get("temp"),
             "pop": weather.get("pop"),
             "wx": weather.get("description") or weather.get("wx") or "未知",
+            "risk_level": event_payload.get("risk_level") or "low",
+            "risk_tags": event_payload.get("risk_tags") or [],
+            "has_weather_risk": bool(event_payload.get("has_weather_risk")),
         }
-        weather_text = f"那天{event_payload['city']}{event_payload['district']}天氣「{weather.get('description', '未知')}」。{suggestion}"
+        weather_text = f"那天{event_payload['city']}{event_payload['district']}天氣「{weather.get('description', '未知')}」。{event_payload.get('ai_suggestion') or event_payload.get('recommended_action') or ''}"
     except Exception as e:
         event_payload["has_weather_risk"] = False
         event_payload["risk_level"] = "low"
         event_payload["risk_tags"] = []
+        event_payload["weather_alert_status"] = "weather_update_failed"
         event_payload["ai_suggestion"] = weather_text
         event_payload["recommended_action"] = weather_text
         print(f"聊天建立行程天氣查詢失敗: {e}")
@@ -991,7 +980,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
                     "user_id", "city", "district", "title", "start_time", "end_time",
                     "location_name", "has_weather_risk", "ai_suggestion",
                     "risk_level", "risk_tags", "recommended_action", "weather_snapshot",
-                    "weather_checked_at", "external_source",
+                    "weather_checked_at", "weather_alert_status", "external_source",
                 }
                 compatible_payload = {key: value for key, value in event_payload.items() if key in compatible_keys}
                 try:

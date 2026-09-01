@@ -1,0 +1,45 @@
+@楊 這輪後端已完成以下修正與架構整理：
+
+1. /api/chat/history 去重補完整
+- 後端現在會先多抓歷史資料，再去重後回傳指定 limit，避免尾端重複 assistant 訊息把有效歷史擠掉。
+- assistant 訊息用 user_id + sender + message + action_type 去重，所以即使 payload 裡 event_id 不同，也不會重複回同一句。
+- user 訊息保留 created_at 判斷，避免使用者真的重複輸入同一句時被誤刪。
+
+2. 修正 CLARIFY 補「後天」時間解析
+- 「後天早上十點」現在會正確解析成後天 10:00，並維持 Asia/Taipei +08:00。
+- 例如 2026-09-01 測試時，「後天早上十點」會得到 2026-09-03T10:00:00+08:00。
+
+3. POST /api/events 建立行程風險檢查改成完整邏輯
+- 手動建立行程時，現在會跑完整 build_event_risk，而不是只做粗略 weather snapshot。
+- 建立時會補齊 has_weather_risk、risk_level、risk_tags、weather_alert_status、recommended_action、ai_suggestion。
+- 成功檢查後 weather_alert_status 會是 checked。
+
+4. 風險等級與標籤改成合併邏輯
+- weather snapshot 與完整 risk-check 兩邊結果會合併。
+- risk_level 取較高等級，避免 snapshot 判 high 但 risk-check 因快取不足判 low 時被降級。
+- risk_tags 會做聯集，例如 heavy_rain + strong_wind 會一起保留。
+
+5. /api/chat 建立行程也改用同一套風險邏輯
+- 聊天建立行程不再只靠 weather snapshot。
+- /api/chat 自動建立的 events 也會帶完整 risk_level、risk_tags、has_weather_risk、weather_alert_status、ai_suggestion。
+
+6. 背景天氣更新也改用同一套風險邏輯
+- update_event_weather_snapshot 已改成使用共用風險補強流程。
+- 背景更新後的行程風險結果會和 /api/events/risk-check 盡量保持一致。
+
+7. 修正 event_id 型別邊界問題
+- DB 內 event id 如果是整數，傳入 EventRiskCheckRequest 前會轉成字串。
+- 避免背景更新或風險檢查時因 Pydantic event_id 型別驗證失敗，導致完整 risk-check 沒跑完。
+
+已驗證項目：
+- Python 編譯檢查通過。
+- main.py、chat_service.py、event_service.py 可正常 import，沒有 circular import。
+- POST /api/events 模擬建立行程會寫入 high、risk_tags: [heavy_rain, strong_wind]、weather_alert_status: checked。
+- /api/chat 模擬建行程也會寫入完整風險欄位。
+- 背景更新模擬會更新成完整風險欄位。
+- /api/chat/history 測試確認 assistant 重複訊息會去掉，user 同句不同時間會保留。
+
+前端對接影響：
+- iOS / Android 端不需要新增欄位。
+- 現有 event_created、events list、risk flags 都可以沿用。
+- 建議前端仍保留防禦性解碼與必要時的 risk-check refresh，作為資料庫舊資料或快取異常時的保險。

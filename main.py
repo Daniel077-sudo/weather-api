@@ -15,7 +15,7 @@ from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, 
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
-from event_service import build_event_risk, create_memory_event, delete_memory_event, list_memory_events, monitor_event_weather_window, normalize_event
+from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
@@ -721,29 +721,26 @@ async def update_event_weather_snapshot(event_id: Any, event_payload: Dict[str, 
         location_parts = resolve_event_location_parts(event_payload)
         city = event_payload.get("city") or location_parts["city"]
         district = event_payload.get("district") or location_parts["district"]
-        event_time = parse_datetime(event_payload.get("start_time"))
-        snapshot = await build_weather_snapshot(city, district, event_time)
-        update_payload = {
-            "city": city,
-            "district": district,
-            "weather_snapshot": snapshot,
-            "weather_checked_at": snapshot["captured_at"],
-            "risk_level": event_payload.get("risk_level") or snapshot["risk_level"],
-            "risk_tags": event_payload.get("risk_tags") or snapshot["risk_tags"],
-            "has_weather_risk": bool(event_payload.get("has_weather_risk") or snapshot["has_weather_risk"]),
-            "weather_alert_status": "checked",
-        }
-        recommendation = build_weather_suggestion(
-            city,
-            district,
-            event_payload.get("title") or "行程",
-            snapshot["weather"],
-            snapshot,
+        update_payload = await enrich_event_payload_with_risk(
+            {**event_payload, "city": city, "district": district, "weather_snapshot": None},
+            log_prefix="背景更新行程",
         )
-        if not event_payload.get("recommended_action"):
-            update_payload["recommended_action"] = recommendation
-        if not event_payload.get("ai_suggestion"):
-            update_payload["ai_suggestion"] = recommendation
+        update_payload = {
+            key: update_payload.get(key)
+            for key in {
+                "city",
+                "district",
+                "weather_snapshot",
+                "weather_checked_at",
+                "risk_level",
+                "risk_tags",
+                "has_weather_risk",
+                "weather_alert_status",
+                "recommended_action",
+                "ai_suggestion",
+            }
+            if key in update_payload
+        }
         try:
             supabase.table("events").update(update_payload).eq("id", event_id).execute()
         except Exception:
@@ -785,30 +782,13 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
 
         should_refresh_weather = not db_payload.get("weather_snapshot")
 
-        if not db_payload.get("weather_snapshot"):
-            try:
-                event_time = parse_datetime(event.start_time)
-                snapshot = await build_weather_snapshot(db_payload["city"], db_payload["district"], event_time)
-                db_payload["weather_snapshot"] = snapshot
-                db_payload["weather_checked_at"] = snapshot["captured_at"]
-                db_payload["risk_level"] = db_payload.get("risk_level") or snapshot["risk_level"]
-                db_payload["risk_tags"] = db_payload.get("risk_tags") or snapshot["risk_tags"]
-                db_payload["has_weather_risk"] = event.has_weather_risk or snapshot["has_weather_risk"]
-                db_payload["recommended_action"] = db_payload.get("recommended_action") or build_weather_suggestion(
-                    db_payload["city"],
-                    db_payload["district"],
-                    event.title,
-                    snapshot["weather"],
-                    snapshot,
-                )
-                db_payload["ai_suggestion"] = db_payload.get("ai_suggestion") or db_payload["recommended_action"]
-                db_payload["weather_alert_status"] = "checked"
-            except Exception as weather_e:
-                print(f"建立行程時取得天氣快照失敗: {weather_e}")
-                db_payload["weather_alert_status"] = "weather_update_failed"
-
-        if event.risk_level or event.risk_tags:
-            db_payload["has_weather_risk"] = event.has_weather_risk or event.risk_level in ["medium", "high"]
+        db_payload = await enrich_event_payload_with_risk(
+            db_payload,
+            explicit_risk_level=event.risk_level or "",
+            explicit_risk_tags=event.risk_tags,
+            explicit_has_weather_risk=event.has_weather_risk,
+            log_prefix="建立行程時",
+        )
         
         # 寫入 events 資料表 (請確保 Supabase 已有 transport_type 欄位)
         try:
@@ -823,6 +803,7 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
                 "title", "start_time", "end_time", "location_name",
                 "transport_ticket_link", "has_weather_risk", "ai_suggestion",
                 "risk_level", "risk_tags", "recommended_action",
+                "weather_snapshot", "weather_checked_at", "weather_alert_status",
                 "external_source", "external_event_id", "last_synced_at",
             }
             compatible_payload = {key: value for key, value in db_payload.items() if key in compatible_keys}
