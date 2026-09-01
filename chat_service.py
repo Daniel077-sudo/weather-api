@@ -33,9 +33,9 @@ MEMORY_MAX_CHARS = 4000
 CHAT_LOGS_TABLE = "chat_logs"
 LOCAL_PENDING_EVENTS: Dict[str, Dict[str, Any]] = {}
 LOCAL_CHAT_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
-TIME_HINTS = ["今天", "明天", "後天", "週末", "周末", "星期", "禮拜", "上午", "早上", "下午", "晚上", "中午", "點"]
+TIME_HINTS = ["今天", "明天", "後天", "下週", "下周", "下星期", "週末", "周末", "星期", "禮拜", "上午", "早上", "下午", "晚上", "中午", "點"]
 GO_HINTS = ["要去", "我要去", "會去", "去", "前往", "到"]
-ACTIVITY_HINTS = ["跑步", "打球", "爬山", "露營", "開會", "上課", "買菜", "看診", "旅遊", "出遊", "考試", "聚餐", "通勤"]
+ACTIVITY_HINTS = ["跑步", "游泳", "遊泳", "打球", "爬山", "露營", "開會", "上課", "買菜", "看診", "旅遊", "出遊", "考試", "聚餐", "通勤"]
 WEATHER_QUERY_HINTS = ["會下雨", "天氣", "氣溫", "降雨", "熱不熱", "冷不冷", "適合去", "適合騎車", "適合出門"]
 GAME_HINTS = ["小遊戲", "遊戲", "測驗", "quiz", "答題"]
 UPDATE_EVENT_HINTS = ["改成", "改到", "改為", "改一下", "更新行程", "修改行程", "地點改", "時間改"]
@@ -268,7 +268,7 @@ def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
                 key = (item.get("sender"), item.get("message"), item.get("created_at"))
                 if key not in seen:
                     normalized_rows.append(item)
-        return safe_response("success", normalized_rows[-limit:], "chat history loaded", CHAT_LOGS_TABLE)
+        return safe_response("success", dedupe_chat_history(normalized_rows)[-limit:], "chat history loaded", CHAT_LOGS_TABLE)
     except Exception as e:
         return safe_response("error", [], str(e), CHAT_LOGS_TABLE, [{"service": "supabase", "message": str(e)}])
 
@@ -315,6 +315,31 @@ def normalize_chat_history_row(row: Dict[str, Any], requested_user_id: str = "")
         "action_type": row.get("action_type") or "",
         "response_payload": row.get("response_payload") or {},
     }
+
+
+def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped = []
+    seen = set()
+    for row in rows:
+        message = normalize_text(row.get("message") or "")
+        sender = row.get("sender") or ""
+        if not message or sender not in {"user", "assistant"}:
+            continue
+        response_payload = row.get("response_payload") or {}
+        action_type = row.get("action_type") or response_payload.get("action_type") or ""
+        event_id = response_payload.get("event_id") or (response_payload.get("event_created") or {}).get("id") or ""
+        key = (
+            row.get("user_id") or "",
+            sender,
+            message,
+            action_type,
+            str(event_id),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({**row, "message": message})
+    return deduped
 
 
 def get_user_memory_response(user_id: str) -> Dict[str, Any]:
@@ -371,6 +396,8 @@ def infer_action_type(message: str) -> str:
     if any(keyword in message for keyword in delete_keywords):
         return "DELETE_EVENT"
     if any(keyword in message for keyword in add_keywords):
+        return "ADD_EVENT"
+    if has_destination_intent(message) and (has_location_hint(message) or has_activity_hint(message)):
         return "ADD_EVENT"
     if has_time_hint(message) and has_location_hint(message) and has_trip_or_activity_hint(message):
         return "ADD_EVENT"
@@ -434,6 +461,10 @@ def has_trip_or_activity_hint(message: str) -> bool:
 
 def has_destination_intent(message: str) -> bool:
     return any(hint in message for hint in GO_HINTS)
+
+
+def has_activity_hint(message: str) -> bool:
+    return any(hint in message for hint in ACTIVITY_HINTS)
 
 
 def has_weather_query_hint(message: str) -> bool:
@@ -580,6 +611,8 @@ def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, 
         saturday = next_weekday(base, 5).replace(hour=9, minute=0, second=0, microsecond=0)
         sunday = saturday + timedelta(days=1, hours=8)
         return {"event_start": taipei_iso(saturday), "event_end": taipei_iso(sunday)}
+    elif "下週" in message or "下周" in message or "下星期" in message:
+        start = (base + timedelta(days=7)).replace(hour=9, minute=0, second=0, microsecond=0)
     elif "明天" in message:
         start = (base + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
     elif "今天" in message:
@@ -605,9 +638,9 @@ def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, 
 
 def infer_event_title(message: str, action_type: str) -> str:
     text = normalize_text(message)
-    for token in ["幫我", "請", "新增", "加入", "排入", "安排", "建立", "行程", "我", "想要", "想"]:
+    for token in ["幫我", "請", "新增", "加入", "排入", "安排", "建立", "行程", "一個", "一筆", "一項", "我", "想要", "想"]:
         text = text.replace(token, " ")
-    text = re.sub(r"(今天|明天|後天|這週末|本週末|週末|周末|星期[一二三四五六日天]|禮拜[一二三四五六日天]|週[一二三四五六日天]|周[一二三四五六日天]|上午|早上|下午|晚上|中午|(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2})", " ", text)
+    text = re.sub(r"(今天|明天|後天|下週|下周|下星期|這週末|本週末|週末|周末|星期[一二三四五六日天]|禮拜[一二三四五六日天]|週[一二三四五六日天]|周[一二三四五六日天]|上午|早上|下午|晚上|中午|(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2})", " ", text)
     location = infer_location(message)
     normalized_city = (location.get("city") or "").replace("臺", "台")
     district = location.get("district", "")

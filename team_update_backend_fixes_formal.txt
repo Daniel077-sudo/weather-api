@@ -1,0 +1,289 @@
+@iOS / Android 前端同學：
+
+後端已針對你們回報的 /api/chat 與行程 API 問題完成修正。以下是本輪正式對接結果。
+
+一、P0：多輪 CLARIFY 續接已修正
+
+原本問題：
+
+第 1 句「我禮拜六想去爬山」會正確回 CLARIFY。
+但第 2 句同一個 user_id 接「在台中北屯」時，後端沒有續接前一筆 pending_event，導致回成 NONE。
+
+修正後：
+
+後端現在會用同一個 user_id 保存未完成的 pending_event。
+使用者補齊缺少欄位後，後端會接續同一筆行程意圖，不會當成新的普通對話。
+
+實測流程：
+
+Request 1:
+
+POST /api/chat
+
+{
+  "user_id": "clarify-test-final",
+  "message": "我禮拜六想去爬山",
+  "current_location": "臺南市東區"
+}
+
+Response 1:
+
+{
+  "status": "success",
+  "action_type": "CLARIFY",
+  "missing_slots": ["location"],
+  "clarify_slot": "location",
+  "event_title": "爬山",
+  "event_start": "2026-09-05T09:00:00+08:00",
+  "event_end": "2026-09-05T11:00:00+08:00",
+  "reply": "這個行程要去哪個縣市、行政區或地點？"
+}
+
+Request 2:
+
+POST /api/chat
+
+{
+  "user_id": "clarify-test-final",
+  "message": "在台中北屯",
+  "current_location": "臺南市東區"
+}
+
+Response 2:
+
+{
+  "status": "success",
+  "action_type": "CREATE_EVENT",
+  "event_title": "爬山",
+  "event_city": "臺中市",
+  "event_district": "北屯區",
+  "event_location": "臺中市北屯區",
+  "event_start": "2026-09-05T09:00:00+08:00",
+  "event_end": "2026-09-05T11:00:00+08:00"
+}
+
+前端處理方式：
+
+收到 CLARIFY 時顯示 reply。
+下一句繼續用同一個 user_id 打 /api/chat。
+後端會自動接續 pending_event。
+
+二、P1：/api/chat/history 使用者訊息缺失已修正
+
+原本問題：
+
+GET /api/chat/history 回來幾乎只有 assistant 訊息，看不到使用者輸入。
+
+修正後：
+
+後端會回 user / assistant 成對資料。
+
+Response 格式：
+
+{
+  "status": "success",
+  "data": [
+    {
+      "id": "1",
+      "user_id": "clarify-test-final",
+      "sender": "user",
+      "message": "我禮拜六想去爬山",
+      "is_ai": false,
+      "created_at": "2026-08-30T08:31:40+08:00",
+      "action_type": "",
+      "response_payload": {}
+    },
+    {
+      "id": "2",
+      "user_id": "clarify-test-final",
+      "sender": "assistant",
+      "message": "這個行程要去哪個縣市、行政區或地點？",
+      "is_ai": true,
+      "created_at": "2026-08-30T08:31:40+08:00",
+      "action_type": "CLARIFY",
+      "response_payload": {}
+    }
+  ]
+}
+
+前端可直接用：
+
+- sender 判斷 user / assistant
+- message 顯示文字
+- is_ai 判斷是否為 AI 訊息
+- response_payload 保留完整後端 action 資訊
+
+三、P2：CREATE_EVENT reply 降雨機率重複已修正
+
+原本問題：
+
+CREATE_EVENT reply 可能出現降雨機率重複，例如：
+
+「降雨機率 70%，臺南市安平區降雨機率70%...」
+
+修正後：
+
+後端 reply 不會重複印降雨機率。
+
+目前句型會接近：
+
+已幫你加入行程到行事曆了：打球。
+那天臺南市安平區天氣「陰時多雲陣雨或雷雨」。
+臺南市安平區降雨機率70%，建議帶雨具並避開低窪、地下道。
+
+四、P2：寫入失敗不再外洩原始 Supabase 錯誤
+
+原本問題：
+
+資料庫寫入失敗或 user_id 格式不合法時，reply 可能直接包含 Supabase 原始錯誤，例如：
+
+- invalid input syntax
+- 22P02
+- Supabase error dict
+
+修正後：
+
+後端不會把原始錯誤直接回給使用者。
+會改成人話提示：
+
+{
+  "status": "partial_success",
+  "action_type": "CREATE_EVENT",
+  "reply": "小藍已理解要建立「打球」，但目前資料庫暫時無法寫入。請稍後再試。"
+}
+
+前端可用 status 判斷：
+
+- status = success：正式完成
+- status = partial_success：後端理解意圖，但資料庫或外部服務暫時未完成
+
+五、current_location 補位規則已修正
+
+原本問題：
+
+iOS 會固定送 current_location，例如：
+
+{
+  "current_location": "臺南市東區"
+}
+
+後端原本可能把「我禮拜六想去爬山」直接補成臺南市東區，導致不會追問目的地。
+
+修正後：
+
+如果使用者句子含有「去 / 前往 / 到」這類目的地語氣，但沒有講目的地，後端會進 CLARIFY 追問地點。
+
+範例：
+
+「我禮拜六想去爬山」
+
+會回：
+
+{
+  "action_type": "CLARIFY",
+  "missing_slots": ["location"]
+}
+
+但如果使用者說：
+
+「明天下午三點打球」
+
+這種沒有明確目的地語氣的句子，後端仍可使用 current_location 作為地點補位。
+
+六、時間格式維持 +08:00
+
+後端回傳時間會維持 Asia/Taipei offset：
+
+2026-09-05T09:00:00+08:00
+
+適用欄位：
+
+- event_start
+- event_end
+- event_created.start_time
+- event_created.end_time
+- event_updated.start_time
+- event_updated.end_time
+- GET /api/events 的 start_time / end_time
+
+七、/api/chat 建立行程 action_type 語意
+
+目前建議前端照以下規則分流：
+
+CREATE_EVENT：
+代表後端已完成建行程流程，前端刷新行事曆列表。
+
+CLARIFY：
+代表缺欄位，前端顯示 reply，下一句繼續用同一個 user_id 呼叫 /api/chat。
+
+WEATHER_QUERY：
+代表天氣查詢，前端讀 weather_summary。
+
+DISASTER_GUIDE：
+代表防災指引，前端讀 guideline。
+
+GAME_START：
+代表小遊戲入口，前端讀 game.questions。
+
+UPDATE_EVENT：
+代表行程更新，前端刷新行事曆列表。
+
+DELETE_EVENT：
+代表刪除行程意圖或刪除完成，前端刷新行事曆列表。
+
+八、已驗證項目
+
+已驗證：
+
+1. Python 編譯通過
+
+venv\Scripts\python.exe -m py_compile main.py schemas.py chat_service.py weather_service.py event_service.py
+
+2. 多輪 CLARIFY 續接通過
+
+第 1 句：
+我禮拜六想去爬山
+
+結果：
+action_type = CLARIFY
+missing_slots = ["location"]
+event_title = 爬山
+
+第 2 句：
+在台中北屯
+
+結果：
+action_type = CREATE_EVENT
+event_title = 爬山
+event_city = 臺中市
+event_district = 北屯區
+event_start = 2026-09-05T09:00:00+08:00
+
+3. /api/chat/history 回傳 user / assistant 成對資料
+
+實測 sender 順序：
+
+user -> assistant -> user -> assistant
+
+4. CREATE_EVENT reply 不再重複顯示降雨機率
+
+5. 寫入失敗時不再外洩 Supabase 原始錯誤
+
+6. current_location 可繼續用「縣市+行政區」字串
+
+例如：
+
+臺南市東區
+
+不需要拆成 current_city / current_district。
+
+九、前端目前需要注意
+
+1. CLARIFY 下一句一定要沿用同一個 user_id。
+
+2. CREATE_EVENT 後前端不要自己寫 DB，只刷新行事曆。
+
+3. 如果 status = partial_success，可以顯示後端 reply，並視需求提示「資料暫時未完全同步」。
+
+4. 時間欄位請直接解析 ISO8601 +08:00，不要自行當成 UTC Z。
+

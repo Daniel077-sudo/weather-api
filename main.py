@@ -784,10 +784,8 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
         db_payload["district"] = db_payload.get("district") or location_parts["district"]
 
         should_refresh_weather = not db_payload.get("weather_snapshot")
-        if should_refresh_weather:
-            db_payload["weather_alert_status"] = "pending"
 
-        if False and not db_payload.get("weather_snapshot"):
+        if not db_payload.get("weather_snapshot"):
             try:
                 event_time = parse_datetime(event.start_time)
                 snapshot = await build_weather_snapshot(db_payload["city"], db_payload["district"], event_time)
@@ -804,8 +802,10 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
                     snapshot,
                 )
                 db_payload["ai_suggestion"] = db_payload.get("ai_suggestion") or db_payload["recommended_action"]
+                db_payload["weather_alert_status"] = "checked"
             except Exception as weather_e:
                 print(f"建立行程時取得天氣快照失敗: {weather_e}")
+                db_payload["weather_alert_status"] = "weather_update_failed"
 
         if event.risk_level or event.risk_tags:
             db_payload["has_weather_risk"] = event.has_weather_risk or event.risk_level in ["medium", "high"]
@@ -839,7 +839,7 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
         if res.data:
             created_event = res.data[0]
             event_id = created_event.get("id")
-            if should_refresh_weather and event_id and background_tasks:
+            if should_refresh_weather and db_payload.get("weather_alert_status") == "pending" and event_id and background_tasks:
                 background_tasks.add_task(update_event_weather_snapshot, event_id, {**db_payload, **created_event})
             return {"status": "success", "data": normalize_event(created_event)}
         memory_event = create_memory_event(db_payload)
