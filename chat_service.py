@@ -331,7 +331,7 @@ def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if sender == "assistant":
             key = (row.get("user_id") or "", sender, message)
         else:
-            key = (row.get("user_id") or "", sender, message, row.get("created_at") or "")
+            key = (row.get("user_id") or "", sender, message)
         if key in seen:
             existing_index = seen[key]
             existing = deduped[existing_index]
