@@ -12,7 +12,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response
-from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
+from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event, persist_event_risk_fields
@@ -21,7 +21,7 @@ from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
-from weather_service import analyze_weather_risk, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
+from weather_service import analyze_weather_risk, build_live_weather_payload, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
 
 load_dotenv()
 
@@ -67,6 +67,7 @@ async def debug_status():
             "key_configured": bool(SUPABASE_KEY),
         },
         "cwa": {"configured": bool(CWA_API_KEY)},
+        "moenv": {"configured": bool(MOENV_API_KEY)},
         "gemini": {"configured": bool(GEMINI_API_KEY)},
         "tdx": {"configured": bool(TDX_CLIENT_ID and TDX_CLIENT_SECRET)},
         "timetree": {"configured": bool(TIMETREE_ACCESS_TOKEN)},
@@ -447,6 +448,47 @@ async def cron_disaster_pipeline(
         )
     return await run_disaster_pipeline(hours_ahead, alert_lead_minutes, watch_area_limit)
 
+
+def build_weather_live_response(city: str, district: str, weather_payload: Dict[str, Any], source: str) -> Dict[str, Any]:
+    now = taipei_now()
+    current = weather_payload.get("current") or {}
+    return {
+        "status": "success",
+        "source": source,
+        "stale": False,
+        "city_name": f"{city}{district}",
+        "weather_data": {
+            "current": current,
+            "forecast": weather_payload.get("forecast") or [],
+            "active_warnings": weather_payload.get("active_warnings") or [],
+            "hourly": weather_payload.get("hourly") or [],
+            "radar_image_url": weather_payload.get("radar_image_url") or "",
+            "observed_at": weather_payload.get("observed_at"),
+            "risk_level": weather_payload.get("risk_level", "low"),
+            "risk_tags": weather_payload.get("risk_tags", []),
+            "has_weather_risk": weather_payload.get("has_weather_risk", False),
+        },
+        "active_warnings": weather_payload.get("active_warnings") or [],
+        "radar_image_url": weather_payload.get("radar_image_url") or "",
+        "observed_at": weather_payload.get("observed_at"),
+        "uvi": current.get("uvi", 0),
+        "aqi": current.get("aqi", 0),
+        "app_temp": current.get("app_temp", 0),
+        "wind_ms": current.get("wind_ms", 0),
+        "wind_dir": current.get("wind_dir", ""),
+        "rain_mm_1h": current.get("rain_mm_1h", 0),
+        "updated_at": now.isoformat(),
+        "valid_until": (now + timedelta(hours=3)).isoformat(),
+    }
+
+
+def cached_weather_has_enriched_fields(cached: Dict[str, Any]) -> bool:
+    weather_data = cached.get("weather_data") or {}
+    current = weather_data.get("current") or {}
+    required_current_fields = {"app_temp", "wind_ms", "wind_dir", "aqi"}
+    return required_current_fields.issubset(set(current.keys())) and "active_warnings" in weather_data and "observed_at" in weather_data
+
+
 @app.get("/weather")
 async def get_weather(city: str = "臺南市", district: str = "東區"):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
@@ -455,31 +497,47 @@ async def get_weather(city: str = "臺南市", district: str = "東區"):
         if res.data:
             cached = res.data[0]
             valid_until = parse_datetime(cached.get("valid_until"))
-            cached["status"] = "success"
-            cached["source"] = "cache"
-            cached["stale"] = bool(valid_until and valid_until < taipei_now())
-            return cached
+            if (not valid_until or valid_until >= taipei_now()) and cached_weather_has_enriched_fields(cached):
+                cached["status"] = "success"
+                cached["source"] = "cache"
+                cached["stale"] = False
+                return cached
     except Exception as cache_e:
         print(f"讀取天氣快取失敗: {cache_e}")
 
     try:
-        weather_payload = await fetch_cwa_forecast(city, district, seven_day=True)
-        now = taipei_now()
-        return {
-            "status": "success",
-            "source": "cwa_live",
-            "stale": False,
-            "city_name": f"{city}{district}",
-            "weather_data": {
-                "current": weather_payload["current"],
-                "forecast": weather_payload["forecast"],
-                "risk_level": weather_payload["risk_level"],
-                "risk_tags": weather_payload["risk_tags"],
-                "has_weather_risk": weather_payload["has_weather_risk"],
-            },
-            "updated_at": now.isoformat(),
-            "valid_until": (now + timedelta(hours=3)).isoformat(),
-        }
+        weather_payload = await build_live_weather_payload(city, district)
+        response = build_weather_live_response(city, district, weather_payload, "cwa_live")
+        try:
+            cache_payload = {
+                "city_name": response["city_name"],
+                "weather_data": response["weather_data"],
+                "radar_image_url": response["radar_image_url"],
+                "uvi": response["uvi"],
+                "aqi": response["aqi"],
+                "app_temp": response["app_temp"],
+                "wind_ms": response["wind_ms"],
+                "wind_dir": response["wind_dir"],
+                "rain_mm_1h": response["rain_mm_1h"],
+                "active_warnings": response["active_warnings"],
+                "hourly": response["weather_data"]["hourly"],
+                "observed_at": response["observed_at"],
+                "updated_at": response["updated_at"],
+                "valid_until": response["valid_until"],
+            }
+            try:
+                supabase.table("weather_cache").upsert(cache_payload, on_conflict="city_name").execute()
+            except Exception:
+                legacy_payload = {
+                    "city_name": cache_payload["city_name"],
+                    "weather_data": cache_payload["weather_data"],
+                    "updated_at": cache_payload["updated_at"],
+                    "valid_until": cache_payload["valid_until"],
+                }
+                supabase.table("weather_cache").upsert(legacy_payload, on_conflict="city_name").execute()
+        except Exception as cache_write_e:
+            print(f"寫入天氣快取失敗: {cache_write_e}")
+        return response
     except Exception as e:
         return {"status": "error", "message": f"無法取得 {city}{district} 天氣資料: {str(e)}"}
 
@@ -1587,6 +1645,17 @@ alter table public.events add column if not exists weather_alert_status text def
 alter table public.events add column if not exists external_source text;
 alter table public.events add column if not exists external_event_id text;
 alter table public.events add column if not exists last_synced_at timestamptz;
+
+alter table public.weather_cache add column if not exists radar_image_url text;
+alter table public.weather_cache add column if not exists uvi integer default 0;
+alter table public.weather_cache add column if not exists aqi integer default 0;
+alter table public.weather_cache add column if not exists app_temp integer default 0;
+alter table public.weather_cache add column if not exists wind_ms double precision default 0;
+alter table public.weather_cache add column if not exists wind_dir text;
+alter table public.weather_cache add column if not exists rain_mm_1h double precision default 0;
+alter table public.weather_cache add column if not exists active_warnings jsonb default '[]'::jsonb;
+alter table public.weather_cache add column if not exists hourly jsonb default '[]'::jsonb;
+alter table public.weather_cache add column if not exists observed_at timestamptz;
 
 alter table public.chat_logs add column if not exists user_id text;
 alter table public.chat_logs add column if not exists role text;

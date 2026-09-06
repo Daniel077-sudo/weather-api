@@ -25,6 +25,7 @@ def env_float(name: str, default: float) -> float:
         return default
 
 CWA_API_KEY = os.getenv("CWA_API_KEY")
+MOENV_API_KEY = os.getenv("MOENV_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
