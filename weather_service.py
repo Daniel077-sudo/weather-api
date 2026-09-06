@@ -403,6 +403,8 @@ async def fetch_cwa_active_warnings(city: str, district: str) -> List[Dict[str, 
                 if not warning_matches_location(loc, city, district):
                     continue
                 hazards = (loc.get("hazardConditions") or {}).get("hazards") or []
+                if not hazards and dataset_id == "W-C0033-001":
+                    continue
                 candidates = hazards if hazards else [loc]
                 for item in candidates:
                     normalized = normalize_warning(item if isinstance(item, dict) else loc, city, district)
@@ -656,6 +658,7 @@ async def _internal_sync(city: str, district: str):
             "weather_data": {
                 "current": weather_payload["current"],
                 "forecast": weather_payload["forecast"],
+                "schema_version": "weather_live_v2",
                 "active_warnings": weather_payload.get("active_warnings", []),
                 "hourly": weather_payload.get("hourly", []),
                 "radar_image_url": weather_payload.get("radar_image_url", ""),

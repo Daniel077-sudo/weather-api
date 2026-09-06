@@ -460,6 +460,7 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
         "weather_data": {
             "current": current,
             "forecast": weather_payload.get("forecast") or [],
+            "schema_version": "weather_live_v2",
             "active_warnings": weather_payload.get("active_warnings") or [],
             "hourly": weather_payload.get("hourly") or [],
             "radar_image_url": weather_payload.get("radar_image_url") or "",
@@ -486,7 +487,12 @@ def cached_weather_has_enriched_fields(cached: Dict[str, Any]) -> bool:
     weather_data = cached.get("weather_data") or {}
     current = weather_data.get("current") or {}
     required_current_fields = {"app_temp", "wind_ms", "wind_dir", "aqi"}
-    return required_current_fields.issubset(set(current.keys())) and "active_warnings" in weather_data and "observed_at" in weather_data
+    return (
+        weather_data.get("schema_version") == "weather_live_v2"
+        and required_current_fields.issubset(set(current.keys()))
+        and "active_warnings" in weather_data
+        and "observed_at" in weather_data
+    )
 
 
 @app.get("/weather")
