@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
-from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response
+from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response, get_xiaolan_training_profile
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -220,6 +220,7 @@ async def get_assistant_profile():
         {
             "name": "小藍",
             "persona": XIAOLAN_PERSONA,
+            "training": get_xiaolan_training_profile(),
             "supported_actions": [
                 "NONE",
                 "CLARIFY",
@@ -239,6 +240,15 @@ async def get_assistant_profile():
                 "防災小遊戲入口",
                 "主動行程天氣提醒",
             ],
+            "active_warning_schema": {
+                "type": "string",
+                "level": "string",
+                "issued_at": "string ISO8601",
+                "effective_at": "string ISO8601 optional",
+                "expires_at": "string ISO8601 optional",
+                "text": "string",
+                "source": "string",
+            },
         },
         "assistant profile loaded",
         "assistant",
@@ -496,6 +506,8 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
         "wind_gust_ms": current.get("wind_gust_ms", 0),
         "wind_gust_dir": current.get("wind_gust_dir", ""),
         "visibility_km": current.get("visibility_km", 0),
+        "observed_temp": current.get("observed_temp", 0),
+        "observed_humidity": current.get("observed_humidity", 0),
         "observed_wind_ms": current.get("observed_wind_ms", 0),
         "observed_wind_dir": current.get("observed_wind_dir", ""),
         "updated_at": now.isoformat(),
@@ -530,6 +542,16 @@ async def get_weather(
             cached = res.data[0]
             valid_until = parse_datetime(cached.get("valid_until"))
             if (not valid_until or valid_until >= taipei_now()) and cached_weather_has_enriched_fields(cached):
+                weather_data = cached.get("weather_data") or {}
+                weather_data["active_warnings"] = weather_data.get("active_warnings") or []
+                weather_data["hourly"] = weather_data.get("hourly") or []
+                weather_data["data_sources"] = weather_data.get("data_sources") or {}
+                weather_data["source_errors"] = weather_data.get("source_errors") or []
+                cached["weather_data"] = weather_data
+                cached["active_warnings"] = cached.get("active_warnings") or []
+                cached["hourly"] = cached.get("hourly") or weather_data.get("hourly") or []
+                cached["data_sources"] = cached.get("data_sources") or weather_data.get("data_sources") or {}
+                cached["source_errors"] = cached.get("source_errors") or weather_data.get("source_errors") or []
                 cached["status"] = "success"
                 cached["source"] = "cache"
                 cached["stale"] = False
@@ -558,6 +580,8 @@ async def get_weather(
                 "wind_gust_ms": response["wind_gust_ms"],
                 "wind_gust_dir": response["wind_gust_dir"],
                 "visibility_km": response["visibility_km"],
+                "observed_temp": response["observed_temp"],
+                "observed_humidity": response["observed_humidity"],
                 "observed_wind_ms": response["observed_wind_ms"],
                 "observed_wind_dir": response["observed_wind_dir"],
                 "aqi_site": response["aqi_site"],
@@ -1709,6 +1733,8 @@ alter table public.weather_cache add column if not exists rain_mm_24h double pre
 alter table public.weather_cache add column if not exists wind_gust_ms double precision default 0;
 alter table public.weather_cache add column if not exists wind_gust_dir text;
 alter table public.weather_cache add column if not exists visibility_km double precision default 0;
+alter table public.weather_cache add column if not exists observed_temp double precision default 0;
+alter table public.weather_cache add column if not exists observed_humidity integer default 0;
 alter table public.weather_cache add column if not exists observed_wind_ms double precision default 0;
 alter table public.weather_cache add column if not exists observed_wind_dir text;
 alter table public.weather_cache add column if not exists aqi_site text;

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -25,7 +26,7 @@ async def fetch_cwa_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
             return res.json()
     except httpx.TransportError as e:
         message = str(e)
-        if not any(marker in message for marker in CWA_SSL_ERROR_MARKERS):
+        if message and not any(marker in message for marker in CWA_SSL_ERROR_MARKERS):
             raise
         async with httpx.AsyncClient(verify=False) as client:
             res = await client.get(url, params=params, timeout=20.0)
@@ -200,12 +201,38 @@ def station_distance_score(station: Dict[str, Any], lat: Optional[float], lng: O
     return (coords["lat"] - lat) ** 2 + (coords["lng"] - lng) ** 2
 
 
+def station_name(station: Dict[str, Any]) -> str:
+    return str(station.get("StationName") or station.get("stationName") or "")
+
+
+def station_weather_element(station: Dict[str, Any]) -> Dict[str, Any]:
+    element = station.get("WeatherElement") or station.get("weatherElement") or {}
+    return element if isinstance(element, dict) else {}
+
+
+def station_quality_score(station: Dict[str, Any], require_visibility: bool = False) -> int:
+    name = station_name(station)
+    town = station_town(station)
+    score = 0
+    if any(keyword in name for keyword in ["國道", "快速", "交流道"]) or re.search(r"[NS]\d+K|[A-Z]?\d+K", name):
+        score += 100
+    if any(keyword in name for keyword in ["陽明山", "鞍部", "竹子湖", "玉山", "合歡山", "阿里山"]) and "山" not in town:
+        score += 30
+    if require_visibility:
+        element = station_weather_element(station)
+        visibility = safe_optional_float(element.get("VisibilityDescription") or element.get("Visb") or element.get("Visibility"))
+        if visibility is None:
+            score += 1000
+    return score
+
+
 def select_best_station(
     stations: List[Dict[str, Any]],
     city: str,
     district: str = "",
     lat: Optional[float] = None,
     lng: Optional[float] = None,
+    require_visibility: bool = False,
 ) -> Optional[Dict[str, Any]]:
     city_key = normalize_tw_text(city)
     district_key = normalize_tw_text(district)
@@ -218,12 +245,39 @@ def select_best_station(
         station for station in same_city
         if district_key and district_key in normalize_tw_text(station_town(station))
     ]
-    pool = same_district or same_city or valid
-    if lat is not None and lng is not None:
-        with_coords = [station for station in pool if station_coordinates(station)]
-        if with_coords:
-            return min(with_coords, key=lambda station: station_distance_score(station, lat, lng))
-    return pool[0]
+    prioritized: List[tuple] = []
+    seen_ids = set()
+    for priority, pool in enumerate([same_district, same_city, valid]):
+        for station in pool:
+            station_id = station.get("StationId") or station.get("stationId") or id(station)
+            if station_id in seen_ids:
+                continue
+            seen_ids.add(station_id)
+            prioritized.append((priority, station))
+    if not prioritized:
+        return None
+
+    if lat is not None and lng is not None and any(station_coordinates(station) for _, station in prioritized):
+        prioritized = [(priority, station) for priority, station in prioritized if station_coordinates(station)]
+
+    if require_visibility:
+        return min(
+            prioritized,
+            key=lambda item: (
+                station_quality_score(item[1], require_visibility=True),
+                item[0],
+                station_distance_score(item[1], lat, lng),
+            ),
+        )[1]
+
+    return min(
+        prioritized,
+        key=lambda item: (
+            item[0],
+            station_quality_score(item[1]),
+            station_distance_score(item[1], lat, lng),
+        ),
+    )[1]
 
 
 def extract_station_records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -300,6 +354,7 @@ def parse_weather_periods(dist_data: Optional[dict]) -> List[Dict[str, Any]]:
                     "wind_speed": "0",
                     "wind_ms": 0.0,
                     "wind_dir": "",
+                    "_seen_fields": set(),
                 },
             )
 
@@ -311,21 +366,26 @@ def parse_weather_periods(dist_data: Optional[dict]) -> List[Dict[str, Any]]:
             app_temp = extract_average_int(raw_values, ["ApparentTemperature", "MaxApparentTemperature", "MinApparentTemperature"])
             if app_temp:
                 period["app_temp"] = app_temp
+                period["_seen_fields"].add("app_temp")
 
             wind_direction = extract_exact_named_value(raw_values, ["WindDirection"])
             if wind_direction:
                 period["wind_dir"] = wind_direction
+                period["_seen_fields"].add("wind_dir")
 
             wind_ms_value = extract_exact_named_value(raw_values, ["WindSpeed"])
             if wind_ms_value:
                 period["wind_ms"] = safe_float(wind_ms_value)
+                period["_seen_fields"].add("wind_ms")
             beaufort_value = extract_exact_named_value(raw_values, ["BeaufortScale"])
             if beaufort_value:
                 period["wind_speed"] = beaufort_value
+                period["_seen_fields"].add("wind_speed")
 
             uv_value = extract_exact_named_value(raw_values, ["UVIndex"])
             if uv_value:
                 period["uvi"] = safe_int(uv_value)
+                period["_seen_fields"].add("uvi")
 
             weather_value = extract_exact_named_value(raw_values, ["Weather"])
             pop_value = extract_exact_named_value(raw_values, ["ProbabilityOfPrecipitation"])
@@ -333,34 +393,58 @@ def parse_weather_periods(dist_data: Optional[dict]) -> List[Dict[str, Any]]:
             hum_value = extract_exact_named_value(raw_values, ["RelativeHumidity"])
             if weather_value:
                 period["description"] = weather_value
+                period["_seen_fields"].add("description")
             elif pop_value:
                 period["pop"] = safe_int(pop_value)
+                period["_seen_fields"].add("pop")
             elif extract_average_int(raw_values, ["Temperature", "MaxTemperature", "MinTemperature"]):
                 period["temp"] = temp_value
+                period["_seen_fields"].add("temp")
             elif hum_value:
                 period["hum"] = safe_int(hum_value)
+                period["_seen_fields"].add("hum")
             elif element_name == "Wx" or "天氣現象" in element_name:
                 period["description"] = value
+                period["_seen_fields"].add("description")
             elif "PoP" in element_name or "降雨機率" in element_name:
                 period["pop"] = safe_int(value)
-            elif element_name in ["T", "MaxT", "MinT"] or "溫度" in element_name:
-                period["temp"] = safe_int(value)
-            elif element_name == "RH" or "相對濕度" in element_name:
-                period["hum"] = safe_int(value)
+                period["_seen_fields"].add("pop")
             elif element_name == "AT" or "體感溫度" in element_name:
                 period["app_temp"] = safe_int(value)
+                period["_seen_fields"].add("app_temp")
+            elif element_name in ["T", "MaxT", "MinT"] or element_name == "溫度":
+                period["temp"] = safe_int(value)
+                period["_seen_fields"].add("temp")
+            elif element_name == "RH" or "相對濕度" in element_name:
+                period["hum"] = safe_int(value)
+                period["_seen_fields"].add("hum")
             elif element_name == "UVI" or "紫外線" in element_name:
                 period["uvi"] = safe_int(value)
+                period["_seen_fields"].add("uvi")
             elif element_name == "WS" or "風速" in element_name:
                 wind_ms = extract_value_by_unit(raw_values, ["公尺/秒", "m/s", "m／s"])
                 if wind_ms:
                     period["wind_ms"] = safe_float(wind_ms)
+                    period["_seen_fields"].add("wind_ms")
                 else:
                     period["wind_speed"] = value
+                    period["_seen_fields"].add("wind_speed")
             elif element_name == "WD" or "風向" in element_name:
                 period["wind_dir"] = value
+                period["_seen_fields"].add("wind_dir")
 
-    return sorted(time_map.values(), key=lambda item: item["time"])
+    periods = sorted(time_map.values(), key=lambda item: item["time"])
+    carry: Dict[str, Any] = {}
+    sparse_fields = ["description", "pop", "wind_dir", "wind_ms", "wind_speed"]
+    for period in periods:
+        seen_fields = period.get("_seen_fields") or set()
+        for field in sparse_fields:
+            if field in seen_fields:
+                carry[field] = period.get(field)
+            elif field in carry:
+                period[field] = carry[field]
+        period.pop("_seen_fields", None)
+    return periods
 
 
 def pick_current_weather(forecast: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -530,12 +614,16 @@ def normalize_warning(raw: Dict[str, Any], city: str, district: str) -> Optional
     title = str(info.get("headline") or info.get("event") or info.get("Event") or raw.get("title") or f"{phenomena}{significance}").strip()
     description = str(info.get("description") or info.get("Description") or info.get("instruction") or raw.get("description") or title)
     issued_at = info.get("effective") or info.get("sent") or info.get("issueTime") or raw.get("created_at") or taipei_now().isoformat()
+    effective_at = info.get("onset") or info.get("effective") or raw.get("effective_at") or ""
+    expires_at = info.get("expires") or info.get("Expires") or raw.get("expires_at") or ""
     level = "豪雨" if "豪雨" in text else "大雨" if "大雨" in text else "強風" if "強風" in text else significance
     warning_type = title if title and title != "特報" else f"{phenomena}{significance}".strip() or "天氣特報"
     return {
         "type": warning_type,
         "level": level,
         "issued_at": issued_at,
+        "effective_at": effective_at,
+        "expires_at": expires_at,
         "text": description,
         "source": "cwa",
     }
@@ -605,9 +693,9 @@ async def fetch_cwa_rain_observation(
     }
 
 
-def parse_visibility_km(value: Any) -> float:
+def parse_visibility_km(value: Any) -> Optional[float]:
     text = str(value or "").replace("公里", "").replace("km", "").replace("KM", "").strip()
-    return safe_float(text)
+    return safe_optional_float(text)
 
 
 async def fetch_cwa_weather_observation(
@@ -617,7 +705,7 @@ async def fetch_cwa_weather_observation(
     lng: Optional[float] = None,
 ) -> Dict[str, Any]:
     stations = await fetch_cwa_station_dataset("O-A0003-001")
-    station = select_best_station(stations, city, district, lat, lng)
+    station = select_best_station(stations, city, district, lat, lng, require_visibility=True)
     if not station:
         return {}
 
@@ -629,6 +717,8 @@ async def fetch_cwa_weather_observation(
     wind_gust_ms = safe_float(gust.get("PeakGustSpeed") or gust.get("peakGustSpeed"))
     wind_gust_dir = str(occurred_at.get("WindDirection") or occurred_at.get("windDirection") or "")
     return {
+        "observed_temp": safe_float(element.get("AirTemperature") or element.get("airTemperature")),
+        "observed_humidity": safe_int(element.get("RelativeHumidity") or element.get("relativeHumidity")),
         "observed_wind_ms": safe_float(element.get("WindSpeed") or element.get("windSpeed")),
         "observed_wind_dir": str(element.get("WindDirection") or element.get("windDirection") or ""),
         "wind_gust_ms": wind_gust_ms,
@@ -682,7 +772,29 @@ def normalize_aqi_record(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def fetch_moenv_aqi(city: str, district: str = "") -> Dict[str, Any]:
+def aqi_record_coordinates(record: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    lat = safe_optional_float(record.get("latitude") or record.get("Latitude") or record.get("lat") or record.get("Lat"))
+    lng = safe_optional_float(record.get("longitude") or record.get("Longitude") or record.get("lon") or record.get("lng") or record.get("Lng"))
+    if lat is None or lng is None:
+        return None
+    return {"lat": lat, "lng": lng}
+
+
+def aqi_distance_score(record: Dict[str, Any], lat: Optional[float], lng: Optional[float]) -> float:
+    if lat is None or lng is None:
+        return 0
+    coords = aqi_record_coordinates(record)
+    if not coords:
+        return math.inf
+    return (coords["lat"] - lat) ** 2 + (coords["lng"] - lng) ** 2
+
+
+async def fetch_moenv_aqi(
+    city: str,
+    district: str = "",
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> Dict[str, Any]:
     if not MOENV_API_KEY:
         return {}
     params = {
@@ -702,10 +814,14 @@ async def fetch_moenv_aqi(city: str, district: str = "") -> Dict[str, Any]:
         return {}
     city_records = [
         record for record in records
-        if isinstance(record, dict) and (record.get("county") == city or record.get("County") == city)
+        if isinstance(record, dict) and normalize_tw_text(record.get("county") or record.get("County")) == normalize_tw_text(city)
     ]
     if not city_records:
         return {}
+    if lat is not None and lng is not None:
+        with_coords = [record for record in city_records if aqi_record_coordinates(record)]
+        if with_coords:
+            return normalize_aqi_record(min(with_coords, key=lambda record: aqi_distance_score(record, lat, lng)))
     district_records = [
         record for record in city_records
         if district and district.replace("區", "") in str(record.get("sitename") or record.get("SiteName") or "")
@@ -739,6 +855,9 @@ async def build_live_weather_payload(
     try:
         hourly_payload = await fetch_cwa_forecast(city, district, seven_day=False)
         hourly = hourly_payload.get("forecast") or []
+        if hourly:
+            current = dict(pick_current_weather(hourly))
+            observed_at = current.get("time") or current.get("start_time") or observed_at
         data_sources["cwa_3h_forecast"] = "success" if hourly else "not_found"
     except Exception as e:
         data_sources["cwa_3h_forecast"] = "error"
@@ -746,7 +865,7 @@ async def build_live_weather_payload(
         print(f"取得逐三小時預報失敗: {e}")
 
     try:
-        aqi_payload = await fetch_moenv_aqi(city, district)
+        aqi_payload = await fetch_moenv_aqi(city, district, lat, lng)
         if aqi_payload:
             data_sources["moenv_aqi"] = "success"
             current.update({
@@ -831,12 +950,14 @@ async def build_live_weather_payload(
         "rain_mm_24h": 0.0,
         "wind_gust_ms": 0.0,
         "wind_gust_dir": "",
+        "observed_temp": 0.0,
+        "observed_humidity": 0,
         "observed_wind_ms": 0.0,
         "observed_wind_dir": "",
-        "visibility_km": 0.0,
+        "visibility_km": None,
     }
     for key, value in current_defaults.items():
-        if current.get(key) is None:
+        if key not in current or current.get(key) is None and value is not None:
             current[key] = value
 
     risk = analyze_weather_risk(current)
@@ -1027,6 +1148,8 @@ async def _internal_sync(city: str, district: str):
             "wind_gust_ms": weather_payload["current"].get("wind_gust_ms", 0),
             "wind_gust_dir": weather_payload["current"].get("wind_gust_dir", ""),
             "visibility_km": weather_payload["current"].get("visibility_km", 0),
+            "observed_temp": weather_payload["current"].get("observed_temp", 0),
+            "observed_humidity": weather_payload["current"].get("observed_humidity", 0),
             "observed_wind_ms": weather_payload["current"].get("observed_wind_ms", 0),
             "observed_wind_dir": weather_payload["current"].get("observed_wind_dir", ""),
             "aqi_site": weather_payload["current"].get("aqi_site", ""),

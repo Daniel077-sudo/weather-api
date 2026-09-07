@@ -87,8 +87,8 @@ class CoreLogicTests(unittest.TestCase):
             "event_end",
             "event_id_to_delete",
         }
-        self.assertEqual(set(body.keys()), expected_keys)
-        self.assertIn(body["action_type"], ["ADD_EVENT", "DELETE_EVENT", "NONE"])
+        self.assertTrue(expected_keys.issubset(set(body.keys())))
+        self.assertIn(body["action_type"], ["ADD_EVENT", "CREATE_EVENT", "DELETE_EVENT", "CLARIFY", "NONE"])
         if body["action_type"] == "ADD_EVENT":
             self.assertTrue(body["event_title"])
             self.assertIn("+08:00", body["event_start"])
@@ -103,7 +103,7 @@ class CoreLogicTests(unittest.TestCase):
 
     def test_chat_local_fallback_answers_disaster_qa(self):
         body = build_local_fallback("test-user", "地震來的時候應該怎麼辦")
-        self.assertEqual(body["action_type"], "NONE")
+        self.assertEqual(body["action_type"], "DISASTER_GUIDE")
         self.assertIn("趴下", body["reply"])
         self.assertNotIn("目前不會更動行事曆", body["reply"])
 

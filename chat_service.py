@@ -1,6 +1,8 @@
 import re
 import uuid
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config import supabase
@@ -31,6 +33,7 @@ XIAOLAN_PERSONA = (
 TAIPEI_TZ = timezone(timedelta(hours=8))
 MEMORY_MAX_CHARS = 4000
 CHAT_LOGS_TABLE = "chat_logs"
+TRAINING_PATH = Path(__file__).resolve().parent / "data" / "xiaolan_training.json"
 LOCAL_PENDING_EVENTS: Dict[str, Dict[str, Any]] = {}
 LOCAL_CHAT_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 TIME_HINTS = ["今天", "明天", "後天", "下週", "下周", "下星期", "週末", "周末", "星期", "禮拜", "上午", "早上", "下午", "晚上", "中午", "點"]
@@ -55,6 +58,52 @@ CHINESE_HOUR_MAP = {
     "十一": 11,
     "十二": 12,
 }
+
+
+def load_xiaolan_training() -> Dict[str, Any]:
+    try:
+        with TRAINING_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {
+            "version": "xiaolan-inline-fallback",
+            "name": "小藍",
+            "role": "智行天氣與防災專用助理",
+            "tone": ["簡短自然", "主動提醒風險"],
+            "principles": [
+                "缺少行程時間、地點或標題時回 CLARIFY。",
+                "不要編造天氣、警報、交通或資料庫結果。",
+            ],
+            "few_shots": [],
+            "forbidden": ["不要輸出 markdown。"],
+        }
+
+
+XIAOLAN_TRAINING = load_xiaolan_training()
+
+
+def xiaolan_training_prompt() -> str:
+    training = XIAOLAN_TRAINING
+    return (
+        f"小藍訓練版本: {training.get('version', 'unknown')}\n"
+        f"角色定位: {training.get('name', '小藍')}，{training.get('role', '智行天氣與防災專用助理')}\n"
+        f"口吻: {json.dumps(training.get('tone') or [], ensure_ascii=False)}\n"
+        f"行為守則: {json.dumps(training.get('principles') or [], ensure_ascii=False)}\n"
+        f"回覆風格: {json.dumps(training.get('reply_style') or {}, ensure_ascii=False)}\n"
+        f"few_shot_examples: {json.dumps(training.get('few_shots') or [], ensure_ascii=False)}\n"
+        f"禁止事項: {json.dumps(training.get('forbidden') or [], ensure_ascii=False)}\n"
+    )
+
+
+def get_xiaolan_training_profile() -> Dict[str, Any]:
+    training = XIAOLAN_TRAINING
+    return {
+        "training_version": training.get("version") or "unknown",
+        "tone": training.get("tone") or [],
+        "principles": training.get("principles") or [],
+        "reply_style": training.get("reply_style") or {},
+        "few_shot_count": len(training.get("few_shots") or []),
+    }
 
 
 def empty_chat_response(reply: str = "收到，我可以協助你查天氣、整理災防提醒，或解析新增/刪除行程。") -> Dict[str, Any]:
@@ -1217,12 +1266,16 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
     now = taipei_now()
     memory = get_user_memory(user_id)
     memory_markdown = memory.get("memory_markdown") or ""
+    training_prompt = xiaolan_training_prompt()
     prompt = (
-        "你是 FastAPI 後端的行事曆與災防助理。請只回傳 JSON object，不要 markdown。\n"
+        "你是 FastAPI 後端的行事曆、天氣與災防助理解析器。請只回傳 JSON object，不要 markdown。\n"
+        f"{training_prompt}"
         "任務：解析使用者是否要新增行程、刪除行程，或只是一般聊天。\n"
         "action_type 只能是 ADD_EVENT、UPDATE_EVENT、DELETE_EVENT、WEATHER_QUERY、DISASTER_GUIDE、GAME_START、CLARIFY、NONE。不要輸出 CREATE_EVENT 或 EVENT_SYNCED，CREATE_EVENT 由後端建立 DB 後產生。\n"
         "若 ADD_EVENT，請填 event_title、event_start、event_end、event_city、event_district、event_location。時間必須是 Asia/Taipei 的 ISO8601，例如 2026-07-25T09:00:00+08:00。\n"
         "若缺少新增行程必填 slot，請輸出 CLARIFY，並填 missing_slots 與 clarify_slot。\n"
+        "若使用者語句包含「去/到/前往 + 活動或地點」，即使缺時間或缺地點，也要回 CLARIFY，不要回 NONE。\n"
+        "若 fallback_json 已經判斷 ADD_EVENT、CLARIFY、DELETE_EVENT、WEATHER_QUERY、DISASTER_GUIDE 或 GAME_START，除非明顯錯誤，請沿用該 action_type。\n"
         "若 DELETE_EVENT，請填 event_title；event_id_to_delete 若不知道請留空字串。\n"
         "若 NONE，行程欄位留空。\n"
         "has_alert/alert_title/alert_url 若無法確認，請沿用 fallback 或 false/空字串。\n"
