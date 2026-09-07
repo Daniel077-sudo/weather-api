@@ -475,10 +475,17 @@ async def build_live_weather_payload(city: str, district: str) -> Dict[str, Any]
     current = dict(weather_payload["current"])
     observed_at = current.get("time") or current.get("start_time")
     active_warnings: List[Dict[str, Any]] = []
+    source_errors: List[Dict[str, str]] = []
+    data_sources = {
+        "cwa_forecast": "success",
+        "cwa_warnings": "not_checked",
+        "moenv_aqi": "not_configured" if not MOENV_API_KEY else "not_found",
+    }
 
     try:
         aqi_payload = await fetch_moenv_aqi(city, district)
         if aqi_payload:
+            data_sources["moenv_aqi"] = "success"
             current.update({
                 "aqi": aqi_payload.get("aqi", 0),
                 "aqi_site": aqi_payload.get("aqi_site", ""),
@@ -490,11 +497,16 @@ async def build_live_weather_payload(city: str, district: str) -> Dict[str, Any]
             })
             observed_at = aqi_payload.get("observed_at") or observed_at
     except Exception as e:
+        data_sources["moenv_aqi"] = "error"
+        source_errors.append({"source": "moenv_aqi", "message": str(e)})
         print(f"取得 AQI 失敗: {e}")
 
     try:
         active_warnings = await fetch_cwa_active_warnings(city, district)
+        data_sources["cwa_warnings"] = "success"
     except Exception as e:
+        data_sources["cwa_warnings"] = "error"
+        source_errors.append({"source": "cwa_warnings", "message": str(e)})
         print(f"取得 active_warnings 失敗: {e}")
 
     risk = analyze_weather_risk(current)
@@ -522,6 +534,8 @@ async def build_live_weather_payload(city: str, district: str) -> Dict[str, Any]
         "observed_at": observed_at,
         "hourly": [],
         "radar_image_url": "",
+        "data_sources": data_sources,
+        "source_errors": source_errors,
         **risk,
     }
 
@@ -663,6 +677,8 @@ async def _internal_sync(city: str, district: str):
                 "hourly": weather_payload.get("hourly", []),
                 "radar_image_url": weather_payload.get("radar_image_url", ""),
                 "observed_at": weather_payload.get("observed_at"),
+                "data_sources": weather_payload.get("data_sources", {}),
+                "source_errors": weather_payload.get("source_errors", []),
                 "risk_level": weather_payload["risk_level"],
                 "risk_tags": weather_payload["risk_tags"],
                 "has_weather_risk": weather_payload["has_weather_risk"],
