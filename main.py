@@ -536,80 +536,83 @@ async def get_weather(
     lng: Optional[float] = None,
 ):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
-    try:
-        res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
-        if res.data:
-            cached = res.data[0]
-            valid_until = parse_datetime(cached.get("valid_until"))
-            if (not valid_until or valid_until >= taipei_now()) and cached_weather_has_enriched_fields(cached):
-                weather_data = cached.get("weather_data") or {}
-                weather_data["active_warnings"] = weather_data.get("active_warnings") or []
-                weather_data["hourly"] = weather_data.get("hourly") or []
-                weather_data["data_sources"] = weather_data.get("data_sources") or {}
-                weather_data["source_errors"] = weather_data.get("source_errors") or []
-                cached["weather_data"] = weather_data
-                cached["active_warnings"] = cached.get("active_warnings") or []
-                cached["hourly"] = cached.get("hourly") or weather_data.get("hourly") or []
-                cached["data_sources"] = cached.get("data_sources") or weather_data.get("data_sources") or {}
-                cached["source_errors"] = cached.get("source_errors") or weather_data.get("source_errors") or []
-                cached["status"] = "success"
-                cached["source"] = "cache"
-                cached["stale"] = False
-                return cached
-    except Exception as cache_e:
-        print(f"讀取天氣快取失敗: {cache_e}")
+    has_coordinates = lat is not None and lng is not None
+    if not has_coordinates:
+        try:
+            res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
+            if res.data:
+                cached = res.data[0]
+                valid_until = parse_datetime(cached.get("valid_until"))
+                if (not valid_until or valid_until >= taipei_now()) and cached_weather_has_enriched_fields(cached):
+                    weather_data = cached.get("weather_data") or {}
+                    weather_data["active_warnings"] = weather_data.get("active_warnings") or []
+                    weather_data["hourly"] = weather_data.get("hourly") or []
+                    weather_data["data_sources"] = weather_data.get("data_sources") or {}
+                    weather_data["source_errors"] = weather_data.get("source_errors") or []
+                    cached["weather_data"] = weather_data
+                    cached["active_warnings"] = cached.get("active_warnings") or []
+                    cached["hourly"] = cached.get("hourly") or weather_data.get("hourly") or []
+                    cached["data_sources"] = cached.get("data_sources") or weather_data.get("data_sources") or {}
+                    cached["source_errors"] = cached.get("source_errors") or weather_data.get("source_errors") or []
+                    cached["status"] = "success"
+                    cached["source"] = "cache"
+                    cached["stale"] = False
+                    return cached
+        except Exception as cache_e:
+            print(f"讀取天氣快取失敗: {cache_e}")
 
     try:
         weather_payload = await build_live_weather_payload(city, district, lat, lng)
         response = build_weather_live_response(city, district, weather_payload, "cwa_live")
-        try:
-            cache_payload = {
-                "city_name": response["city_name"],
-                "weather_data": response["weather_data"],
-                "radar_image_url": response["radar_image_url"],
-                "uvi": response["uvi"],
-                "aqi": response["aqi"],
-                "app_temp": response["app_temp"],
-                "wind_ms": response["wind_ms"],
-                "wind_dir": response["wind_dir"],
-                "rain_mm_1h": response["rain_mm_1h"],
-                "rain_mm_3h": response["rain_mm_3h"],
-                "rain_mm_6h": response["rain_mm_6h"],
-                "rain_mm_12h": response["rain_mm_12h"],
-                "rain_mm_24h": response["rain_mm_24h"],
-                "wind_gust_ms": response["wind_gust_ms"],
-                "wind_gust_dir": response["wind_gust_dir"],
-                "visibility_km": response["visibility_km"],
-                "observed_temp": response["observed_temp"],
-                "observed_humidity": response["observed_humidity"],
-                "observed_wind_ms": response["observed_wind_ms"],
-                "observed_wind_dir": response["observed_wind_dir"],
-                "aqi_site": response["aqi_site"],
-                "aqi_status": response["aqi_status"],
-                "aqi_pollutant": response["aqi_pollutant"],
-                "pm25": response["pm25"],
-                "pm10": response["pm10"],
-                "o3": response["o3"],
-                "active_warnings": response["active_warnings"],
-                "hourly": response["weather_data"]["hourly"],
-                "observed_at": response["observed_at"],
-                "data_sources": response["data_sources"],
-                "source_errors": response["source_errors"],
-                "updated_at": response["updated_at"],
-                "valid_until": response["valid_until"],
-            }
+        if not has_coordinates:
             try:
-                supabase.table("weather_cache").upsert(cache_payload, on_conflict="city_name").execute()
-            except Exception:
-                legacy_payload = {
-                    "city_name": cache_payload["city_name"],
-                    "weather_data": cache_payload["weather_data"],
-                    "updated_at": cache_payload["updated_at"],
-                    "valid_until": cache_payload["valid_until"],
+                cache_payload = {
+                    "city_name": response["city_name"],
+                    "weather_data": response["weather_data"],
+                    "radar_image_url": response["radar_image_url"],
+                    "uvi": response["uvi"],
+                    "aqi": response["aqi"],
+                    "app_temp": response["app_temp"],
+                    "wind_ms": response["wind_ms"],
+                    "wind_dir": response["wind_dir"],
+                    "rain_mm_1h": response["rain_mm_1h"],
+                    "rain_mm_3h": response["rain_mm_3h"],
+                    "rain_mm_6h": response["rain_mm_6h"],
+                    "rain_mm_12h": response["rain_mm_12h"],
+                    "rain_mm_24h": response["rain_mm_24h"],
+                    "wind_gust_ms": response["wind_gust_ms"],
+                    "wind_gust_dir": response["wind_gust_dir"],
+                    "visibility_km": response["visibility_km"],
+                    "observed_temp": response["observed_temp"],
+                    "observed_humidity": response["observed_humidity"],
+                    "observed_wind_ms": response["observed_wind_ms"],
+                    "observed_wind_dir": response["observed_wind_dir"],
+                    "aqi_site": response["aqi_site"],
+                    "aqi_status": response["aqi_status"],
+                    "aqi_pollutant": response["aqi_pollutant"],
+                    "pm25": response["pm25"],
+                    "pm10": response["pm10"],
+                    "o3": response["o3"],
+                    "active_warnings": response["active_warnings"],
+                    "hourly": response["weather_data"]["hourly"],
+                    "observed_at": response["observed_at"],
+                    "data_sources": response["data_sources"],
+                    "source_errors": response["source_errors"],
+                    "updated_at": response["updated_at"],
+                    "valid_until": response["valid_until"],
                 }
-                supabase.table("weather_cache").upsert(legacy_payload, on_conflict="city_name").execute()
-        except Exception as cache_write_e:
-            print(f"寫入天氣快取失敗: {cache_write_e}")
+                try:
+                    supabase.table("weather_cache").upsert(cache_payload, on_conflict="city_name").execute()
+                except Exception:
+                    legacy_payload = {
+                        "city_name": cache_payload["city_name"],
+                        "weather_data": cache_payload["weather_data"],
+                        "updated_at": cache_payload["updated_at"],
+                        "valid_until": cache_payload["valid_until"],
+                    }
+                    supabase.table("weather_cache").upsert(legacy_payload, on_conflict="city_name").execute()
+            except Exception as cache_write_e:
+                print(f"寫入天氣快取失敗: {cache_write_e}")
         return response
     except Exception as e:
         return {"status": "error", "message": f"無法取得 {city}{district} 天氣資料: {str(e)}"}
