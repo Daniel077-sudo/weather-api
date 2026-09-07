@@ -150,6 +150,26 @@ class WatchAreaCreate(BaseModel):
     is_active: bool = True
 
 
+class UserPreferenceRequest(BaseModel):
+    user_id: str
+    default_city: Optional[str] = None
+    default_district: Optional[str] = None
+    commute_mode: Optional[str] = None
+    risk_preferences: Dict[str, Any] = Field(default_factory=dict)
+    quiet_hours: Dict[str, Any] = Field(default_factory=dict)
+    favorite_locations: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class PushDeviceTokenRequest(BaseModel):
+    user_id: str
+    platform: Literal["ios", "android", "web"] = "ios"
+    device_token: str
+    provider: Literal["apns", "fcm", "webpush"] = "apns"
+    app_version: Optional[str] = None
+    device_name: Optional[str] = None
+    is_active: bool = True
+
+
 class EmergencyKitVisionResult(BaseModel):
     user_id: Optional[str] = None
     kit_id: Optional[str] = None

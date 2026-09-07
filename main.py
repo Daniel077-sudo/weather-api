@@ -18,10 +18,10 @@ from disaster_service import cleanup_expired_disaster_alerts, get_active_disaste
 from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event, persist_event_risk_fields
 from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, QuizScoreSubmitRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
-from weather_service import analyze_weather_risk, build_live_weather_payload, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
+from weather_service import analyze_weather_risk, build_live_weather_payload, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, persist_weather_observation_history, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
 
 load_dotenv()
 
@@ -508,6 +508,10 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
         "visibility_km": current.get("visibility_km", 0),
         "observed_temp": current.get("observed_temp", 0),
         "observed_humidity": current.get("observed_humidity", 0),
+        "wbgt": current.get("wbgt", 0),
+        "heat_injury_warning": current.get("heat_injury_warning", ""),
+        "wbgt_source": current.get("wbgt_source", ""),
+        "wbgt_time": current.get("wbgt_time", ""),
         "observed_wind_ms": current.get("observed_wind_ms", 0),
         "observed_wind_dir": current.get("observed_wind_dir", ""),
         "updated_at": now.isoformat(),
@@ -518,7 +522,18 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
 def cached_weather_has_enriched_fields(cached: Dict[str, Any]) -> bool:
     weather_data = cached.get("weather_data") or {}
     current = weather_data.get("current") or {}
-    required_current_fields = {"app_temp", "wind_ms", "wind_dir", "aqi", "rain_mm_24h", "wind_gust_ms", "visibility_km"}
+    required_current_fields = {
+        "app_temp",
+        "wind_ms",
+        "wind_dir",
+        "aqi",
+        "rain_mm_24h",
+        "wind_gust_ms",
+        "visibility_km",
+        "observed_temp",
+        "observed_humidity",
+        "wbgt",
+    }
     return (
         weather_data.get("schema_version") == "weather_live_v3"
         and required_current_fields.issubset(set(current.keys()))
@@ -585,6 +600,8 @@ async def get_weather(
                     "visibility_km": response["visibility_km"],
                     "observed_temp": response["observed_temp"],
                     "observed_humidity": response["observed_humidity"],
+                    "wbgt": response["wbgt"],
+                    "heat_injury_warning": response["heat_injury_warning"],
                     "observed_wind_ms": response["observed_wind_ms"],
                     "observed_wind_dir": response["observed_wind_dir"],
                     "aqi_site": response["aqi_site"],
@@ -613,6 +630,9 @@ async def get_weather(
                     supabase.table("weather_cache").upsert(legacy_payload, on_conflict="city_name").execute()
             except Exception as cache_write_e:
                 print(f"寫入天氣快取失敗: {cache_write_e}")
+            history_result = persist_weather_observation_history(city, district, weather_payload)
+            if history_result.get("status") != "success":
+                print(f"寫入天氣歷史失敗: {history_result.get('message')}")
         return response
     except Exception as e:
         return {"status": "error", "message": f"無法取得 {city}{district} 天氣資料: {str(e)}"}
@@ -811,6 +831,100 @@ async def get_notifications_summary(user_id: str = Query(...)):
         "latest": latest,
     }
     return safe_response("success" if not errors else "partial_success", data, "notification summary loaded", "notifications", errors)
+
+
+@app.post("/api/push/device-tokens")
+async def upsert_push_device_token(payload: PushDeviceTokenRequest):
+    now = taipei_now().isoformat()
+    token_hash = hashlib.sha256(payload.device_token.encode("utf-8")).hexdigest()
+    db_payload = {
+        "user_id": payload.user_id,
+        "platform": payload.platform,
+        "provider": payload.provider,
+        "device_token": payload.device_token,
+        "token_hash": token_hash,
+        "app_version": payload.app_version,
+        "device_name": payload.device_name,
+        "is_active": payload.is_active,
+        "last_seen_at": now,
+        "updated_at": now,
+    }
+    try:
+        res = supabase.table("push_device_tokens").upsert(db_payload, on_conflict="token_hash").execute()
+        public_data = {k: v for k, v in db_payload.items() if k != "device_token"}
+        return safe_response("success", res.data[0] if res.data else public_data, "push device token saved", "push_device_tokens")
+    except Exception as e:
+        return safe_response("error", {"token_hash": token_hash}, str(e), "push_device_tokens", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/push/device-tokens")
+async def list_push_device_tokens(
+    user_id: str = Query(...),
+    active_only: bool = Query(True),
+):
+    try:
+        query = supabase.table("push_device_tokens").select("id,user_id,platform,provider,token_hash,app_version,device_name,is_active,last_seen_at,created_at,updated_at").eq("user_id", user_id)
+        if active_only:
+            query = query.eq("is_active", True)
+        res = query.order("updated_at", desc=True).execute()
+        return safe_response("success", res.data or [], "push device tokens loaded", "push_device_tokens")
+    except Exception as e:
+        return safe_response("error", [], str(e), "push_device_tokens", [{"service": "supabase", "message": str(e)}])
+
+
+@app.post("/api/users/preferences")
+async def upsert_user_preferences(payload: UserPreferenceRequest):
+    now = taipei_now().isoformat()
+    memory = {}
+    if payload.default_city or payload.default_district:
+        memory["default_location"] = {
+            "city": payload.default_city or "",
+            "district": payload.default_district or "",
+        }
+    if payload.commute_mode:
+        memory["commute_mode"] = payload.commute_mode
+    if payload.risk_preferences:
+        memory["risk_preferences"] = payload.risk_preferences
+    if payload.favorite_locations:
+        memory["favorite_locations"] = payload.favorite_locations
+
+    db_payload = {
+        "user_id": payload.user_id,
+        "default_city": payload.default_city,
+        "default_district": payload.default_district,
+        "commute_mode": payload.commute_mode,
+        "risk_preferences": payload.risk_preferences,
+        "quiet_hours": payload.quiet_hours,
+        "favorite_locations": payload.favorite_locations,
+        "updated_at": now,
+    }
+    try:
+        res = supabase.table("user_preferences").upsert(db_payload, on_conflict="user_id").execute()
+        if memory:
+            try:
+                current = supabase.table("user_memory_profiles").select("summary_json").eq("user_id", payload.user_id).limit(1).execute()
+                summary = (current.data[0].get("summary_json") if current.data else {}) or {}
+                summary["preferences"] = {**(summary.get("preferences") or {}), **memory}
+                supabase.table("user_memory_profiles").upsert({
+                    "user_id": payload.user_id,
+                    "summary_json": summary,
+                    "updated_at": now,
+                    "last_interaction_at": now,
+                }, on_conflict="user_id").execute()
+            except Exception:
+                pass
+        return safe_response("success", res.data[0] if res.data else db_payload, "user preferences saved", "user_preferences")
+    except Exception as e:
+        return safe_response("error", {}, str(e), "user_preferences", [{"service": "supabase", "message": str(e)}])
+
+
+@app.get("/api/users/preferences")
+async def get_user_preferences(user_id: str = Query(...)):
+    try:
+        res = supabase.table("user_preferences").select("*").eq("user_id", user_id).limit(1).execute()
+        return safe_response("success", res.data[0] if res.data else {}, "user preferences loaded", "user_preferences")
+    except Exception as e:
+        return safe_response("error", {}, str(e), "user_preferences", [{"service": "supabase", "message": str(e)}])
 
 
 @app.get("/api/area/status")
@@ -1282,6 +1396,22 @@ async def refresh_weather_cache_endpoint(
 ):
     return await refresh_weather_cache_city(city, district)
 
+
+@app.get("/api/weather/history")
+async def get_weather_history(
+    city: str = Query(...),
+    district: str = Query(""),
+    limit: int = Query(48, ge=1, le=500),
+):
+    try:
+        query = supabase.table("weather_observations").select("*").eq("city", city)
+        if district:
+            query = query.eq("district", district)
+        res = query.order("observed_at", desc=True).limit(limit).execute()
+        return safe_response("success", res.data or [], "weather history loaded", "weather_observations")
+    except Exception as e:
+        return safe_response("error", [], str(e), "weather_observations", [{"service": "supabase", "message": str(e)}])
+
 @app.get("/api/briefing/today")
 async def get_today_briefing():
     try:
@@ -1738,6 +1868,8 @@ alter table public.weather_cache add column if not exists wind_gust_dir text;
 alter table public.weather_cache add column if not exists visibility_km double precision default 0;
 alter table public.weather_cache add column if not exists observed_temp double precision default 0;
 alter table public.weather_cache add column if not exists observed_humidity integer default 0;
+alter table public.weather_cache add column if not exists wbgt integer default 0;
+alter table public.weather_cache add column if not exists heat_injury_warning text;
 alter table public.weather_cache add column if not exists observed_wind_ms double precision default 0;
 alter table public.weather_cache add column if not exists observed_wind_dir text;
 alter table public.weather_cache add column if not exists aqi_site text;
@@ -1751,6 +1883,24 @@ alter table public.weather_cache add column if not exists hourly jsonb default '
 alter table public.weather_cache add column if not exists observed_at timestamptz;
 alter table public.weather_cache add column if not exists data_sources jsonb default '{}'::jsonb;
 alter table public.weather_cache add column if not exists source_errors jsonb default '[]'::jsonb;
+
+create table if not exists public.weather_observations (
+  id bigint generated by default as identity primary key,
+  city_name text not null,
+  city text,
+  district text,
+  observed_at timestamptz not null,
+  current jsonb default '{}'::jsonb,
+  risk_level text default 'low',
+  risk_tags jsonb default '[]'::jsonb,
+  data_sources jsonb default '{}'::jsonb,
+  source_errors jsonb default '[]'::jsonb,
+  created_at timestamptz default now(),
+  unique(city_name, observed_at)
+);
+
+create index if not exists weather_observations_city_observed_idx
+  on public.weather_observations(city_name, observed_at desc);
 
 alter table public.chat_logs add column if not exists user_id text;
 alter table public.chat_logs add column if not exists role text;
@@ -1772,6 +1922,36 @@ create table if not exists public.user_memory_profiles (
   last_interaction_at timestamptz,
   updated_at timestamptz default now()
 );
+
+create table if not exists public.user_preferences (
+  user_id text primary key,
+  default_city text,
+  default_district text,
+  commute_mode text,
+  risk_preferences jsonb default '{}'::jsonb,
+  quiet_hours jsonb default '{}'::jsonb,
+  favorite_locations jsonb default '[]'::jsonb,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create table if not exists public.push_device_tokens (
+  id bigint generated by default as identity primary key,
+  user_id text not null,
+  platform text not null,
+  provider text not null,
+  device_token text not null,
+  token_hash text unique not null,
+  app_version text,
+  device_name text,
+  is_active boolean default true,
+  last_seen_at timestamptz,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create index if not exists push_device_tokens_user_active_idx
+  on public.push_device_tokens(user_id, is_active, updated_at desc);
 
 alter table public.sync_logs add column if not exists source text default 'backend';
 alter table public.sync_logs add column if not exists payload jsonb default '{}'::jsonb;

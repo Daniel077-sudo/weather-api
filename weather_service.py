@@ -509,6 +509,7 @@ def analyze_weather_risk(weather: Dict[str, Any]) -> Dict[str, Any]:
     uvi = safe_int(weather.get("uvi"))
     aqi = safe_int(weather.get("aqi"))
     app_temp = safe_int(weather.get("app_temp"))
+    wbgt = safe_int(weather.get("wbgt"))
     wind_ms = safe_float(weather.get("wind_ms"))
     wind_gust_ms = safe_float(weather.get("wind_gust_ms"))
     wind_speed = safe_int(weather.get("wind_speed"))
@@ -535,7 +536,9 @@ def analyze_weather_risk(weather: Dict[str, Any]) -> Dict[str, Any]:
         tags.append("poor_air_quality")
     if app_temp >= 38:
         tags.append("extreme_heat")
-    if app_temp >= 36:
+    if wbgt >= 31:
+        tags.append("extreme_heat")
+    if app_temp >= 36 or wbgt >= 28:
         tags.append("heat_risk")
 
     high_tags = {"heavy_rain", "torrential_rain", "strong_wind", "low_visibility", "very_poor_air_quality", "extreme_heat"}
@@ -756,6 +759,65 @@ async def fetch_cwa_uvi_observation(station_id: str = "") -> Dict[str, Any]:
     return {}
 
 
+def find_heat_location(payload: Dict[str, Any], city: str, district: str) -> Optional[Dict[str, Any]]:
+    records = payload.get("records") or {}
+    locations = records.get("Locations") or records.get("locations") or []
+    city_key = normalize_tw_text(city)
+    district_key = normalize_tw_text(district)
+    city_block = None
+    for block in locations if isinstance(locations, list) else []:
+        if not isinstance(block, dict):
+            continue
+        if normalize_tw_text(block.get("CountyName") or block.get("countyName")) == city_key:
+            city_block = block
+            break
+    if not city_block:
+        return None
+    town_locations = city_block.get("Location") or city_block.get("location") or []
+    fallback = None
+    for location in town_locations if isinstance(town_locations, list) else []:
+        if not isinstance(location, dict):
+            continue
+        if fallback is None:
+            fallback = location
+        town = normalize_tw_text(location.get("TownName") or location.get("townName"))
+        if district_key and town == district_key:
+            return location
+    return fallback
+
+
+async def fetch_cwa_heat_injury(city: str, district: str = "", target_time: Optional[datetime] = None) -> Dict[str, Any]:
+    payload = await fetch_cwa_json(
+        "https://opendata.cwa.gov.tw/api/v1/rest/datastore/M-A0085-001",
+        {"Authorization": CWA_API_KEY, "format": "JSON"},
+    )
+    location = find_heat_location(payload, city, district)
+    if not location:
+        return {}
+    taipei_tz = timezone(timedelta(hours=8))
+    target = (target_time or taipei_now()).astimezone(taipei_tz)
+    candidates = []
+    for item in location.get("Time") or location.get("time") or []:
+        if not isinstance(item, dict):
+            continue
+        issue_time = item.get("IssueTime") or item.get("issueTime")
+        parsed = parse_datetime(str(issue_time)) if issue_time else None
+        if not parsed:
+            continue
+        parsed = parsed.astimezone(taipei_tz) if parsed.tzinfo else parsed.replace(tzinfo=taipei_tz)
+        elements = item.get("WeatherElements") or item.get("weatherElements") or {}
+        candidates.append((abs((parsed - target).total_seconds()), parsed, elements))
+    if not candidates:
+        return {}
+    _, matched_time, elements = min(candidates, key=lambda item: item[0])
+    return {
+        "wbgt": safe_int(elements.get("HeatInjuryIndex") or elements.get("heatInjuryIndex")),
+        "heat_injury_warning": elements.get("HeatInjuryWarning") or elements.get("heatInjuryWarning") or "",
+        "wbgt_source": "cwa_m_a0085_001",
+        "wbgt_time": matched_time.isoformat(timespec="seconds"),
+    }
+
+
 def normalize_aqi_record(record: Dict[str, Any]) -> Dict[str, Any]:
     aqi = safe_int(record.get("aqi") or record.get("AQI"))
     observed_at = normalize_observed_at(record.get("publishtime") or record.get("PublishTime") or record.get("monitordate") or record.get("MonitorDate"))
@@ -848,6 +910,7 @@ async def build_live_weather_payload(
         "cwa_rain_observation": "not_checked",
         "cwa_weather_observation": "not_checked",
         "cwa_uvi_observation": "not_checked",
+        "cwa_heat_injury": "not_checked",
         "cwa_radar": "success",
         "moenv_aqi": "not_configured" if not MOENV_API_KEY else "not_found",
     }
@@ -926,6 +989,18 @@ async def build_live_weather_payload(
         print(f"取得氣象觀測失敗: {e}")
 
     try:
+        heat_payload = await fetch_cwa_heat_injury(city, district, parse_datetime(str(current.get("time") or current.get("start_time") or "")))
+        if heat_payload:
+            data_sources["cwa_heat_injury"] = "success"
+            current.update(heat_payload)
+        else:
+            data_sources["cwa_heat_injury"] = "not_found"
+    except Exception as e:
+        data_sources["cwa_heat_injury"] = "error"
+        source_errors.append({"source": "cwa_heat_injury", "message": str(e)})
+        print(f"取得熱傷害指數失敗: {e}")
+
+    try:
         active_warnings = await fetch_cwa_active_warnings(city, district)
         data_sources["cwa_warnings"] = "success"
     except Exception as e:
@@ -955,6 +1030,10 @@ async def build_live_weather_payload(
         "observed_wind_ms": 0.0,
         "observed_wind_dir": "",
         "visibility_km": None,
+        "wbgt": 0,
+        "heat_injury_warning": "",
+        "wbgt_source": "",
+        "wbgt_time": "",
     }
     for key, value in current_defaults.items():
         if key not in current or current.get(key) is None and value is not None:
@@ -1009,6 +1088,32 @@ async def build_weather_snapshot(city: str, district: str, event_time: Optional[
         **risk,
         "captured_at": taipei_now().isoformat(),
     }
+
+
+def persist_weather_observation_history(city: str, district: str, weather_payload: Dict[str, Any]) -> Dict[str, Any]:
+    observed_at = weather_payload.get("observed_at") or taipei_now().isoformat()
+    city_name = f"{city}{district}"
+    current = weather_payload.get("current") or {}
+    history_payload = {
+        "city_name": city_name,
+        "city": city,
+        "district": district,
+        "observed_at": observed_at,
+        "current": current,
+        "risk_level": weather_payload.get("risk_level") or "low",
+        "risk_tags": weather_payload.get("risk_tags") or [],
+        "data_sources": weather_payload.get("data_sources") or {},
+        "source_errors": weather_payload.get("source_errors") or [],
+        "created_at": taipei_now().isoformat(),
+    }
+    try:
+        res = supabase.table("weather_observations").upsert(
+            history_payload,
+            on_conflict="city_name,observed_at",
+        ).execute()
+        return {"status": "success", "data": res.data or history_payload}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "data": history_payload}
 
 
 def risk_rank(level: Optional[str]) -> int:
@@ -1150,6 +1255,8 @@ async def _internal_sync(city: str, district: str):
             "visibility_km": weather_payload["current"].get("visibility_km", 0),
             "observed_temp": weather_payload["current"].get("observed_temp", 0),
             "observed_humidity": weather_payload["current"].get("observed_humidity", 0),
+            "wbgt": weather_payload["current"].get("wbgt", 0),
+            "heat_injury_warning": weather_payload["current"].get("heat_injury_warning", ""),
             "observed_wind_ms": weather_payload["current"].get("observed_wind_ms", 0),
             "observed_wind_dir": weather_payload["current"].get("observed_wind_dir", ""),
             "aqi_site": weather_payload["current"].get("aqi_site", ""),
@@ -1176,6 +1283,7 @@ async def _internal_sync(city: str, district: str):
                 "valid_until": db_payload["valid_until"],
             }
             supabase.table("weather_cache").upsert(legacy_payload, on_conflict="city_name").execute()
+        persist_weather_observation_history(city, district, weather_payload)
         print(f"[weather_sync] synced: {city}{district}")
         return {"success": True, "city_name": f"{city}{district}", "refreshed_at": now.isoformat()}
         
