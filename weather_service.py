@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +13,7 @@ from utils import geocode_fallback, log_sync, parse_datetime, safe_int, safe_res
 
 CWA_SSL_ERROR_MARKERS = ("CERTIFICATE_VERIFY_FAILED", "Missing Subject Key Identifier")
 MOENV_AQI_URL = "https://data.moenv.gov.tw/api/v2/aqx_p_432"
+CWA_RADAR_IMAGE_URL = "https://cwaopendata.s3.ap-northeast-1.amazonaws.com/Observation/O-A0058-006.png"
 
 
 async def fetch_cwa_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,9 +118,128 @@ def extract_exact_named_value(values: Any, keys: List[str]) -> str:
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(str(value).strip())
+        text = str(value).strip().replace("＞", ">")
+        if text.startswith(">"):
+            text = text[1:].strip()
+        number = float(text)
+        if number <= -90:
+            return default
+        return number
     except (TypeError, ValueError):
         return default
+
+
+def safe_optional_float(value: Any) -> Optional[float]:
+    try:
+        text = str(value).strip().replace("＞", ">")
+        if not text or text in {"-", "--", "X", "x", "NA", "N/A"}:
+            return None
+        if text.startswith(">"):
+            text = text[1:].strip()
+        number = float(text)
+        if number <= -90:
+            return None
+        return number
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_tw_text(value: Any) -> str:
+    return str(value or "").replace("台", "臺").replace(" ", "").strip()
+
+
+def station_geo(station: Dict[str, Any]) -> Dict[str, Any]:
+    geo = station.get("GeoInfo") or station.get("geoInfo") or {}
+    return geo if isinstance(geo, dict) else {}
+
+
+def station_county(station: Dict[str, Any]) -> str:
+    geo = station_geo(station)
+    return str(geo.get("CountyName") or geo.get("countyName") or geo.get("County") or station.get("CountyName") or "")
+
+
+def station_town(station: Dict[str, Any]) -> str:
+    geo = station_geo(station)
+    return str(geo.get("TownName") or geo.get("townName") or geo.get("Town") or station.get("TownName") or "")
+
+
+def station_coordinates(station: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    geo = station_geo(station)
+    coordinates = geo.get("Coordinates") or geo.get("coordinates") or []
+    if isinstance(coordinates, dict):
+        coordinates = [coordinates]
+    for coord in coordinates if isinstance(coordinates, list) else []:
+        if not isinstance(coord, dict):
+            continue
+        name = str(coord.get("CoordinateName") or coord.get("coordinateName") or "")
+        lat = safe_optional_float(coord.get("StationLatitude") or coord.get("stationLatitude") or coord.get("Latitude"))
+        lng = safe_optional_float(coord.get("StationLongitude") or coord.get("stationLongitude") or coord.get("Longitude"))
+        if lat is not None and lng is not None and ("WGS84" in name or not name):
+            return {"lat": lat, "lng": lng}
+    return None
+
+
+def station_identity(station: Dict[str, Any]) -> Dict[str, Any]:
+    coords = station_coordinates(station) or {}
+    return {
+        "station_name": station.get("StationName") or station.get("stationName") or "",
+        "station_id": station.get("StationId") or station.get("stationId") or "",
+        "station_county": station_county(station),
+        "station_town": station_town(station),
+        "station_lat": coords.get("lat"),
+        "station_lng": coords.get("lng"),
+    }
+
+
+def station_distance_score(station: Dict[str, Any], lat: Optional[float], lng: Optional[float]) -> float:
+    if lat is None or lng is None:
+        return 0
+    coords = station_coordinates(station)
+    if not coords:
+        return math.inf
+    return (coords["lat"] - lat) ** 2 + (coords["lng"] - lng) ** 2
+
+
+def select_best_station(
+    stations: List[Dict[str, Any]],
+    city: str,
+    district: str = "",
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    city_key = normalize_tw_text(city)
+    district_key = normalize_tw_text(district)
+    valid = [station for station in stations if isinstance(station, dict)]
+    if not valid:
+        return None
+
+    same_city = [station for station in valid if normalize_tw_text(station_county(station)) == city_key]
+    same_district = [
+        station for station in same_city
+        if district_key and district_key in normalize_tw_text(station_town(station))
+    ]
+    pool = same_district or same_city or valid
+    if lat is not None and lng is not None:
+        with_coords = [station for station in pool if station_coordinates(station)]
+        if with_coords:
+            return min(with_coords, key=lambda station: station_distance_score(station, lat, lng))
+    return pool[0]
+
+
+def extract_station_records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    records = payload.get("records") or payload.get("Records") or {}
+    stations = records.get("Station") or records.get("station") or []
+    return stations if isinstance(stations, list) else []
+
+
+async def fetch_cwa_station_dataset(dataset_id: str) -> List[Dict[str, Any]]:
+    if not CWA_API_KEY:
+        return []
+    payload = await fetch_cwa_json(
+        f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{dataset_id}",
+        {"Authorization": CWA_API_KEY, "format": "JSON"},
+    )
+    return extract_station_records(payload)
 
 
 def normalize_observed_at(value: Any) -> Any:
@@ -257,6 +378,12 @@ def pick_current_weather(forecast: List[Dict[str, Any]]) -> Dict[str, Any]:
             "wind_dir": "",
             "aqi": 0,
             "rain_mm_1h": 0.0,
+            "rain_mm_3h": 0.0,
+            "rain_mm_6h": 0.0,
+            "rain_mm_12h": 0.0,
+            "rain_mm_24h": 0.0,
+            "wind_gust_ms": 0.0,
+            "wind_gust_dir": "",
             "visibility_km": 0.0,
         }
 
@@ -298,24 +425,37 @@ def analyze_weather_risk(weather: Dict[str, Any]) -> Dict[str, Any]:
     uvi = safe_int(weather.get("uvi"))
     aqi = safe_int(weather.get("aqi"))
     app_temp = safe_int(weather.get("app_temp"))
-    wind_ms = safe_int(weather.get("wind_ms"))
+    wind_ms = safe_float(weather.get("wind_ms"))
+    wind_gust_ms = safe_float(weather.get("wind_gust_ms"))
     wind_speed = safe_int(weather.get("wind_speed"))
+    rain_mm_1h = safe_float(weather.get("rain_mm_1h"))
+    rain_mm_24h = safe_float(weather.get("rain_mm_24h"))
+    visibility_km = safe_float(weather.get("visibility_km"))
     tags = []
 
-    if pop >= 70 or any(keyword in description for keyword in ["大雨", "豪雨", "雷雨"]):
+    if pop >= 70 or rain_mm_1h >= 40 or rain_mm_24h >= 80 or any(keyword in description for keyword in ["大雨", "豪雨", "雷雨"]):
         tags.append("heavy_rain")
+    if rain_mm_24h >= 200 or "豪雨" in description:
+        tags.append("torrential_rain")
     if any(keyword in description for keyword in ["颱風", "強風"]):
         tags.append("strong_wind")
     if uvi >= 8:
         tags.append("high_uvi")
-    if wind_ms >= 10 or wind_speed >= 10:
+    if wind_ms >= 10 or wind_gust_ms >= 10.8 or wind_speed >= 10:
         tags.append("strong_wind")
+    if 0 < visibility_km <= 1:
+        tags.append("low_visibility")
+    if aqi >= 151:
+        tags.append("very_poor_air_quality")
     if aqi >= 101:
         tags.append("poor_air_quality")
+    if app_temp >= 38:
+        tags.append("extreme_heat")
     if app_temp >= 36:
         tags.append("heat_risk")
 
-    if "heavy_rain" in tags or "strong_wind" in tags:
+    high_tags = {"heavy_rain", "torrential_rain", "strong_wind", "low_visibility", "very_poor_air_quality", "extreme_heat"}
+    if high_tags.intersection(tags):
         level = "high"
     elif tags or pop >= 40:
         level = "medium"
@@ -436,6 +576,96 @@ async def fetch_cwa_active_warnings(city: str, district: str) -> List[Dict[str, 
     return warnings
 
 
+async def fetch_cwa_rain_observation(
+    city: str,
+    district: str = "",
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> Dict[str, Any]:
+    stations = await fetch_cwa_station_dataset("O-A0002-001")
+    station = select_best_station(stations, city, district, lat, lng)
+    if not station:
+        return {}
+
+    rainfall = station.get("RainfallElement") or station.get("rainfallElement") or {}
+    identity = station_identity(station)
+    return {
+        "rain_mm_now": safe_float(rainfall.get("Now") or rainfall.get("now")),
+        "rain_mm_10m": safe_float(rainfall.get("Past10Min") or rainfall.get("past10Min")),
+        "rain_mm_1h": safe_float(rainfall.get("Past1hr") or rainfall.get("Past1Hr") or rainfall.get("past1hr")),
+        "rain_mm_3h": safe_float(rainfall.get("Past3hr") or rainfall.get("Past3Hr") or rainfall.get("past3hr")),
+        "rain_mm_6h": safe_float(rainfall.get("Past6Hr") or rainfall.get("Past6hr") or rainfall.get("past6Hr")),
+        "rain_mm_12h": safe_float(rainfall.get("Past12hr") or rainfall.get("Past12Hr") or rainfall.get("past12hr")),
+        "rain_mm_24h": safe_float(rainfall.get("Past24hr") or rainfall.get("Past24Hr") or rainfall.get("past24hr")),
+        "rain_observed_at": normalize_observed_at((station.get("ObsTime") or {}).get("DateTime") if isinstance(station.get("ObsTime"), dict) else station.get("ObsTime")),
+        "rain_station": identity.get("station_name"),
+        "rain_station_id": identity.get("station_id"),
+        "rain_station_county": identity.get("station_county"),
+        "rain_station_town": identity.get("station_town"),
+    }
+
+
+def parse_visibility_km(value: Any) -> float:
+    text = str(value or "").replace("公里", "").replace("km", "").replace("KM", "").strip()
+    return safe_float(text)
+
+
+async def fetch_cwa_weather_observation(
+    city: str,
+    district: str = "",
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> Dict[str, Any]:
+    stations = await fetch_cwa_station_dataset("O-A0003-001")
+    station = select_best_station(stations, city, district, lat, lng)
+    if not station:
+        return {}
+
+    element = station.get("WeatherElement") or station.get("weatherElement") or {}
+    gust = element.get("GustInfo") or {}
+    occurred_at = gust.get("Occurred_at") or gust.get("OccurredAt") or {}
+    identity = station_identity(station)
+    visibility = parse_visibility_km(element.get("VisibilityDescription") or element.get("Visb") or element.get("Visibility"))
+    wind_gust_ms = safe_float(gust.get("PeakGustSpeed") or gust.get("peakGustSpeed"))
+    wind_gust_dir = str(occurred_at.get("WindDirection") or occurred_at.get("windDirection") or "")
+    return {
+        "observed_wind_ms": safe_float(element.get("WindSpeed") or element.get("windSpeed")),
+        "observed_wind_dir": str(element.get("WindDirection") or element.get("windDirection") or ""),
+        "wind_gust_ms": wind_gust_ms,
+        "wind_gust_dir": wind_gust_dir,
+        "wind_gust_observed_at": normalize_observed_at(occurred_at.get("DateTime") or occurred_at.get("dateTime")),
+        "visibility_km": visibility,
+        "observation_weather": element.get("Weather") or element.get("weather") or "",
+        "observation_observed_at": normalize_observed_at((station.get("ObsTime") or {}).get("DateTime") if isinstance(station.get("ObsTime"), dict) else station.get("ObsTime")),
+        "observation_station": identity.get("station_name"),
+        "observation_station_id": identity.get("station_id"),
+        "observation_station_county": identity.get("station_county"),
+        "observation_station_town": identity.get("station_town"),
+    }
+
+
+async def fetch_cwa_uvi_observation(station_id: str = "") -> Dict[str, Any]:
+    if not station_id:
+        return {}
+    payload = await fetch_cwa_json(
+        "https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0005-001",
+        {"Authorization": CWA_API_KEY, "format": "JSON"},
+    )
+    records = payload.get("records") or {}
+    element = records.get("weatherElement") or {}
+    locations = element.get("location") or []
+    for item in locations if isinstance(locations, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("StationID") or item.get("stationId") or "") == str(station_id):
+            return {
+                "uvi": safe_int(item.get("UVIndex") or item.get("uvIndex")),
+                "uvi_station_id": station_id,
+                "uvi_observed_date": element.get("Date") or records.get("Date"),
+            }
+    return {}
+
+
 def normalize_aqi_record(record: Dict[str, Any]) -> Dict[str, Any]:
     aqi = safe_int(record.get("aqi") or record.get("AQI"))
     observed_at = normalize_observed_at(record.get("publishtime") or record.get("PublishTime") or record.get("monitordate") or record.get("MonitorDate"))
@@ -483,17 +713,37 @@ async def fetch_moenv_aqi(city: str, district: str = "") -> Dict[str, Any]:
     return normalize_aqi_record((district_records or city_records)[0])
 
 
-async def build_live_weather_payload(city: str, district: str) -> Dict[str, Any]:
+async def build_live_weather_payload(
+    city: str,
+    district: str,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> Dict[str, Any]:
     weather_payload = await fetch_cwa_forecast(city, district, seven_day=True)
     current = dict(weather_payload["current"])
     observed_at = current.get("time") or current.get("start_time")
     active_warnings: List[Dict[str, Any]] = []
+    hourly: List[Dict[str, Any]] = []
     source_errors: List[Dict[str, str]] = []
     data_sources = {
         "cwa_forecast": "success",
+        "cwa_3h_forecast": "not_checked",
         "cwa_warnings": "not_checked",
+        "cwa_rain_observation": "not_checked",
+        "cwa_weather_observation": "not_checked",
+        "cwa_uvi_observation": "not_checked",
+        "cwa_radar": "success",
         "moenv_aqi": "not_configured" if not MOENV_API_KEY else "not_found",
     }
+
+    try:
+        hourly_payload = await fetch_cwa_forecast(city, district, seven_day=False)
+        hourly = hourly_payload.get("forecast") or []
+        data_sources["cwa_3h_forecast"] = "success" if hourly else "not_found"
+    except Exception as e:
+        data_sources["cwa_3h_forecast"] = "error"
+        source_errors.append({"source": "cwa_3h_forecast", "message": str(e)})
+        print(f"取得逐三小時預報失敗: {e}")
 
     try:
         aqi_payload = await fetch_moenv_aqi(city, district)
@@ -515,12 +765,79 @@ async def build_live_weather_payload(city: str, district: str) -> Dict[str, Any]
         print(f"取得 AQI 失敗: {e}")
 
     try:
+        rain_payload = await fetch_cwa_rain_observation(city, district, lat, lng)
+        if rain_payload:
+            data_sources["cwa_rain_observation"] = "success"
+            current.update(rain_payload)
+            observed_at = rain_payload.get("rain_observed_at") or observed_at
+        else:
+            data_sources["cwa_rain_observation"] = "not_found"
+    except Exception as e:
+        data_sources["cwa_rain_observation"] = "error"
+        source_errors.append({"source": "cwa_rain_observation", "message": str(e)})
+        print(f"取得雨量觀測失敗: {e}")
+
+    try:
+        observation_payload = await fetch_cwa_weather_observation(city, district, lat, lng)
+        if observation_payload:
+            data_sources["cwa_weather_observation"] = "success"
+            current.update(observation_payload)
+            observed_at = observation_payload.get("observation_observed_at") or observed_at
+            try:
+                uvi_payload = await fetch_cwa_uvi_observation(str(observation_payload.get("observation_station_id") or ""))
+                if uvi_payload:
+                    data_sources["cwa_uvi_observation"] = "success"
+                    if safe_int(uvi_payload.get("uvi")) > 0 or safe_int(current.get("uvi")) == 0:
+                        current["uvi"] = safe_int(uvi_payload.get("uvi"))
+                    current["uvi_station_id"] = uvi_payload.get("uvi_station_id", "")
+                    current["uvi_observed_date"] = uvi_payload.get("uvi_observed_date", "")
+                else:
+                    data_sources["cwa_uvi_observation"] = "not_found"
+            except Exception as uv_e:
+                data_sources["cwa_uvi_observation"] = "error"
+                source_errors.append({"source": "cwa_uvi_observation", "message": str(uv_e)})
+                print(f"取得紫外線觀測失敗: {uv_e}")
+        else:
+            data_sources["cwa_weather_observation"] = "not_found"
+            data_sources["cwa_uvi_observation"] = "not_found"
+    except Exception as e:
+        data_sources["cwa_weather_observation"] = "error"
+        data_sources["cwa_uvi_observation"] = "error"
+        source_errors.append({"source": "cwa_weather_observation", "message": str(e)})
+        print(f"取得氣象觀測失敗: {e}")
+
+    try:
         active_warnings = await fetch_cwa_active_warnings(city, district)
         data_sources["cwa_warnings"] = "success"
     except Exception as e:
         data_sources["cwa_warnings"] = "error"
         source_errors.append({"source": "cwa_warnings", "message": str(e)})
         print(f"取得 active_warnings 失敗: {e}")
+
+    current_defaults = {
+        "aqi": 0,
+        "aqi_site": "",
+        "aqi_status": "",
+        "aqi_pollutant": "",
+        "pm25": 0,
+        "pm10": 0,
+        "o3": 0,
+        "rain_mm_now": 0.0,
+        "rain_mm_10m": 0.0,
+        "rain_mm_1h": 0.0,
+        "rain_mm_3h": 0.0,
+        "rain_mm_6h": 0.0,
+        "rain_mm_12h": 0.0,
+        "rain_mm_24h": 0.0,
+        "wind_gust_ms": 0.0,
+        "wind_gust_dir": "",
+        "observed_wind_ms": 0.0,
+        "observed_wind_dir": "",
+        "visibility_km": 0.0,
+    }
+    for key, value in current_defaults.items():
+        if current.get(key) is None:
+            current[key] = value
 
     risk = analyze_weather_risk(current)
     if active_warnings:
@@ -545,8 +862,8 @@ async def build_live_weather_payload(city: str, district: str) -> Dict[str, Any]
         "forecast": forecast,
         "active_warnings": active_warnings,
         "observed_at": observed_at,
-        "hourly": [],
-        "radar_image_url": "",
+        "hourly": hourly,
+        "radar_image_url": CWA_RADAR_IMAGE_URL,
         "data_sources": data_sources,
         "source_errors": source_errors,
         **risk,
@@ -685,7 +1002,7 @@ async def _internal_sync(city: str, district: str):
             "weather_data": {
                 "current": weather_payload["current"],
                 "forecast": weather_payload["forecast"],
-                "schema_version": "weather_live_v2",
+                "schema_version": "weather_live_v3",
                 "active_warnings": weather_payload.get("active_warnings", []),
                 "hourly": weather_payload.get("hourly", []),
                 "radar_image_url": weather_payload.get("radar_image_url", ""),
@@ -703,9 +1020,26 @@ async def _internal_sync(city: str, district: str):
             "wind_ms": weather_payload["current"].get("wind_ms", 0),
             "wind_dir": weather_payload["current"].get("wind_dir", ""),
             "rain_mm_1h": weather_payload["current"].get("rain_mm_1h", 0),
+            "rain_mm_3h": weather_payload["current"].get("rain_mm_3h", 0),
+            "rain_mm_6h": weather_payload["current"].get("rain_mm_6h", 0),
+            "rain_mm_12h": weather_payload["current"].get("rain_mm_12h", 0),
+            "rain_mm_24h": weather_payload["current"].get("rain_mm_24h", 0),
+            "wind_gust_ms": weather_payload["current"].get("wind_gust_ms", 0),
+            "wind_gust_dir": weather_payload["current"].get("wind_gust_dir", ""),
+            "visibility_km": weather_payload["current"].get("visibility_km", 0),
+            "observed_wind_ms": weather_payload["current"].get("observed_wind_ms", 0),
+            "observed_wind_dir": weather_payload["current"].get("observed_wind_dir", ""),
+            "aqi_site": weather_payload["current"].get("aqi_site", ""),
+            "aqi_status": weather_payload["current"].get("aqi_status", ""),
+            "aqi_pollutant": weather_payload["current"].get("aqi_pollutant", ""),
+            "pm25": weather_payload["current"].get("pm25", 0),
+            "pm10": weather_payload["current"].get("pm10", 0),
+            "o3": weather_payload["current"].get("o3", 0),
             "active_warnings": weather_payload.get("active_warnings", []),
             "hourly": weather_payload.get("hourly", []),
             "observed_at": weather_payload.get("observed_at"),
+            "data_sources": weather_payload.get("data_sources", {}),
+            "source_errors": weather_payload.get("source_errors", []),
             "updated_at": now.isoformat(),
             "valid_until": (now + timedelta(hours=3)).isoformat()
         }

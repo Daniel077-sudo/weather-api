@@ -460,7 +460,7 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
         "weather_data": {
             "current": current,
             "forecast": weather_payload.get("forecast") or [],
-            "schema_version": "weather_live_v2",
+            "schema_version": "weather_live_v3",
             "active_warnings": weather_payload.get("active_warnings") or [],
             "hourly": weather_payload.get("hourly") or [],
             "radar_image_url": weather_payload.get("radar_image_url") or "",
@@ -476,12 +476,28 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
         "observed_at": weather_payload.get("observed_at"),
         "data_sources": weather_payload.get("data_sources") or {},
         "source_errors": weather_payload.get("source_errors") or [],
+        "hourly": weather_payload.get("hourly") or [],
         "uvi": current.get("uvi", 0),
         "aqi": current.get("aqi", 0),
+        "aqi_site": current.get("aqi_site", ""),
+        "aqi_status": current.get("aqi_status", ""),
+        "aqi_pollutant": current.get("aqi_pollutant", ""),
+        "pm25": current.get("pm25", 0),
+        "pm10": current.get("pm10", 0),
+        "o3": current.get("o3", 0),
         "app_temp": current.get("app_temp", 0),
         "wind_ms": current.get("wind_ms", 0),
         "wind_dir": current.get("wind_dir", ""),
         "rain_mm_1h": current.get("rain_mm_1h", 0),
+        "rain_mm_3h": current.get("rain_mm_3h", 0),
+        "rain_mm_6h": current.get("rain_mm_6h", 0),
+        "rain_mm_12h": current.get("rain_mm_12h", 0),
+        "rain_mm_24h": current.get("rain_mm_24h", 0),
+        "wind_gust_ms": current.get("wind_gust_ms", 0),
+        "wind_gust_dir": current.get("wind_gust_dir", ""),
+        "visibility_km": current.get("visibility_km", 0),
+        "observed_wind_ms": current.get("observed_wind_ms", 0),
+        "observed_wind_dir": current.get("observed_wind_dir", ""),
         "updated_at": now.isoformat(),
         "valid_until": (now + timedelta(hours=3)).isoformat(),
     }
@@ -490,17 +506,23 @@ def build_weather_live_response(city: str, district: str, weather_payload: Dict[
 def cached_weather_has_enriched_fields(cached: Dict[str, Any]) -> bool:
     weather_data = cached.get("weather_data") or {}
     current = weather_data.get("current") or {}
-    required_current_fields = {"app_temp", "wind_ms", "wind_dir", "aqi"}
+    required_current_fields = {"app_temp", "wind_ms", "wind_dir", "aqi", "rain_mm_24h", "wind_gust_ms", "visibility_km"}
     return (
-        weather_data.get("schema_version") == "weather_live_v2"
+        weather_data.get("schema_version") == "weather_live_v3"
         and required_current_fields.issubset(set(current.keys()))
         and "active_warnings" in weather_data
+        and "hourly" in weather_data
         and "observed_at" in weather_data
     )
 
 
 @app.get("/weather")
-async def get_weather(city: str = "臺南市", district: str = "東區"):
+async def get_weather(
+    city: str = "臺南市",
+    district: str = "東區",
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+):
     """前端讀取天氣專用：快取優先，沒有快取時即時補抓。"""
     try:
         res = supabase.table("weather_cache").select("*").eq("city_name", f"{city}{district}").execute()
@@ -516,7 +538,7 @@ async def get_weather(city: str = "臺南市", district: str = "東區"):
         print(f"讀取天氣快取失敗: {cache_e}")
 
     try:
-        weather_payload = await build_live_weather_payload(city, district)
+        weather_payload = await build_live_weather_payload(city, district, lat, lng)
         response = build_weather_live_response(city, district, weather_payload, "cwa_live")
         try:
             cache_payload = {
@@ -529,6 +551,21 @@ async def get_weather(city: str = "臺南市", district: str = "東區"):
                 "wind_ms": response["wind_ms"],
                 "wind_dir": response["wind_dir"],
                 "rain_mm_1h": response["rain_mm_1h"],
+                "rain_mm_3h": response["rain_mm_3h"],
+                "rain_mm_6h": response["rain_mm_6h"],
+                "rain_mm_12h": response["rain_mm_12h"],
+                "rain_mm_24h": response["rain_mm_24h"],
+                "wind_gust_ms": response["wind_gust_ms"],
+                "wind_gust_dir": response["wind_gust_dir"],
+                "visibility_km": response["visibility_km"],
+                "observed_wind_ms": response["observed_wind_ms"],
+                "observed_wind_dir": response["observed_wind_dir"],
+                "aqi_site": response["aqi_site"],
+                "aqi_status": response["aqi_status"],
+                "aqi_pollutant": response["aqi_pollutant"],
+                "pm25": response["pm25"],
+                "pm10": response["pm10"],
+                "o3": response["o3"],
                 "active_warnings": response["active_warnings"],
                 "hourly": response["weather_data"]["hourly"],
                 "observed_at": response["observed_at"],
@@ -562,7 +599,7 @@ async def get_weather_live(
     lat: Optional[float] = Query(None),
     lng: Optional[float] = Query(None),
 ):
-    response = await get_weather(city, district)
+    response = await get_weather(city, district, lat, lng)
     if isinstance(response, dict):
         response["requested_location"] = {
             "city": city,
@@ -1665,9 +1702,26 @@ alter table public.weather_cache add column if not exists app_temp integer defau
 alter table public.weather_cache add column if not exists wind_ms double precision default 0;
 alter table public.weather_cache add column if not exists wind_dir text;
 alter table public.weather_cache add column if not exists rain_mm_1h double precision default 0;
+alter table public.weather_cache add column if not exists rain_mm_3h double precision default 0;
+alter table public.weather_cache add column if not exists rain_mm_6h double precision default 0;
+alter table public.weather_cache add column if not exists rain_mm_12h double precision default 0;
+alter table public.weather_cache add column if not exists rain_mm_24h double precision default 0;
+alter table public.weather_cache add column if not exists wind_gust_ms double precision default 0;
+alter table public.weather_cache add column if not exists wind_gust_dir text;
+alter table public.weather_cache add column if not exists visibility_km double precision default 0;
+alter table public.weather_cache add column if not exists observed_wind_ms double precision default 0;
+alter table public.weather_cache add column if not exists observed_wind_dir text;
+alter table public.weather_cache add column if not exists aqi_site text;
+alter table public.weather_cache add column if not exists aqi_status text;
+alter table public.weather_cache add column if not exists aqi_pollutant text;
+alter table public.weather_cache add column if not exists pm25 integer default 0;
+alter table public.weather_cache add column if not exists pm10 integer default 0;
+alter table public.weather_cache add column if not exists o3 integer default 0;
 alter table public.weather_cache add column if not exists active_warnings jsonb default '[]'::jsonb;
 alter table public.weather_cache add column if not exists hourly jsonb default '[]'::jsonb;
 alter table public.weather_cache add column if not exists observed_at timestamptz;
+alter table public.weather_cache add column if not exists data_sources jsonb default '{}'::jsonb;
+alter table public.weather_cache add column if not exists source_errors jsonb default '[]'::jsonb;
 
 alter table public.chat_logs add column if not exists user_id text;
 alter table public.chat_logs add column if not exists role text;
