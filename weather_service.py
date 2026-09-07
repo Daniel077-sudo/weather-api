@@ -31,6 +31,22 @@ async def fetch_cwa_json(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
             return res.json()
 
 
+async def fetch_moenv_json(url: str, params: Dict[str, Any]) -> Any:
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, params=params, timeout=20.0)
+            res.raise_for_status()
+            return res.json()
+    except httpx.TransportError as e:
+        message = str(e)
+        if not any(marker in message for marker in CWA_SSL_ERROR_MARKERS):
+            raise
+        async with httpx.AsyncClient(verify=False) as client:
+            res = await client.get(url, params=params, timeout=20.0)
+            res.raise_for_status()
+            return res.json()
+
+
 def find_district(data, target):
     if isinstance(data, dict):
         if data.get("locationName") == target or data.get("LocationName") == target: return data
@@ -445,10 +461,7 @@ async def fetch_moenv_aqi(city: str, district: str = "") -> Dict[str, Any]:
         "limit": 1000,
         "sort": "publishtime desc",
     }
-    async with httpx.AsyncClient() as client:
-        res = await client.get(MOENV_AQI_URL, params=params, timeout=20.0)
-        res.raise_for_status()
-        payload = res.json()
+    payload = await fetch_moenv_json(MOENV_AQI_URL, params)
     if isinstance(payload, list):
         records = payload
     elif isinstance(payload, dict):
