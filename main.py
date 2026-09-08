@@ -851,8 +851,9 @@ async def upsert_push_device_token(payload: PushDeviceTokenRequest):
     }
     try:
         res = supabase.table("push_device_tokens").upsert(db_payload, on_conflict="token_hash").execute()
-        public_data = {k: v for k, v in db_payload.items() if k != "device_token"}
-        return safe_response("success", res.data[0] if res.data else public_data, "push device token saved", "push_device_tokens")
+        saved = res.data[0] if res.data else db_payload
+        public_data = {k: v for k, v in saved.items() if k != "device_token"}
+        return safe_response("success", public_data, "push device token saved", "push_device_tokens")
     except Exception as e:
         return safe_response("error", {"token_hash": token_hash}, str(e), "push_device_tokens", [{"service": "supabase", "message": str(e)}])
 
