@@ -5,12 +5,13 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks, Header, Query
+from fastapi import FastAPI, BackgroundTasks, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
+from auth import AuthContext, get_auth_context, resolve_user_id
 from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response, get_xiaolan_training_profile
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
@@ -202,9 +203,10 @@ async def ask_assistant(query: UserQuery):
 
 
 @app.post("/api/chat", response_model=ChatCommandResponse)
-async def chat_command(payload: ChatRequest):
+async def chat_command(payload: ChatRequest, auth: AuthContext = Depends(get_auth_context)):
     try:
-        return await build_chat_command(payload.user_id or "", payload.message, payload.current_location)
+        user_id = resolve_user_id(auth, payload.user_id)
+        return await build_chat_command(user_id, payload.message, payload.current_location)
     except Exception as e:
         return {
             "status": "error",
@@ -254,20 +256,91 @@ async def get_assistant_profile():
         "assistant",
     )
 
+
+@app.get("/api/auth/contract")
+async def get_auth_contract():
+    return safe_response(
+        "success",
+        {
+            "mode": "optional_bearer_until_AUTH_REQUIRED_true",
+            "header": "Authorization: Bearer <supabase_access_token>",
+            "user_id_source": "If bearer token is valid, user_id is taken from JWT sub and request body/query user_id is ignored.",
+            "phase_1": "AUTH_REQUIRED=false keeps demo compatibility: endpoints may still accept body/query user_id when no bearer token is provided.",
+            "phase_2": "Set AUTH_REQUIRED=true and SUPABASE_JWT_SECRET on Render to require valid bearer tokens.",
+            "protected_when_auth_required": [
+                "POST /api/chat",
+                "GET /api/chat/history",
+                "GET /api/chat/memory",
+                "POST /api/weather/suggestion",
+                "POST /api/events",
+                "GET /api/events",
+                "DELETE /api/events/{event_id}",
+                "POST /api/events/risk-check",
+                "GET /api/events/weather-alerts",
+                "PATCH /api/events/weather-alerts/{alert_id}/read",
+                "GET /api/assistant/alerts",
+                "POST /api/emergency-kit/vision-check",
+                "GET /api/emergency-kit/scans",
+                "GET /api/quiz/generate",
+                "POST /api/quiz/submit",
+                "POST /api/game/scores",
+                "POST /api/watch-areas",
+                "GET /api/watch-areas",
+                "DELETE /api/watch-areas/{watch_area_id}",
+                "GET /api/watch-areas/status",
+                "GET /api/area-alert-notifications",
+                "PATCH /api/area-alert-notifications/{notification_id}/read",
+                "GET /api/notifications/summary",
+                "POST /api/users/preferences",
+                "GET /api/users/preferences",
+                "POST /api/push/device-tokens",
+                "GET /api/push/device-tokens",
+            ],
+            "public_endpoints": [
+                "GET /api/weather/live",
+                "GET /api/weather/history",
+                "GET /api/disaster-alerts",
+                "GET /api/assistant/profile",
+                "GET /api/auth/contract",
+                "GET /api/shelters",
+                "GET /api/shelters/nearby",
+                "GET /api/game/questions",
+            ],
+            "unauthorized_response": {
+                "http_status": 401,
+                "body": {
+                    "detail": {
+                        "status": "error",
+                        "message": "Authorization bearer token is required.",
+                        "source": "auth",
+                        "errors": [{"code": "missing_token", "message": "Authorization bearer token is required."}],
+                    }
+                },
+            },
+        },
+        "auth contract loaded",
+        "auth",
+    )
+
 @app.get("/api/chat/history")
 async def get_chat_history_endpoint(
-    user_id: str = Query(...),
+    user_id: Optional[str] = Query(None),
     limit: int = Query(30, ge=1, le=100),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    return get_chat_history(user_id, limit)
+    return get_chat_history(resolve_user_id(auth, user_id), limit)
 
 @app.get("/api/chat/memory")
-async def get_chat_memory_endpoint(user_id: str = Query(...)):
-    return get_user_memory_response(user_id)
+async def get_chat_memory_endpoint(
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    return get_user_memory_response(resolve_user_id(auth, user_id))
 
 
 @app.post("/api/weather/suggestion")
-async def weather_suggestion(payload: WeatherSuggestionRequest):
+async def weather_suggestion(payload: WeatherSuggestionRequest, auth: AuthContext = Depends(get_auth_context)):
+    payload.user_id = resolve_user_id(auth, payload.user_id) or payload.user_id
     if payload.weather_data:
         weather_payload = payload.weather_data
         current_weather = weather_payload.get("current") or weather_payload.get("weather") or weather_payload
@@ -680,9 +753,10 @@ async def list_disaster_alerts(
 
 
 @app.post("/api/watch-areas")
-async def create_watch_area(payload: WatchAreaCreate):
+async def create_watch_area(payload: WatchAreaCreate, auth: AuthContext = Depends(get_auth_context)):
     try:
         data = payload.model_dump(exclude_none=True)
+        data["user_id"] = resolve_user_id(auth, payload.user_id)
         data["updated_at"] = taipei_now().isoformat()
         res = supabase.table("watch_areas").insert(data).execute()
         return safe_response("success", res.data[0] if res.data else data, "watch area created", "watch_areas")
@@ -692,10 +766,12 @@ async def create_watch_area(payload: WatchAreaCreate):
 
 @app.get("/api/watch-areas")
 async def list_watch_areas(
-    user_id: str = Query(...),
+    user_id: Optional[str] = Query(None),
     active_only: bool = Query(True),
     limit: int = Query(20, ge=1, le=100),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id)
     try:
         query = supabase.table("watch_areas").select("*").eq("user_id", user_id).order("updated_at", desc=True).limit(limit)
         if active_only:
@@ -707,7 +783,12 @@ async def list_watch_areas(
 
 
 @app.delete("/api/watch-areas/{watch_area_id}")
-async def delete_watch_area(watch_area_id: int, user_id: str = Query(...)):
+async def delete_watch_area(
+    watch_area_id: int,
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id)
     try:
         res = (
             supabase.table("watch_areas")
@@ -724,10 +805,12 @@ async def delete_watch_area(watch_area_id: int, user_id: str = Query(...)):
 @app.get("/api/watch-areas/status")
 async def get_watch_area_statuses(
     background_tasks: BackgroundTasks,
-    user_id: str = Query(...),
+    user_id: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=50),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    areas_response = await list_watch_areas(user_id=user_id, active_only=True, limit=limit)
+    user_id = resolve_user_id(auth, user_id)
+    areas_response = await list_watch_areas(user_id=user_id, active_only=True, limit=limit, auth=auth)
     if areas_response.get("status") != "success":
         return areas_response
     statuses = []
@@ -755,10 +838,12 @@ async def get_watch_area_statuses(
 
 @app.get("/api/area-alert-notifications")
 async def get_area_alert_notifications(
-    user_id: str = Query(...),
+    user_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id)
     try:
         query = supabase.table("area_alert_notifications").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit)
         if status:
@@ -770,7 +855,12 @@ async def get_area_alert_notifications(
 
 
 @app.patch("/api/area-alert-notifications/{notification_id}/read")
-async def mark_area_alert_notification_read(notification_id: int, user_id: str = Query(...)):
+async def mark_area_alert_notification_read(
+    notification_id: int,
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id)
     try:
         res = (
             supabase.table("area_alert_notifications")
@@ -785,7 +875,11 @@ async def mark_area_alert_notification_read(notification_id: int, user_id: str =
 
 
 @app.get("/api/notifications/summary")
-async def get_notifications_summary(user_id: str = Query(...)):
+async def get_notifications_summary(
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id)
     errors = []
     latest = {"area_alerts": [], "event_weather_alerts": []}
 
@@ -834,11 +928,12 @@ async def get_notifications_summary(user_id: str = Query(...)):
 
 
 @app.post("/api/push/device-tokens")
-async def upsert_push_device_token(payload: PushDeviceTokenRequest):
+async def upsert_push_device_token(payload: PushDeviceTokenRequest, auth: AuthContext = Depends(get_auth_context)):
     now = taipei_now().isoformat()
+    user_id = resolve_user_id(auth, payload.user_id)
     token_hash = hashlib.sha256(payload.device_token.encode("utf-8")).hexdigest()
     db_payload = {
-        "user_id": payload.user_id,
+        "user_id": user_id,
         "platform": payload.platform,
         "provider": payload.provider,
         "device_token": payload.device_token,
@@ -860,9 +955,11 @@ async def upsert_push_device_token(payload: PushDeviceTokenRequest):
 
 @app.get("/api/push/device-tokens")
 async def list_push_device_tokens(
-    user_id: str = Query(...),
+    user_id: Optional[str] = Query(None),
     active_only: bool = Query(True),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id)
     try:
         query = supabase.table("push_device_tokens").select("id,user_id,platform,provider,token_hash,app_version,device_name,is_active,last_seen_at,created_at,updated_at").eq("user_id", user_id)
         if active_only:
@@ -874,8 +971,9 @@ async def list_push_device_tokens(
 
 
 @app.post("/api/users/preferences")
-async def upsert_user_preferences(payload: UserPreferenceRequest):
+async def upsert_user_preferences(payload: UserPreferenceRequest, auth: AuthContext = Depends(get_auth_context)):
     now = taipei_now().isoformat()
+    user_id = resolve_user_id(auth, payload.user_id)
     memory = {}
     if payload.default_city or payload.default_district:
         memory["default_location"] = {
@@ -890,7 +988,7 @@ async def upsert_user_preferences(payload: UserPreferenceRequest):
         memory["favorite_locations"] = payload.favorite_locations
 
     db_payload = {
-        "user_id": payload.user_id,
+        "user_id": user_id,
         "default_city": payload.default_city,
         "default_district": payload.default_district,
         "commute_mode": payload.commute_mode,
@@ -903,11 +1001,11 @@ async def upsert_user_preferences(payload: UserPreferenceRequest):
         res = supabase.table("user_preferences").upsert(db_payload, on_conflict="user_id").execute()
         if memory:
             try:
-                current = supabase.table("user_memory_profiles").select("summary_json").eq("user_id", payload.user_id).limit(1).execute()
+                current = supabase.table("user_memory_profiles").select("summary_json").eq("user_id", user_id).limit(1).execute()
                 summary = (current.data[0].get("summary_json") if current.data else {}) or {}
                 summary["preferences"] = {**(summary.get("preferences") or {}), **memory}
                 supabase.table("user_memory_profiles").upsert({
-                    "user_id": payload.user_id,
+                    "user_id": user_id,
                     "summary_json": summary,
                     "updated_at": now,
                     "last_interaction_at": now,
@@ -920,7 +1018,11 @@ async def upsert_user_preferences(payload: UserPreferenceRequest):
 
 
 @app.get("/api/users/preferences")
-async def get_user_preferences(user_id: str = Query(...)):
+async def get_user_preferences(
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id)
     try:
         res = supabase.table("user_preferences").select("*").eq("user_id", user_id).limit(1).execute()
         return safe_response("success", res.data[0] if res.data else {}, "user preferences loaded", "user_preferences")
@@ -1085,7 +1187,12 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
 
 # 注意：路由從 /events 改成了 /api/events 配合前端
 @app.post("/api/events")
-async def create_api_event(event: EventCreate, background_tasks: BackgroundTasks):
+async def create_api_event(
+    event: EventCreate,
+    background_tasks: BackgroundTasks,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    event.user_id = resolve_user_id(auth, event.user_id) or event.user_id
     return await create_event(event, background_tasks)
 
 @app.get("/api/events")
@@ -1094,8 +1201,10 @@ async def get_events(
     from_time: Optional[str] = Query(None, alias="from"),
     to_time: Optional[str] = Query(None, alias="to"),
     limit: int = Query(100, ge=1, le=500),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """前端讀取行程專用：完全符合瀚霆的 SwiftUI 契約"""
+    user_id = resolve_user_id(auth, user_id) or user_id
     try:
         query = supabase.table("events").select("*").order("start_time", desc=False).limit(limit)
         if user_id:
@@ -1149,7 +1258,9 @@ async def get_events(
 async def delete_event(
     event_id: str,
     user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id) or user_id
     try:
         query = supabase.table("events").delete().eq("id", event_id)
         if user_id:
@@ -1202,7 +1313,7 @@ async def sync_timetree_events():
     
 
 @app.post("/api/events/risk-check")
-async def check_event_risk(payload: EventRiskCheckRequest):
+async def check_event_risk(payload: EventRiskCheckRequest, auth: AuthContext = Depends(get_auth_context)):
     try:
         risk_result = await build_event_risk(payload)
         return {"status": "success", "data": risk_result}
@@ -1253,7 +1364,9 @@ async def get_event_weather_alerts(
     user_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id) or user_id
     try:
         query = supabase.table("event_weather_alerts").select("*").order("created_at", desc=True).limit(limit)
         if user_id:
@@ -1271,7 +1384,9 @@ async def get_assistant_alerts(
     user_id: Optional[str] = Query(None),
     hours_ahead: int = Query(36, ge=1, le=168),
     limit: int = Query(20, ge=1, le=100),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id) or user_id
     now = taipei_now()
     window_end = now + timedelta(hours=hours_ahead)
     alerts = []
@@ -1342,11 +1457,17 @@ async def get_assistant_alerts(
 
 
 @app.patch("/api/events/weather-alerts/{alert_id}/read")
-async def mark_event_weather_alert_read(alert_id: int):
+async def mark_event_weather_alert_read(
+    alert_id: int,
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id) or user_id
     try:
-        updated = supabase.table("event_weather_alerts").update({
-            "status": "read",
-        }).eq("id", alert_id).execute()
+        query = supabase.table("event_weather_alerts").update({"status": "read"}).eq("id", alert_id)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        updated = query.execute()
         return safe_response("success", updated.data or {"id": alert_id, "status": "read"}, "weather alert marked as read", "event_weather_alerts")
     except Exception as e:
         return safe_response("error", {"id": alert_id}, str(e), "event_weather_alerts", [{"service": "supabase", "message": str(e)}])
@@ -1471,7 +1592,8 @@ async def get_alerts():
         return {"status": "error", "message": f"伺服器錯誤: {str(e)}"}
 
 @app.post("/api/emergency-kit/vision-check")
-async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
+async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: AuthContext = Depends(get_auth_context)):
+    payload.user_id = resolve_user_id(auth, payload.user_id) or payload.user_id
     allowed_types = {"image/jpeg", "image/png", "image/webp"}
     if payload.mime_type not in allowed_types:
         return safe_response(
@@ -1611,7 +1733,9 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest):
 async def get_emergency_kit_scans(
     user_id: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    user_id = resolve_user_id(auth, user_id) or user_id
     try:
         query = supabase.table("emergency_kit_scans").select("*").order("created_at", desc=True).limit(limit)
         if user_id:
@@ -1690,7 +1814,12 @@ async def get_game_questions(type: str = Query("flood")):
 
 
 @app.get("/api/quiz/generate")
-async def generate_quiz(topic: str = Query("flood"), user_id: Optional[str] = Query(None)):
+async def generate_quiz(
+    topic: str = Query("flood"),
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id) or user_id
     quiz_type = normalize_disaster_code(topic)
     questions = GAME_QUESTIONS.get(quiz_type) or GAME_QUESTIONS.get("flood", [])
     return {
@@ -1711,7 +1840,8 @@ async def generate_quiz(topic: str = Query("flood"), user_id: Optional[str] = Qu
 
 
 @app.post("/api/quiz/submit")
-async def submit_quiz_score(payload: QuizScoreSubmitRequest):
+async def submit_quiz_score(payload: QuizScoreSubmitRequest, auth: AuthContext = Depends(get_auth_context)):
+    payload.user_id = resolve_user_id(auth, payload.user_id) or payload.user_id
     score_data = {
         "player_name": payload.user_id or "guest",
         "game_type": normalize_disaster_code(payload.topic or "quiz"),
@@ -1760,8 +1890,10 @@ async def submit_game_answer(payload: GameSubmitRequest):
     return {"status": "error", "message": "Question not found"}
 
 @app.post("/api/game/scores")
-async def create_game_score(payload: GameScoreCreate):
+async def create_game_score(payload: GameScoreCreate, auth: AuthContext = Depends(get_auth_context)):
     score_data = payload.model_dump()
+    if auth.authenticated:
+        score_data["player_name"] = auth.user_id
     score_data["created_at"] = datetime.now(timezone(timedelta(hours=8))).isoformat()
 
     try:

@@ -141,7 +141,7 @@ class GeocodeRequest(BaseModel):
 
 
 class WatchAreaCreate(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     label: Optional[str] = None
     city: str
     district: Optional[str] = None
@@ -151,7 +151,7 @@ class WatchAreaCreate(BaseModel):
 
 
 class UserPreferenceRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     default_city: Optional[str] = None
     default_district: Optional[str] = None
     commute_mode: Optional[str] = None
@@ -161,7 +161,7 @@ class UserPreferenceRequest(BaseModel):
 
 
 class PushDeviceTokenRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     platform: Literal["ios", "android", "web"] = "ios"
     device_token: str
     provider: Literal["apns", "fcm", "webpush"] = "apns"

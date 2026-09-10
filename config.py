@@ -38,6 +38,8 @@ TDX_CLIENT_SECRET = os.getenv("TDX_CLIENT_SECRET")
 VISION_DAILY_LIMIT = env_int("VISION_DAILY_LIMIT", 10)
 EVENT_ALERT_LEAD_MINUTES = env_int("EVENT_ALERT_LEAD_MINUTES", 180)
 CHAT_GEMINI_MODE = env_str("CHAT_GEMINI_MODE", "fallback_only").lower()
+SUPABASE_JWT_SECRET = env_str("SUPABASE_JWT_SECRET").strip()
+AUTH_REQUIRED = env_str("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
 
 
 class MissingSupabaseClient:

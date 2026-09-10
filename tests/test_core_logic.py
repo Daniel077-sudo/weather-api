@@ -1,13 +1,31 @@
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import time
 import unittest
 
 from fastapi.testclient import TestClient
 
+import auth
 import main
 from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_response
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
 from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods
+
+
+def make_test_jwt(user_id: str, secret: str = "test-secret", lifetime_seconds: int = 3600) -> str:
+    def encode(value):
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    header = encode({"alg": "HS256", "typ": "JWT"})
+    payload = encode({"sub": user_id, "exp": int(time.time()) + lifetime_seconds})
+    signed = f"{header}.{payload}".encode("ascii")
+    signature = base64.urlsafe_b64encode(hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).digest()).decode("ascii").rstrip("=")
+    return f"{header}.{payload}.{signature}"
 
 
 class CoreLogicTests(unittest.TestCase):
@@ -244,6 +262,49 @@ class CoreLogicTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["status"], "error")
         self.assertEqual(body["source"], "validation")
+
+    def test_auth_contract_endpoint(self):
+        client = TestClient(main.app)
+        response = client.get("/api/auth/contract")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "success")
+        self.assertEqual(body["data"]["unauthorized_response"]["http_status"], 401)
+        self.assertIn("POST /api/chat", body["data"]["protected_when_auth_required"])
+
+    def test_supabase_jwt_uses_sub_as_user_id(self):
+        original_secret = auth.SUPABASE_JWT_SECRET
+        try:
+            auth.SUPABASE_JWT_SECRET = "test-secret"
+            claims = auth.verify_supabase_jwt(make_test_jwt("jwt-user"))
+            context = auth.AuthContext(user_id=claims["sub"], claims=claims, authenticated=True)
+            self.assertEqual(auth.resolve_user_id(context, "body-user"), "jwt-user")
+        finally:
+            auth.SUPABASE_JWT_SECRET = original_secret
+
+    def test_auth_required_rejects_missing_token(self):
+        original_required = auth.AUTH_REQUIRED
+        try:
+            auth.AUTH_REQUIRED = True
+            client = TestClient(main.app)
+            response = client.get("/api/chat/history?user_id=test-user&limit=1")
+            self.assertEqual(response.status_code, 401)
+            body = response.json()
+            self.assertEqual(body["detail"]["status"], "error")
+            self.assertEqual(body["detail"]["errors"][0]["code"], "missing_token")
+        finally:
+            auth.AUTH_REQUIRED = original_required
+
+    def test_invalid_bearer_token_returns_401(self):
+        original_secret = auth.SUPABASE_JWT_SECRET
+        try:
+            auth.SUPABASE_JWT_SECRET = "test-secret"
+            client = TestClient(main.app)
+            response = client.get("/api/chat/history?user_id=test-user&limit=1", headers={"Authorization": "Bearer invalid"})
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json()["detail"]["source"], "auth")
+        finally:
+            auth.SUPABASE_JWT_SECRET = original_secret
 
 
 if __name__ == "__main__":
