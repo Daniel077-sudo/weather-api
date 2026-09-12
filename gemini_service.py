@@ -63,7 +63,8 @@ async def call_gemini_raw(prompt: str):
     if not GEMINI_API_KEY:
         return ""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    model = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -77,8 +78,13 @@ async def call_gemini_raw(prompt: str):
             if 'candidates' in res_json and len(res_json['candidates']) > 0:
                 return res_json['candidates'][0]['content']['parts'][0]['text'].strip()
             return f"[AI 罷工原因]: {json.dumps(res_json, ensure_ascii=False)}"
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code if e.response is not None else "unknown"
+        return f"[Gemini HTTP error]: status={status_code}, model={model}"
+    except httpx.RequestError as e:
+        return f"[Gemini request error]: {e.__class__.__name__}, model={model}"
     except Exception as e:
-        return f"[連線錯誤]: {str(e)}"
+        return f"[Gemini error]: {e.__class__.__name__}, model={model}"
 
 
 def parse_json_object(text: str) -> Dict[str, Any]:
