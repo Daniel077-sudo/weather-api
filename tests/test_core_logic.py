@@ -323,6 +323,7 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(response["suggestion_source"], "local_rules")
             self.assertFalse(response["gemini_configured"])
             self.assertFalse(response["gemini_attempted"])
+            self.assertFalse(response["gemini_response_valid"])
             self.assertEqual(response["gemini_error"], "missing_api_key")
         finally:
             gemini_service.GEMINI_API_KEY = original_key

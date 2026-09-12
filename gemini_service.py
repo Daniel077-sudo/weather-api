@@ -128,6 +128,7 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
                 response.setdefault("gemini_configured", gemini_configured)
                 response.setdefault("gemini_attempted", False)
                 response.setdefault("gemini_error", "")
+                response.setdefault("gemini_response_valid", response.get("suggestion_source") == "gemini")
                 return response
     except Exception:
         pass
@@ -139,6 +140,7 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
             "cache_hit": False,
             "gemini_configured": False,
             "gemini_attempted": False,
+            "gemini_response_valid": False,
             "gemini_error": "missing_api_key",
         }
 
@@ -154,15 +156,17 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
             "cache_hit": False,
             "gemini_configured": True,
             "gemini_attempted": True,
+            "gemini_response_valid": False,
             "gemini_error": error,
         }
 
     response = {
         **parsed,
-        "suggestion_source": parsed.get("suggestion_source") or "gemini",
+        "suggestion_source": "gemini",
         "cache_hit": False,
         "gemini_configured": True,
         "gemini_attempted": True,
+        "gemini_response_valid": True,
         "gemini_error": "",
     }
     try:

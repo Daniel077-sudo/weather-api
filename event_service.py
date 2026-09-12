@@ -334,6 +334,7 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     ai_meta = {
         "gemini_configured": bool(ai_raw.get("gemini_configured")),
         "gemini_attempted": bool(ai_raw.get("gemini_attempted")),
+        "gemini_response_valid": bool(ai_raw.get("gemini_response_valid")),
         "gemini_error": ai_raw.get("gemini_error") or "",
     }
     try:
@@ -368,7 +369,7 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
             "weather_alerts_used": bool(alert_text and "unavailable" not in alert_text),
             "disaster_alerts_used": bool(disaster_alerts),
             "suggestion_source": ai_structured.get("suggestion_source"),
-            "gemini_used": ai_structured.get("suggestion_source") == "gemini",
+            "gemini_used": bool(ai_raw.get("gemini_response_valid")) or ai_structured.get("suggestion_source") == "gemini",
             **ai_meta,
             "local_rules_used": ai_structured.get("suggestion_source") == "local_rules",
             "ai_cache_hit": bool(ai_structured.get("cache_hit")),
