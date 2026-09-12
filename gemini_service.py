@@ -111,6 +111,7 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
         "cache_subject": cache_subject,
         "context_hash": stable_hash(context),
     })
+    gemini_configured = bool(GEMINI_API_KEY)
 
     try:
         cached = supabase.table("ai_suggestion_cache").select("response").eq("cache_key", cache_key).limit(1).execute()
@@ -118,14 +119,46 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
             response = cached.data[0].get("response") or {}
             if isinstance(response, dict):
                 response["cache_hit"] = True
+                response.setdefault("gemini_configured", gemini_configured)
+                response.setdefault("gemini_attempted", False)
+                response.setdefault("gemini_error", "")
                 return response
     except Exception:
         pass
 
-    response = await call_gemini_json(prompt, fallback)
-    response["cache_hit"] = False
-    if response == {**fallback, "cache_hit": False}:
-        return response
+    if not GEMINI_API_KEY:
+        return {
+            **fallback,
+            "suggestion_source": "local_rules",
+            "cache_hit": False,
+            "gemini_configured": False,
+            "gemini_attempted": False,
+            "gemini_error": "missing_api_key",
+        }
+
+    text = await call_gemini_raw(prompt)
+    parsed = parse_json_object(text)
+    if not parsed:
+        error = "empty_response" if not text else "invalid_json_or_api_error"
+        if isinstance(text, str) and text.startswith("["):
+            error = text[:240]
+        return {
+            **fallback,
+            "suggestion_source": "local_rules",
+            "cache_hit": False,
+            "gemini_configured": True,
+            "gemini_attempted": True,
+            "gemini_error": error,
+        }
+
+    response = {
+        **parsed,
+        "suggestion_source": parsed.get("suggestion_source") or "gemini",
+        "cache_hit": False,
+        "gemini_configured": True,
+        "gemini_attempted": True,
+        "gemini_error": "",
+    }
     try:
         supabase.table("ai_suggestion_cache").upsert({
             "cache_key": cache_key,

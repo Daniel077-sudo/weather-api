@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import auth
 import main
 from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_response
+import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
 from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods
@@ -305,6 +306,26 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(response.json()["detail"]["source"], "auth")
         finally:
             auth.SUPABASE_JWT_SECRET = original_secret
+
+    def test_gemini_cached_fallback_reports_missing_key(self):
+        original_key = gemini_service.GEMINI_API_KEY
+        try:
+            gemini_service.GEMINI_API_KEY = ""
+            response = asyncio.run(
+                gemini_service.call_gemini_json_cached(
+                    "請回 JSON",
+                    {"risk_summary": "fallback", "recommended_action": "fallback"},
+                    "unit_test",
+                    "missing-key",
+                    {"case": "missing-key"},
+                )
+            )
+            self.assertEqual(response["suggestion_source"], "local_rules")
+            self.assertFalse(response["gemini_configured"])
+            self.assertFalse(response["gemini_attempted"])
+            self.assertEqual(response["gemini_error"], "missing_api_key")
+        finally:
+            gemini_service.GEMINI_API_KEY = original_key
 
 
 if __name__ == "__main__":

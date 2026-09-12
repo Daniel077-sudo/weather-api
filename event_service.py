@@ -331,6 +331,11 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
             "risk": risk,
         },
     )
+    ai_meta = {
+        "gemini_configured": bool(ai_raw.get("gemini_configured")),
+        "gemini_attempted": bool(ai_raw.get("gemini_attempted")),
+        "gemini_error": ai_raw.get("gemini_error") or "",
+    }
     try:
         ai_structured = AIIntentSuggestion(**ai_raw).model_dump()
         ai_structured["cache_hit"] = bool(ai_raw.get("cache_hit"))
@@ -364,6 +369,7 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
             "disaster_alerts_used": bool(disaster_alerts),
             "suggestion_source": ai_structured.get("suggestion_source"),
             "gemini_used": ai_structured.get("suggestion_source") == "gemini",
+            **ai_meta,
             "local_rules_used": ai_structured.get("suggestion_source") == "local_rules",
             "ai_cache_hit": bool(ai_structured.get("cache_hit")),
             "tdx_used": traffic_risk.get("tdx_status") == "success",
