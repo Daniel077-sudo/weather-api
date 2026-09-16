@@ -6,6 +6,8 @@ import json
 import time
 import unittest
 
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives import hashes
 from fastapi.testclient import TestClient
 
 import auth
@@ -27,6 +29,35 @@ def make_test_jwt(user_id: str, secret: str = "test-secret", lifetime_seconds: i
     signed = f"{header}.{payload}".encode("ascii")
     signature = base64.urlsafe_b64encode(hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).digest()).decode("ascii").rstrip("=")
     return f"{header}.{payload}.{signature}"
+
+
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def make_test_es256_jwt(user_id: str, private_key, kid: str = "test-kid", lifetime_seconds: int = 3600) -> str:
+    def encode(value):
+        raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        return b64url(raw)
+
+    header = encode({"alg": "ES256", "kid": kid, "typ": "JWT"})
+    payload = encode({"sub": user_id, "exp": int(time.time()) + lifetime_seconds})
+    signed = f"{header}.{payload}".encode("ascii")
+    der_signature = private_key.sign(signed, ec.ECDSA(hashes.SHA256()))
+    r, s = utils.decode_dss_signature(der_signature)
+    raw_signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    return f"{header}.{payload}.{b64url(raw_signature)}"
+
+
+def public_key_to_jwk(private_key, kid: str = "test-kid") -> dict:
+    numbers = private_key.public_key().public_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "kid": kid,
+        "x": b64url(numbers.x.to_bytes(32, "big")),
+        "y": b64url(numbers.y.to_bytes(32, "big")),
+    }
 
 
 class CoreLogicTests(unittest.TestCase):
@@ -272,6 +303,7 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(body["status"], "success")
         self.assertEqual(body["data"]["unauthorized_response"]["http_status"], 401)
         self.assertIn("POST /api/chat", body["data"]["protected_when_auth_required"])
+        self.assertIn("POST /api/chat/memory/reset", body["data"]["protected_when_auth_required"])
 
     def test_supabase_jwt_uses_sub_as_user_id(self):
         original_secret = auth.SUPABASE_JWT_SECRET
@@ -282,6 +314,19 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(auth.resolve_user_id(context, "body-user"), "jwt-user")
         finally:
             auth.SUPABASE_JWT_SECRET = original_secret
+
+    def test_supabase_es256_jwt_uses_jwks(self):
+        original_cache = dict(auth.JWKS_CACHE)
+        try:
+            private_key = ec.generate_private_key(ec.SECP256R1())
+            auth.JWKS_CACHE["keys"] = [public_key_to_jwk(private_key, kid="es-test")]
+            auth.JWKS_CACHE["fetched_at"] = int(time.time())
+            claims = auth.verify_supabase_jwt(make_test_es256_jwt("es-user", private_key, kid="es-test"))
+            context = auth.AuthContext(user_id=claims["sub"], claims=claims, authenticated=True)
+            self.assertEqual(auth.resolve_user_id(context, "body-user"), "es-user")
+        finally:
+            auth.JWKS_CACHE.clear()
+            auth.JWKS_CACHE.update(original_cache)
 
     def test_auth_required_rejects_missing_token(self):
         original_required = auth.AUTH_REQUIRED
@@ -306,6 +351,17 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(response.json()["detail"]["source"], "auth")
         finally:
             auth.SUPABASE_JWT_SECRET = original_secret
+
+    def test_chat_memory_reset_requires_auth_when_enabled(self):
+        original_required = auth.AUTH_REQUIRED
+        try:
+            auth.AUTH_REQUIRED = True
+            client = TestClient(main.app)
+            response = client.post("/api/chat/memory/reset?user_id=test-user")
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json()["detail"]["errors"][0]["code"], "missing_token")
+        finally:
+            auth.AUTH_REQUIRED = original_required
 
     def test_gemini_cached_fallback_reports_missing_key(self):
         original_key = gemini_service.GEMINI_API_KEY

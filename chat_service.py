@@ -402,6 +402,43 @@ def get_user_memory_response(user_id: str) -> Dict[str, Any]:
         return safe_response("error", {}, str(e), "user_memory_profiles", [{"service": "supabase", "message": str(e)}])
 
 
+def reset_user_memory_response(user_id: str) -> Dict[str, Any]:
+    if not user_id:
+        return safe_response(
+            "error",
+            {"reset": False},
+            "user_id is required",
+            "auth",
+            [{"service": "auth", "message": "user_id is required"}],
+        )
+
+    LOCAL_PENDING_EVENTS.pop(user_id, None)
+    now = taipei_now().isoformat()
+    payload = {
+        "user_id": user_id,
+        "memory_markdown": "",
+        "summary_json": {"pending_event": None},
+        "last_interaction_at": now,
+        "updated_at": now,
+    }
+    try:
+        res = supabase.table("user_memory_profiles").upsert(payload, on_conflict="user_id").execute()
+        return safe_response(
+            "success",
+            res.data[0] if res.data else payload,
+            "user memory reset",
+            "user_memory_profiles",
+        )
+    except Exception as e:
+        return safe_response(
+            "error",
+            {"reset": False, "user_id": user_id},
+            str(e),
+            "user_memory_profiles",
+            [{"service": "supabase", "message": str(e)}],
+        )
+
+
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 

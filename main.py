@@ -12,7 +12,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response, get_xiaolan_training_profile
+from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, reset_user_memory_response
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -271,6 +271,7 @@ async def get_auth_contract():
                 "POST /api/chat",
                 "GET /api/chat/history",
                 "GET /api/chat/memory",
+                "POST /api/chat/memory/reset",
                 "POST /api/weather/suggestion",
                 "POST /api/events",
                 "GET /api/events",
@@ -336,6 +337,14 @@ async def get_chat_memory_endpoint(
     auth: AuthContext = Depends(get_auth_context),
 ):
     return get_user_memory_response(resolve_user_id(auth, user_id))
+
+
+@app.post("/api/chat/memory/reset")
+async def reset_chat_memory_endpoint(
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    return reset_user_memory_response(resolve_user_id(auth, user_id))
 
 
 @app.post("/api/weather/suggestion")
