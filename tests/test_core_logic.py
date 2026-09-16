@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from fastapi.testclient import TestClient
 
 import auth
+import event_service
 import main
 from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_response
 import gemini_service
@@ -304,6 +305,7 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(body["data"]["unauthorized_response"]["http_status"], 401)
         self.assertIn("POST /api/chat", body["data"]["protected_when_auth_required"])
         self.assertIn("POST /api/chat/memory/reset", body["data"]["protected_when_auth_required"])
+        self.assertIn("PATCH /api/events/{event_id}", body["data"]["protected_when_auth_required"])
 
     def test_supabase_jwt_uses_sub_as_user_id(self):
         original_secret = auth.SUPABASE_JWT_SECRET
@@ -383,6 +385,105 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(response["gemini_error"], "missing_api_key")
         finally:
             gemini_service.GEMINI_API_KEY = original_key
+
+    def test_event_risk_uses_current_weather_not_full_json_keywords(self):
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def __init__(self, table_name):
+                self.table_name = table_name
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                if self.table_name == "weather_cache":
+                    return FakeResult([
+                        {
+                            "weather_data": {
+                                "current": {"description": "晴", "pop": 0, "wind_ms": 1, "app_temp": 28, "wbgt": 0},
+                                "forecast": [{"description": "大雨強風", "pop": 90}],
+                            }
+                        }
+                    ])
+                return FakeResult([])
+
+        class FakeSupabase:
+            def table(self, table_name):
+                return FakeQuery(table_name)
+
+        async def fake_ai(prompt, fallback, prompt_type, cache_subject, context):
+            return {**fallback, "suggestion_source": "local_rules", "cache_hit": False}
+
+        async def fake_traffic(_weather, _transport):
+            return {"tdx_status": "not_configured", "tdx_message": ""}
+
+        original_supabase = event_service.supabase
+        original_alerts = event_service.get_active_disaster_alerts
+        original_ai = event_service.call_gemini_json_cached
+        original_traffic = event_service.build_traffic_risk_async
+        try:
+            event_service.supabase = FakeSupabase()
+            event_service.get_active_disaster_alerts = lambda *_args, **_kwargs: {"status": "success", "data": []}
+            event_service.call_gemini_json_cached = fake_ai
+            event_service.build_traffic_risk_async = fake_traffic
+            result = asyncio.run(
+                event_service.build_event_risk(
+                    main.EventRiskCheckRequest(
+                        title="臺東室內會議",
+                        city="臺東縣",
+                        district="臺東市",
+                        location="臺東縣臺東市",
+                        activity="開會",
+                    )
+                )
+            )
+            self.assertEqual(result["risk_level"], "low")
+            self.assertNotIn("heavy_rain", result["risk_tags"])
+            self.assertNotIn("strong_wind", result["risk_tags"])
+        finally:
+            event_service.supabase = original_supabase
+            event_service.get_active_disaster_alerts = original_alerts
+            event_service.call_gemini_json_cached = original_ai
+            event_service.build_traffic_risk_async = original_traffic
+
+    def test_weather_suggestion_uses_gemini_when_available(self):
+        async def fake_ai(prompt, fallback, prompt_type, cache_subject, context):
+            return {
+                "suggestion": "Gemini 建議改成室內備案。",
+                "suggestion_source": "gemini",
+                "gemini_configured": True,
+                "gemini_attempted": True,
+                "gemini_response_valid": True,
+                "gemini_error": "",
+                "cache_hit": False,
+            }
+
+        original_ai = main.call_gemini_json_cached
+        try:
+            main.call_gemini_json_cached = fake_ai
+            client = TestClient(main.app)
+            response = client.post(
+                "/api/weather/suggestion",
+                json={
+                    "city": "臺南市",
+                    "district": "東區",
+                    "message": "下午要打球",
+                    "weather_data": {"current": {"description": "晴", "pop": 0, "app_temp": 31}},
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()["data"]
+            self.assertEqual(data["suggestion_source"], "gemini")
+            self.assertTrue(data["gemini_used"])
+            self.assertEqual(data["suggestion"], "Gemini 建議改成室內備案。")
+        finally:
+            main.call_gemini_json_cached = original_ai
 
 
 if __name__ == "__main__":

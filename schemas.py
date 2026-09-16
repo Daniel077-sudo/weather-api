@@ -80,6 +80,27 @@ class EventCreate(BaseModel):
     last_synced_at: Optional[str] = None
 
 
+class EventUpdate(BaseModel):
+    title: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    city: Optional[str] = None
+    district: Optional[str] = None
+    location: Optional[str] = None
+    url: Optional[str] = None
+    description: Optional[str] = None
+    transport_type: Optional[str] = None
+    has_weather_risk: Optional[bool] = None
+    ai_suggestion: Optional[str] = None
+    risk_level: Optional[str] = None
+    risk_tags: Optional[List[str]] = None
+    recommended_action: Optional[str] = None
+    weather_snapshot: Optional[Dict[str, Any]] = None
+    external_source: Optional[str] = None
+    external_event_id: Optional[str] = None
+    last_synced_at: Optional[str] = None
+
+
 class EventRiskCheckRequest(BaseModel):
     title: Optional[str] = None
     start_time: Optional[str] = None

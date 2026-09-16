@@ -254,32 +254,23 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
     except Exception as e:
         weather_text = f"weather_cache unavailable: {e}"
 
-    try:
-        alerts = supabase.table("weather_alerts").select("*").order("created_at", desc=True).limit(5).execute()
-        if alerts.data:
-            alert_text = json.dumps(alerts.data, ensure_ascii=False)
-    except Exception as e:
-        alert_text = f"weather_alerts unavailable: {e}"
-
     disaster_alerts: List[Dict[str, Any]] = []
     try:
         disaster_response = get_active_disaster_alerts(payload.city, payload.district, 10)
         if disaster_response.get("status") == "success" and isinstance(disaster_response.get("data"), list):
             disaster_alerts = disaster_response["data"]
             if disaster_alerts:
-                alert_text = " ".join([alert_text, json.dumps(disaster_alerts, ensure_ascii=False)]).strip()
+                alert_text = json.dumps(disaster_alerts, ensure_ascii=False)
     except Exception as e:
-        alert_text = " ".join([alert_text, f"disaster_alerts unavailable: {e}"]).strip()
+        alert_text = f"disaster_alerts unavailable: {e}"
 
-    combined_text = " ".join([
+    event_text = " ".join([
         payload.title or "",
         location,
         payload.activity or "",
         payload.transport_type or "",
-        weather_text,
-        alert_text,
     ])
-    risk = analyze_text_risk(combined_text)
+    risk = analyze_text_risk(event_text)
     action = build_recommended_action(risk["risk_level"], risk["risk_tags"], location)
     if weather_payload:
         risk = {

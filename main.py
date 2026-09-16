@@ -17,9 +17,9 @@ from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event, persist_event_risk_fields
-from gemini_service import call_gemini_raw, call_gemini_vision, summarize_ai_usage
+from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
 from weather_service import analyze_weather_risk, build_live_weather_payload, build_weather_snapshot, build_weather_suggestion, fetch_cwa_forecast, master_sync_orchestrator, persist_weather_observation_history, pick_current_weather, refresh_expired_weather_cache, refresh_weather_cache_city, resolve_event_location_parts, summarize_weather_cache
@@ -275,6 +275,8 @@ async def get_auth_contract():
                 "POST /api/weather/suggestion",
                 "POST /api/events",
                 "GET /api/events",
+                "PATCH /api/events/{event_id}",
+                "PUT /api/events/{event_id}",
                 "DELETE /api/events/{event_id}",
                 "POST /api/events/risk-check",
                 "GET /api/events/weather-alerts",
@@ -368,6 +370,36 @@ async def weather_suggestion(payload: WeatherSuggestionRequest, auth: AuthContex
             current_weather,
             risk_payload,
         )
+        prompt = (
+            "你是小藍，請針對台灣使用者回傳 JSON，不要 markdown。\n"
+            f"地點:{payload.city}{payload.district}\n"
+            f"使用者問題:{payload.message or payload.activity or '天氣建議'}\n"
+            f"天氣:{json.dumps(current_weather, ensure_ascii=False)}\n"
+            f"風險:{json.dumps(risk_payload, ensure_ascii=False)}\n"
+            "JSON 欄位: suggestion(60字內自然建議), risk_summary, recommended_action, confidence。"
+        )
+        ai_raw = await call_gemini_json_cached(
+            prompt,
+            {
+                "suggestion": suggestion,
+                "risk_summary": suggestion,
+                "recommended_action": suggestion,
+                "confidence": 0.55,
+                "suggestion_source": "local_fallback",
+            },
+            "weather_suggestion",
+            f"{payload.city}{payload.district}:{payload.message or payload.activity or ''}",
+            {
+                "city": payload.city,
+                "district": payload.district,
+                "message": payload.message,
+                "activity": payload.activity,
+                "weather": current_weather,
+                "risk": risk_payload,
+            },
+        )
+        ai_suggestion = ai_raw.get("suggestion") or ai_raw.get("recommended_action") or ai_raw.get("risk_summary") or suggestion
+        suggestion_source = "gemini" if ai_raw.get("gemini_response_valid") else ai_raw.get("suggestion_source") or "local_fallback"
         return {
             "status": "success",
             "data": {
@@ -379,9 +411,15 @@ async def weather_suggestion(payload: WeatherSuggestionRequest, auth: AuthContex
                 "risk_level": risk_payload.get("risk_level"),
                 "risk_tags": risk_payload.get("risk_tags"),
                 "has_weather_risk": risk_payload.get("has_weather_risk"),
-                "suggestion": suggestion,
-                "suggestion_source": "local_fallback",
+                "suggestion": ai_suggestion,
+                "suggestion_source": suggestion_source,
                 "weather_source": "request_payload",
+                "gemini_used": bool(ai_raw.get("gemini_response_valid")),
+                "gemini_configured": bool(ai_raw.get("gemini_configured")),
+                "gemini_attempted": bool(ai_raw.get("gemini_attempted")),
+                "gemini_response_valid": bool(ai_raw.get("gemini_response_valid")),
+                "gemini_error": ai_raw.get("gemini_error") or "",
+                "ai_cache_hit": bool(ai_raw.get("cache_hit")),
             },
         }
 
@@ -1261,6 +1299,87 @@ async def get_events(
     except Exception as e:
         memory_events = list_memory_events(user_id or "", from_time or "", to_time or "", limit)
         return {"status": "success", "data": [normalize_event(event) for event in memory_events], "source": "memory_fallback", "message": str(e)}
+
+
+async def update_event_by_id(
+    event_id: str,
+    payload: EventUpdate,
+    auth: AuthContext,
+):
+    user_id = resolve_user_id(auth, None)
+    update_payload = payload.model_dump(mode="json", exclude_unset=True, exclude_none=True)
+    if not update_payload:
+        return safe_response("error", {"id": event_id}, "No fields to update", "validation", [{"code": "empty_update"}])
+
+    if update_payload.get("url") and not update_payload.get("transport_type"):
+        update_payload["transport_type"] = determine_transport_type(update_payload.get("url"))
+
+    try:
+        existing_query = supabase.table("events").select("*").eq("id", event_id).limit(1)
+        if user_id:
+            existing_query = existing_query.eq("user_id", user_id)
+        existing_res = existing_query.execute()
+        if not existing_res.data:
+            return safe_response("error", {"id": event_id}, "Event not found", "events", [{"code": "not_found"}])
+
+        merged_payload = {**(existing_res.data[0] or {}), **update_payload}
+        location_parts = resolve_event_location_parts(merged_payload)
+        merged_payload["city"] = merged_payload.get("city") or location_parts["city"]
+        merged_payload["district"] = merged_payload.get("district") or location_parts["district"]
+
+        risk_keys = {"title", "start_time", "end_time", "city", "district", "location", "transport_type", "url"}
+        should_refresh_risk = bool(risk_keys.intersection(update_payload.keys())) or "weather_snapshot" in update_payload
+        if should_refresh_risk:
+            enriched_payload = await enrich_event_payload_with_risk(
+                {**merged_payload, "weather_snapshot": update_payload.get("weather_snapshot")},
+                explicit_risk_level=str(update_payload.get("risk_level") or ""),
+                explicit_risk_tags=update_payload.get("risk_tags") or [],
+                explicit_has_weather_risk=bool(update_payload.get("has_weather_risk", False)),
+                log_prefix="更新行程時",
+            )
+            update_payload.update({
+                key: enriched_payload.get(key)
+                for key in {
+                    "city",
+                    "district",
+                    "weather_snapshot",
+                    "weather_checked_at",
+                    "risk_level",
+                    "risk_tags",
+                    "has_weather_risk",
+                    "weather_alert_status",
+                    "recommended_action",
+                    "ai_suggestion",
+                }
+                if key in enriched_payload
+            })
+
+        update_query = supabase.table("events").update(update_payload).eq("id", event_id)
+        if user_id:
+            update_query = update_query.eq("user_id", user_id)
+        updated_res = update_query.execute()
+        updated_event = (updated_res.data or [{}])[0]
+        return safe_response("success", normalize_event({**merged_payload, **update_payload, **updated_event}), "event updated", "events")
+    except Exception as e:
+        return safe_response("error", {"id": event_id}, str(e), "events", [{"service": "supabase", "message": str(e)}])
+
+
+@app.patch("/api/events/{event_id}")
+async def patch_event(
+    event_id: str,
+    payload: EventUpdate,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    return await update_event_by_id(event_id, payload, auth)
+
+
+@app.put("/api/events/{event_id}")
+async def put_event(
+    event_id: str,
+    payload: EventUpdate,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    return await update_event_by_id(event_id, payload, auth)
 
 
 @app.delete("/api/events/{event_id}")
