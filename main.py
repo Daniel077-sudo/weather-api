@@ -1322,7 +1322,8 @@ async def update_event_by_id(
         if not existing_res.data:
             return safe_response("error", {"id": event_id}, "Event not found", "events", [{"code": "not_found"}])
 
-        merged_payload = {**(existing_res.data[0] or {}), **update_payload}
+        existing_event = existing_res.data[0] or {}
+        merged_payload = {**existing_event, **update_payload}
         location_parts = resolve_event_location_parts(merged_payload)
         merged_payload["city"] = merged_payload.get("city") or location_parts["city"]
         merged_payload["district"] = merged_payload.get("district") or location_parts["district"]
@@ -1330,8 +1331,9 @@ async def update_event_by_id(
         risk_keys = {"title", "start_time", "end_time", "city", "district", "location", "transport_type", "url"}
         should_refresh_risk = bool(risk_keys.intersection(update_payload.keys())) or "weather_snapshot" in update_payload
         if should_refresh_risk:
+            risk_input = {**merged_payload, "weather_snapshot": update_payload.get("weather_snapshot")}
             enriched_payload = await enrich_event_payload_with_risk(
-                {**merged_payload, "weather_snapshot": update_payload.get("weather_snapshot")},
+                risk_input,
                 explicit_risk_level=str(update_payload.get("risk_level") or ""),
                 explicit_risk_tags=update_payload.get("risk_tags") or [],
                 explicit_has_weather_risk=bool(update_payload.get("has_weather_risk", False)),
@@ -1354,11 +1356,68 @@ async def update_event_by_id(
                 if key in enriched_payload
             })
 
-        update_query = supabase.table("events").update(update_payload).eq("id", event_id)
-        if user_id:
-            update_query = update_query.eq("user_id", user_id)
-        updated_res = update_query.execute()
-        updated_event = (updated_res.data or [{}])[0]
+        update_candidates = []
+        full_payload = dict(update_payload)
+        update_candidates.append(full_payload)
+        update_candidates.append({
+            key: value
+            for key, value in full_payload.items()
+            if key not in {"weather_snapshot", "weather_checked_at"}
+        })
+        update_candidates.append({
+            key: value
+            for key, value in full_payload.items()
+            if key
+            in {
+                "user_id",
+                "title",
+                "start_time",
+                "end_time",
+                "city",
+                "district",
+                "location",
+                "location_name",
+                "url",
+                "transport_ticket_link",
+                "transport_type",
+                "has_weather_risk",
+                "ai_suggestion",
+                "description",
+                "external_source",
+                "external_event_id",
+                "last_synced_at",
+            }
+        })
+        update_candidates.append({
+            key: value
+            for key, value in full_payload.items()
+            if key in {"title", "start_time", "end_time", "location", "has_weather_risk", "ai_suggestion"}
+        })
+
+        updated_event = {}
+        last_error = None
+        seen_payloads = set()
+        for candidate in update_candidates:
+            candidate = {key: value for key, value in candidate.items() if value is not None}
+            signature = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
+            if not candidate or signature in seen_payloads:
+                continue
+            seen_payloads.add(signature)
+            try:
+                update_query = supabase.table("events").update(candidate).eq("id", event_id)
+                if user_id:
+                    update_query = update_query.eq("user_id", user_id)
+                updated_res = update_query.execute()
+                updated_event = (updated_res.data or [{}])[0]
+                update_payload = candidate
+                last_error = None
+                break
+            except Exception as update_e:
+                last_error = update_e
+                continue
+
+        if last_error is not None:
+            return safe_response("error", {"id": event_id}, str(last_error), "events", [{"service": "supabase", "message": str(last_error)}])
         return safe_response("success", normalize_event({**merged_payload, **update_payload, **updated_event}), "event updated", "events")
     except Exception as e:
         return safe_response("error", {"id": event_id}, str(e), "events", [{"service": "supabase", "message": str(e)}])

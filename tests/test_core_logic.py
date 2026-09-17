@@ -577,6 +577,88 @@ class CoreLogicTests(unittest.TestCase):
         finally:
             main.call_gemini_json_cached = original_ai
 
+    def test_update_event_falls_back_when_risk_columns_missing(self):
+        stored_event = {
+            "id": "215",
+            "user_id": "jwt-user",
+            "title": "原標題",
+            "start_time": "2026-09-18T10:00:00+08:00",
+            "end_time": "2026-09-18T11:00:00+08:00",
+            "city": "臺北市",
+            "district": "大安區",
+            "location": "臺北市大安區",
+            "has_weather_risk": False,
+            "ai_suggestion": "",
+        }
+        attempted_updates = []
+
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def __init__(self, action, payload=None):
+                self.action = action
+                self.payload = payload or {}
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def update(self, payload):
+                return FakeQuery("update", payload)
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                if self.action == "select":
+                    return FakeResult([stored_event])
+                attempted_updates.append(dict(self.payload))
+                if "risk_level" in self.payload:
+                    raise Exception("{'message': 'column \"risk_level\" does not exist', 'code': '42703'}")
+                stored_event.update(self.payload)
+                return FakeResult([stored_event])
+
+        class FakeSupabase:
+            def table(self, _table_name):
+                return FakeQuery("select")
+
+        async def fake_enrich(payload, **_kwargs):
+            return {
+                **payload,
+                "risk_level": "low",
+                "risk_tags": [],
+                "has_weather_risk": False,
+                "weather_alert_status": "checked",
+                "ai_suggestion": "ok",
+                "recommended_action": "ok",
+            }
+
+        original_supabase = main.supabase
+        original_enrich = main.enrich_event_payload_with_risk
+        try:
+            main.supabase = FakeSupabase()
+            main.enrich_event_payload_with_risk = fake_enrich
+            response = asyncio.run(
+                main.update_event_by_id(
+                    "215",
+                    main.EventUpdate(title="新標題", city="高雄市", district="鹽埕區", location="高雄市鹽埕區"),
+                    auth.AuthContext(user_id="jwt-user", authenticated=True),
+                )
+            )
+            self.assertEqual(response["status"], "success")
+            self.assertGreaterEqual(len(attempted_updates), 2)
+            self.assertEqual(stored_event["title"], "新標題")
+            self.assertEqual(stored_event["city"], "高雄市")
+            self.assertEqual(stored_event["district"], "鹽埕區")
+            self.assertNotEqual(stored_event["district"], "中正區")
+        finally:
+            main.supabase = original_supabase
+            main.enrich_event_payload_with_risk = original_enrich
+
 
 if __name__ == "__main__":
     unittest.main()
