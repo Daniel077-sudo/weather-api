@@ -984,6 +984,8 @@ def missing_event_slots(slots: Dict[str, Any]) -> List[str]:
         missing.append("time")
     if not (slots.get("event_city") or slots.get("event_location")):
         missing.append("location")
+    elif slots.get("event_city") and not slots.get("event_district"):
+        missing.append("district")
     return missing
 
 
@@ -994,6 +996,9 @@ def build_clarify_response(slots: Dict[str, Any], missing: List[str]) -> Dict[st
     elif "location" in missing:
         reply = "這個行程要去哪個縣市、行政區或地點？"
         clarify_slot = "location"
+    elif "district" in missing:
+        reply = f"小藍知道你要去{slots.get('event_city') or '那個縣市'}，但還需要行政區或更明確的地點，才不會查錯天氣。你要去哪一區或哪個景點？"
+        clarify_slot = "district"
     elif "time" in missing:
         reply = "這個行程大概什麼時候開始、什麼時候結束？"
         clarify_slot = "time"
@@ -1017,6 +1022,10 @@ def build_clarify_response(slots: Dict[str, Any], missing: List[str]) -> Dict[st
 
 
 async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[str, Any]:
+    missing = missing_event_slots(slots)
+    if missing:
+        return build_clarify_response(slots, missing)
+
     event_payload: Dict[str, Any] = {
         "user_id": db_user_id(user_id),
         "title": slots.get("event_title") or "新行程",

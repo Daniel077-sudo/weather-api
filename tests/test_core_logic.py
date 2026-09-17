@@ -17,7 +17,7 @@ from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_r
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
-from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods
+from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods, resolve_event_location_parts
 
 
 def make_test_jwt(user_id: str, secret: str = "test-secret", lifetime_seconds: int = 3600) -> str:
@@ -151,6 +151,19 @@ class CoreLogicTests(unittest.TestCase):
         self.assertTrue(body["event_title"])
         self.assertIn("+08:00", body["event_start"])
         self.assertIn("15:00:00", body["event_start"])
+
+    def test_chat_clarifies_city_only_event_location(self):
+        body = build_local_fallback("test-user", "我明天下午三點要去台南爬山")
+        self.assertEqual(body["action_type"], "CLARIFY")
+        self.assertIn("district", body["missing_slots"])
+        self.assertEqual(body["event_city"], "臺南市")
+        self.assertEqual(body["event_district"], "")
+        self.assertIn("行政區", body["reply"])
+
+    def test_location_resolver_does_not_mix_city_with_default_district(self):
+        parts = resolve_event_location_parts({"city": "臺南市", "district": "", "location": "臺南市"})
+        self.assertEqual(parts["city"], "臺南市")
+        self.assertEqual(parts["district"], "")
 
     def test_chat_local_fallback_answers_disaster_qa(self):
         body = build_local_fallback("test-user", "地震來的時候應該怎麼辦")

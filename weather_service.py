@@ -1178,10 +1178,13 @@ def resolve_event_location_parts(event: Dict[str, Any]) -> Dict[str, str]:
                     break
             break
 
+    if city:
+        return {"city": city, "district": district}
+
     geocoded = geocode_fallback(location or event.get("title") or "")
     return {
         "city": city or geocoded.get("city") or "臺北市",
-        "district": district or geocoded.get("district") or REPRESENTATIVE_DISTRICTS.get(city or geocoded.get("city") or "臺北市", "中正區"),
+        "district": district or geocoded.get("district") or "",
     }
 
 
