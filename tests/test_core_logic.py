@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from fastapi.testclient import TestClient
 
 import auth
+import disaster_service
 import event_service
 import main
 from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_response
@@ -223,6 +224,84 @@ class CoreLogicTests(unittest.TestCase):
         body = response.json()
         self.assertIn(body["status"], ["success", "error"])
         self.assertIn("errors", body)
+
+    def test_disaster_alerts_filter_by_affected_areas(self):
+        calls = []
+
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def select(self, *args, **kwargs):
+                calls.append(("select", args, kwargs))
+                return self
+
+            def gte(self, *args, **kwargs):
+                calls.append(("gte", args, kwargs))
+                return self
+
+            def order(self, *args, **kwargs):
+                calls.append(("order", args, kwargs))
+                return self
+
+            def limit(self, *args, **kwargs):
+                calls.append(("limit", args, kwargs))
+                return self
+
+            def eq(self, *args, **kwargs):
+                calls.append(("eq", args, kwargs))
+                raise AssertionError("city/district DB filters should not be used")
+
+            def execute(self):
+                return FakeResult([
+                    {
+                        "title": "臺南市大雨特報",
+                        "severity": "medium",
+                        "type": "rain",
+                        "starts_at": "2026-09-17T10:00:00+08:00",
+                        "expires_at": "2099-01-01T00:00:00+08:00",
+                        "affected_areas": [{"city": "臺南市", "district": ""}],
+                    },
+                    {
+                        "title": "臺北市強風特報",
+                        "severity": "medium",
+                        "type": "wind",
+                        "starts_at": "2026-09-17T10:00:00+08:00",
+                        "expires_at": "2099-01-01T00:00:00+08:00",
+                        "affected_areas": [{"city": "臺北市", "district": ""}],
+                    },
+                ])
+
+        class FakeSupabase:
+            def table(self, table_name):
+                self.table_name = table_name
+                return FakeQuery()
+
+        original_supabase = disaster_service.supabase
+        try:
+            disaster_service.supabase = FakeSupabase()
+            result = disaster_service.get_active_disaster_alerts(city="臺南市", limit=10)
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(len(result["data"]), 1)
+            self.assertEqual(result["data"][0]["city"], "臺南市")
+            ordered_columns = [call[1][0] for call in calls if call[0] == "order"]
+            self.assertIn("starts_at", ordered_columns)
+            self.assertNotIn("started_at", ordered_columns)
+        finally:
+            disaster_service.supabase = original_supabase
+
+    def test_cwa_alert_normalizes_to_current_schema(self):
+        payload = disaster_service.normalize_cwa_alert(
+            "臺南市",
+            {"info": {"phenomena": "大雨", "significance": "特報", "effectiveTime": "2026-09-17T10:00:00+08:00"}},
+            {"locationName": "臺南市"},
+        )
+        self.assertIn("starts_at", payload)
+        self.assertIn("affected_areas", payload)
+        self.assertNotIn("started_at", payload)
+        self.assertNotIn("city", payload)
+        self.assertEqual(payload["affected_areas"][0]["city"], "臺南市")
 
     def test_api_smoke_area_status(self):
         client = TestClient(main.app)

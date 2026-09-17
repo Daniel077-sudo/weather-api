@@ -9,7 +9,7 @@ from utils import log_sync, parse_datetime, safe_response, taipei_now
 
 
 def _alert_hash(payload: Dict[str, Any]) -> str:
-    key = "|".join(str(payload.get(part) or "") for part in ["source", "type", "city", "district", "title", "started_at"])
+    key = "|".join(str(payload.get(part) or "") for part in ["source", "type", "affected_areas", "title", "starts_at"])
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -43,19 +43,18 @@ def normalize_cwa_alert(location_name: str, hazard: Dict[str, Any], raw: Dict[st
     significance = str(info.get("significance") or "")
     title = f"{location_name}{phenomena}{significance}"
     description = str(info.get("description") or info.get("instruction") or title)
-    started_at = info.get("effectiveTime") or info.get("onset") or taipei_now().isoformat()
+    starts_at = info.get("effectiveTime") or info.get("onset") or taipei_now().isoformat()
     expires_at = info.get("expires") or info.get("expiresTime") or (taipei_now() + timedelta(hours=6)).isoformat()
     combined = f"{title} {description}"
     payload = {
         "source": "cwa",
         "type": _type_from_text(combined),
-        "city": location_name,
-        "district": "",
         "title": title,
         "description": description,
         "severity": _severity_from_text(combined),
-        "started_at": started_at,
+        "starts_at": starts_at,
         "expires_at": expires_at,
+        "affected_areas": [{"city": location_name, "district": ""}],
         "source_url": "https://www.cwa.gov.tw/V8/C/P/Warning/W26.html",
         "raw_payload": {"location": raw, "hazard": hazard},
         "updated_at": taipei_now().isoformat(),
@@ -102,23 +101,93 @@ async def refresh_disaster_alerts() -> Dict[str, Any]:
         return safe_response("error", {"inserted": 0, "alerts": []}, str(e), "cwa", [error])
 
 
+def _affected_areas(alert: Dict[str, Any]) -> List[Dict[str, str]]:
+    raw_areas = alert.get("affected_areas") or alert.get("affectedAreas") or []
+    if isinstance(raw_areas, dict):
+        raw_areas = [raw_areas]
+    if not isinstance(raw_areas, list):
+        raw_areas = []
+
+    areas: List[Dict[str, str]] = []
+    for item in raw_areas:
+        if isinstance(item, dict):
+            city = str(item.get("city") or item.get("county") or item.get("locationName") or item.get("name") or "")
+            district = str(item.get("district") or item.get("town") or "")
+            if city or district:
+                areas.append({"city": city, "district": district})
+        elif item:
+            text = str(item)
+            areas.append({"city": text, "district": ""})
+
+    if not areas:
+        raw_payload = alert.get("raw_payload") or {}
+        if isinstance(raw_payload, dict):
+            location = raw_payload.get("location") or {}
+            if isinstance(location, dict):
+                location_name = str(location.get("locationName") or location.get("LocationName") or "")
+                if location_name:
+                    areas.append({"city": location_name, "district": ""})
+
+    legacy_city = str(alert.get("city") or "")
+    legacy_district = str(alert.get("district") or "")
+    if legacy_city and not any(area.get("city") == legacy_city and area.get("district") == legacy_district for area in areas):
+        areas.append({"city": legacy_city, "district": legacy_district})
+    return areas
+
+
+def _alert_matches_location(alert: Dict[str, Any], city: Optional[str] = None, district: Optional[str] = None) -> bool:
+    if not city and not district:
+        return True
+    city = city or ""
+    district = district or ""
+    areas = _affected_areas(alert)
+    haystack = " ".join(
+        [
+            str(alert.get("title") or ""),
+            str(alert.get("description") or ""),
+            str(alert.get("raw_payload") or ""),
+            " ".join(f"{area.get('city', '')}{area.get('district', '')}" for area in areas),
+        ]
+    )
+    if city and not any(city in (area.get("city") or "") or city in haystack for area in areas or [{}]):
+        return False
+    if district and not any(
+        not (area.get("district") or "") or district in (area.get("district") or "") or district in haystack
+        for area in areas or [{}]
+    ):
+        return False
+    return True
+
+
+def normalize_disaster_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
+    areas = _affected_areas(alert)
+    primary = areas[0] if areas else {}
+    return {
+        **alert,
+        "affected_areas": areas,
+        "city": alert.get("city") or primary.get("city") or "",
+        "district": alert.get("district") or primary.get("district") or "",
+        "starts_at": alert.get("starts_at") or alert.get("started_at") or "",
+    }
+
+
 def get_active_disaster_alerts(city: Optional[str] = None, district: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
     now = taipei_now().isoformat()
     try:
+        fetch_limit = min(max(limit * 5, limit, 50), 500) if (city or district) else limit
         query = (
             supabase.table("disaster_alerts")
             .select("*")
             .gte("expires_at", now)
             .order("severity", desc=True)
-            .order("started_at", desc=True)
-            .limit(limit)
+            .order("starts_at", desc=True)
+            .limit(fetch_limit)
         )
-        if city:
-            query = query.eq("city", city)
-        if district:
-            query = query.or_(f"district.eq.{district},district.eq.")
         res = query.execute()
-        return safe_response("success", res.data or [], "active disaster alerts loaded", "disaster_alerts")
+        alerts = [normalize_disaster_alert(item) for item in (res.data or [])]
+        if city or district:
+            alerts = [alert for alert in alerts if _alert_matches_location(alert, city, district)]
+        return safe_response("success", alerts[:limit], "active disaster alerts loaded", "disaster_alerts")
     except Exception as e:
         return safe_response("error", [], str(e), "disaster_alerts", [{"service": "supabase", "message": str(e)}])
 
