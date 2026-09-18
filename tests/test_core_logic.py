@@ -166,6 +166,11 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(parts["city"], "臺南市")
         self.assertEqual(parts["district"], "")
 
+    def test_location_resolver_does_not_default_empty_event_to_taipei(self):
+        parts = resolve_event_location_parts({"title": "沒有地點的行程"})
+        self.assertEqual(parts["city"], "")
+        self.assertEqual(parts["district"], "")
+
     def test_chat_local_fallback_answers_disaster_qa(self):
         body = build_local_fallback("test-user", "地震來的時候應該怎麼辦")
         self.assertEqual(body["action_type"], "DISASTER_GUIDE")
