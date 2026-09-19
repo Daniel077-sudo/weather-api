@@ -5,7 +5,8 @@ from typing import Any, Dict, List
 
 import httpx
 
-from config import GEMINI_API_KEY, supabase
+from config import GEMINI_API_KEY, GEMINI_TIMEOUT_SECONDS, GEMINI_VISION_TIMEOUT_SECONDS, supabase
+from timing_service import add_timing, set_timing, timed
 from utils import stable_hash, taipei_now
 
 
@@ -64,6 +65,7 @@ async def call_gemini_raw(prompt: str):
         return ""
 
     model = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+    set_timing("gemini_model", model)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -72,7 +74,7 @@ async def call_gemini_raw(prompt: str):
     }
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=payload, timeout=30.0)
+            response = await client.post(url, headers=headers, json=payload, timeout=GEMINI_TIMEOUT_SECONDS)
             response.raise_for_status()
             res_json = response.json()
             if 'candidates' in res_json and len(res_json['candidates']) > 0:
@@ -120,7 +122,8 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
     gemini_configured = bool(GEMINI_API_KEY)
 
     try:
-        cached = supabase.table("ai_suggestion_cache").select("response").eq("cache_key", cache_key).limit(1).execute()
+        with timed("gemini_cache_read_ms"):
+            cached = supabase.table("ai_suggestion_cache").select("response").eq("cache_key", cache_key).limit(1).execute()
         if cached.data:
             response = cached.data[0].get("response") or {}
             if isinstance(response, dict):
@@ -144,7 +147,9 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
             "gemini_error": "missing_api_key",
         }
 
-    text = await call_gemini_raw(prompt)
+    add_timing("gemini_call_count", 1)
+    with timed("gemini_ms"):
+        text = await call_gemini_raw(prompt)
     parsed = parse_json_object(text)
     if not parsed:
         error = "empty_response" if not text else "invalid_json_or_api_error"
@@ -170,14 +175,15 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
         "gemini_error": "",
     }
     try:
-        supabase.table("ai_suggestion_cache").upsert({
-            "cache_key": cache_key,
-            "prompt_type": prompt_type,
-            "subject": cache_subject,
-            "context_hash": stable_hash(context),
-            "response": response,
-            "created_at": taipei_now().isoformat(),
-        }, on_conflict="cache_key").execute()
+        with timed("gemini_cache_write_ms"):
+            supabase.table("ai_suggestion_cache").upsert({
+                "cache_key": cache_key,
+                "prompt_type": prompt_type,
+                "subject": cache_subject,
+                "context_hash": stable_hash(context),
+                "response": response,
+                "created_at": taipei_now().isoformat(),
+            }, on_conflict="cache_key").execute()
     except Exception:
         pass
     return response
@@ -207,7 +213,7 @@ async def call_gemini_vision(image_bytes: bytes, mime_type: str, prompt: str) ->
     }
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=45.0)
+            response = await client.post(url, json=payload, timeout=GEMINI_VISION_TIMEOUT_SECONDS)
             response.raise_for_status()
             res_json = response.json()
             text = res_json.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")

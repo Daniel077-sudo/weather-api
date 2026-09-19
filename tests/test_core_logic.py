@@ -14,7 +14,7 @@ import auth
 import disaster_service
 import event_service
 import main
-from chat_service import CHAT_LOGS_TABLE, build_local_fallback, normalize_chat_response
+from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_clarify_response, build_local_fallback, normalize_chat_response, prepare_chat_response
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
@@ -145,6 +145,28 @@ class CoreLogicTests(unittest.TestCase):
             self.assertTrue(body["event_title"])
             self.assertIn("+08:00", body["event_start"])
             self.assertIn("+08:00", body["event_end"])
+
+    def test_api_chat_includes_timing_contract(self):
+        client = TestClient(main.app)
+        response = client.post(
+            "/api/chat",
+            json={"user_id": "timing-user", "message": "來一個防災小遊戲"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("x-process-time", response.headers)
+        body = response.json()
+        self.assertIn("timing", body)
+        self.assertIn("total_ms", body["timing"])
+
+    def test_chat_deferred_persist_keeps_pending_event_available(self):
+        user_id = "pending-user"
+        LOCAL_PENDING_EVENTS.pop(user_id, None)
+        clarify = build_clarify_response({"event_title": "爬山"}, ["location"])
+        response = prepare_chat_response(user_id, "我禮拜六想去爬山", clarify, defer_persist=True)
+        self.assertEqual(response["action_type"], "CLARIFY")
+        self.assertIn(user_id, LOCAL_PENDING_EVENTS)
+        self.assertIn("_persist_chat_turn", response)
+        LOCAL_PENDING_EVENTS.pop(user_id, None)
 
     def test_chat_local_fallback_detects_complete_event(self):
         body = build_local_fallback("test-user", "明天下午三點我要去台南市東區的公園跑步")

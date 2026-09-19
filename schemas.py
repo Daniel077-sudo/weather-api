@@ -56,6 +56,7 @@ class ChatCommandResponse(BaseModel):
     event_district: str = ""
     event_location: str = ""
     event_id_to_delete: str = ""
+    timing: Dict[str, Any] = Field(default_factory=dict)
 
 
 class EventCreate(BaseModel):

@@ -10,6 +10,7 @@ from data import GAME_QUESTIONS, TAIWAN_LOCATIONS
 from disaster_service import get_active_disaster_alerts
 from event_service import create_memory_event, enrich_event_payload_with_risk, normalize_event, persist_event_risk_fields
 from gemini_service import call_gemini_json_cached
+from timing_service import timed
 from utils import parse_datetime, safe_response, taipei_now
 from weather_service import build_weather_snapshot, build_weather_suggestion, resolve_event_location_parts
 
@@ -183,7 +184,8 @@ def get_user_memory(user_id: str) -> Dict[str, Any]:
     if not user_id:
         return {"memory_markdown": "", "summary_json": {}}
     try:
-        res = supabase.table("user_memory_profiles").select("*").eq("user_id", user_id).limit(1).execute()
+        with timed("db_ms"):
+            res = supabase.table("user_memory_profiles").select("*").eq("user_id", user_id).limit(1).execute()
         if res.data:
             return res.data[0]
     except Exception:
@@ -240,15 +242,16 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
         "created_at": now,
     }
     try:
-        supabase.table(CHAT_LOGS_TABLE).insert({
-            "user_id": user_id,
-            "role": "user",
-            "content": message,
-            "user_input": message,
-            "ai_response": "",
-            "created_at": now,
-        }).execute()
-        supabase.table(CHAT_LOGS_TABLE).insert(assistant_payload).execute()
+        with timed("memory_persist_ms"):
+            supabase.table(CHAT_LOGS_TABLE).insert({
+                "user_id": user_id,
+                "role": "user",
+                "content": message,
+                "user_input": message,
+                "ai_response": "",
+                "created_at": now,
+            }).execute()
+            supabase.table(CHAT_LOGS_TABLE).insert(assistant_payload).execute()
     except Exception:
         try:
             supabase.table(CHAT_LOGS_TABLE).insert({
@@ -259,23 +262,24 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
             pass
 
     try:
-        current_memory = get_user_memory(user_id)
-        memory_markdown = compact_memory(current_memory.get("memory_markdown") or "", message, response)
-        summary_json = {
-            "last_action_type": response.get("action_type") or "NONE",
-            "last_event_title": response.get("event_title") or "",
-            "last_event_start": response.get("event_start") or "",
-            "last_has_alert": bool(response.get("has_alert")),
-            "last_alert_title": response.get("alert_title") or "",
-            "pending_event": response.get("pending_event") if response.get("action_type") == "CLARIFY" else None,
-        }
-        supabase.table("user_memory_profiles").upsert({
-            "user_id": user_id,
-            "memory_markdown": memory_markdown,
-            "summary_json": summary_json,
-            "last_interaction_at": now,
-            "updated_at": now,
-        }, on_conflict="user_id").execute()
+        with timed("memory_persist_ms"):
+            current_memory = get_user_memory(user_id)
+            memory_markdown = compact_memory(current_memory.get("memory_markdown") or "", message, response)
+            summary_json = {
+                "last_action_type": response.get("action_type") or "NONE",
+                "last_event_title": response.get("event_title") or "",
+                "last_event_start": response.get("event_start") or "",
+                "last_has_alert": bool(response.get("has_alert")),
+                "last_alert_title": response.get("alert_title") or "",
+                "pending_event": response.get("pending_event") if response.get("action_type") == "CLARIFY" else None,
+            }
+            supabase.table("user_memory_profiles").upsert({
+                "user_id": user_id,
+                "memory_markdown": memory_markdown,
+                "summary_json": summary_json,
+                "last_interaction_at": now,
+                "updated_at": now,
+            }, on_conflict="user_id").execute()
     except Exception:
         pass
 
@@ -1066,33 +1070,34 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         print(f"聊天建立行程天氣查詢失敗: {e}")
 
     try:
-        duplicate_query = supabase.table("events").select("*").eq("title", event_payload["title"]).eq("start_time", event_payload["start_time"]).limit(1)
-        if event_payload.get("user_id"):
-            duplicate_query = duplicate_query.eq("user_id", event_payload["user_id"])
-        duplicate = duplicate_query.execute()
-        if duplicate.data:
-            res = duplicate
-        else:
-            try:
-                res = supabase.table("events").insert(event_payload).execute()
-            except Exception:
-                event_payload["location_name"] = event_payload.get("location")
-                compatible_keys = {
-                    "user_id", "city", "district", "title", "start_time", "end_time",
-                    "location_name", "has_weather_risk", "ai_suggestion",
-                    "risk_level", "risk_tags", "recommended_action", "weather_snapshot",
-                    "weather_checked_at", "weather_alert_status", "external_source",
-                }
-                compatible_payload = {key: value for key, value in event_payload.items() if key in compatible_keys}
+        with timed("db_ms"):
+            duplicate_query = supabase.table("events").select("*").eq("title", event_payload["title"]).eq("start_time", event_payload["start_time"]).limit(1)
+            if event_payload.get("user_id"):
+                duplicate_query = duplicate_query.eq("user_id", event_payload["user_id"])
+            duplicate = duplicate_query.execute()
+            if duplicate.data:
+                res = duplicate
+            else:
                 try:
-                    res = supabase.table("events").insert(compatible_payload).execute()
+                    res = supabase.table("events").insert(event_payload).execute()
                 except Exception:
-                    legacy_keys = {
-                        "user_id", "title", "start_time", "end_time",
-                        "location_name", "has_weather_risk", "ai_suggestion", "external_source",
+                    event_payload["location_name"] = event_payload.get("location")
+                    compatible_keys = {
+                        "user_id", "city", "district", "title", "start_time", "end_time",
+                        "location_name", "has_weather_risk", "ai_suggestion",
+                        "risk_level", "risk_tags", "recommended_action", "weather_snapshot",
+                        "weather_checked_at", "weather_alert_status", "external_source",
                     }
-                    legacy_payload = {key: value for key, value in event_payload.items() if key in legacy_keys}
-                    res = supabase.table("events").insert(legacy_payload).execute()
+                    compatible_payload = {key: value for key, value in event_payload.items() if key in compatible_keys}
+                    try:
+                        res = supabase.table("events").insert(compatible_payload).execute()
+                    except Exception:
+                        legacy_keys = {
+                            "user_id", "title", "start_time", "end_time",
+                            "location_name", "has_weather_risk", "ai_suggestion", "external_source",
+                        }
+                        legacy_payload = {key: value for key, value in event_payload.items() if key in legacy_keys}
+                        res = supabase.table("events").insert(legacy_payload).execute()
     except Exception:
         memory_payload = {**event_payload, "user_id": user_id or None}
         created = normalize_event(create_memory_event(memory_payload))
@@ -1127,7 +1132,8 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         }
 
     created_row = res.data[0] if res.data else event_payload
-    persisted_risk = persist_event_risk_fields(created_row.get("id"), event_payload)
+    with timed("db_ms"):
+        persisted_risk = persist_event_risk_fields(created_row.get("id"), event_payload)
     created = normalize_event({**created_row, **event_payload, **persisted_risk})
     reply = f"已幫你加入行程到行事曆了：{created.get('title')}。{weather_text}"
     created_city = created.get("city") or event_payload.get("city") or ""
@@ -1342,28 +1348,52 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
     return normalize_chat_response(parsed, fallback)
 
 
-async def build_chat_command(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
+def prepare_chat_response(
+    user_id: str,
+    message: str,
+    response: Dict[str, Any],
+    defer_persist: bool = False,
+) -> Dict[str, Any]:
+    if defer_persist:
+        if user_id:
+            if response.get("action_type") == "CLARIFY" and response.get("pending_event"):
+                LOCAL_PENDING_EVENTS[user_id] = response["pending_event"]
+            else:
+                LOCAL_PENDING_EVENTS.pop(user_id, None)
+        return {
+            **response,
+            "_persist_chat_turn": {
+                "user_id": user_id,
+                "message": message,
+            },
+        }
+    persist_chat_turn(user_id, message, response)
+    return response
+
+
+async def build_chat_command(
+    user_id: str,
+    message: str,
+    current_location: Optional[str] = None,
+    defer_persist: bool = False,
+) -> Dict[str, Any]:
     normalized = normalize_text(message)
 
     if has_game_hint(normalized):
         response = build_game_start_response(normalized)
-        persist_chat_turn(user_id, normalized, response)
-        return response
+        return prepare_chat_response(user_id, normalized, response, defer_persist)
 
     disaster_guide = build_disaster_guide_response(normalized)
     if disaster_guide:
-        persist_chat_turn(user_id, normalized, disaster_guide)
-        return disaster_guide
+        return prepare_chat_response(user_id, normalized, disaster_guide, defer_persist)
 
     if has_update_event_hint(normalized):
         response = await update_event_from_chat(user_id, normalized, current_location)
-        persist_chat_turn(user_id, normalized, response)
-        return response
+        return prepare_chat_response(user_id, normalized, response, defer_persist)
 
     if is_weather_question(normalized) or (has_weather_query_hint(normalized) and infer_action_type(normalized) == "NONE"):
         response = await build_weather_query_response(normalized, current_location)
-        persist_chat_turn(user_id, normalized, response)
-        return response
+        return prepare_chat_response(user_id, normalized, response, defer_persist)
 
     fallback = build_local_fallback(user_id, normalized, current_location)
     response = await parse_chat_with_gemini(user_id, normalized, fallback)
@@ -1392,5 +1422,4 @@ async def build_chat_command(user_id: str, message: str, current_location: Optio
         else:
             response = await create_event_from_chat(user_id, slots)
 
-    persist_chat_turn(user_id, normalized, response)
-    return response
+    return prepare_chat_response(user_id, normalized, response, defer_persist)
