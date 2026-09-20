@@ -39,7 +39,7 @@ LOCAL_PENDING_EVENTS: Dict[str, Dict[str, Any]] = {}
 LOCAL_CHAT_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
 TIME_HINTS = ["今天", "明天", "後天", "下週", "下周", "下星期", "週末", "周末", "星期", "禮拜", "上午", "早上", "下午", "晚上", "中午", "點"]
 GO_HINTS = ["要去", "我要去", "會去", "去", "前往", "到"]
-ACTIVITY_HINTS = ["跑步", "游泳", "遊泳", "打球", "爬山", "露營", "開會", "上課", "買菜", "看診", "旅遊", "出遊", "考試", "聚餐", "通勤"]
+ACTIVITY_HINTS = ["跑步", "路跑", "運動", "游泳", "遊泳", "打球", "爬山", "露營", "開會", "上課", "買菜", "看診", "旅遊", "出遊", "玩", "考試", "聚餐", "通勤", "溪邊"]
 WEATHER_QUERY_HINTS = ["會下雨", "天氣", "氣溫", "降雨", "熱不熱", "冷不冷", "適合去", "適合騎車", "適合出門"]
 GAME_HINTS = ["小遊戲", "遊戲", "測驗", "quiz", "答題"]
 UPDATE_EVENT_HINTS = ["改成", "改到", "改為", "改一下", "更新行程", "修改行程", "地點改", "時間改"]
@@ -265,10 +265,11 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
         with timed("memory_persist_ms"):
             current_memory = get_user_memory(user_id)
             memory_markdown = compact_memory(current_memory.get("memory_markdown") or "", message, response)
+            event_memory_allowed = response.get("action_type") not in {"CREATE_EVENT", "ADD_EVENT"}
             summary_json = {
                 "last_action_type": response.get("action_type") or "NONE",
-                "last_event_title": response.get("event_title") or "",
-                "last_event_start": response.get("event_start") or "",
+                "last_event_title": response.get("event_title") if event_memory_allowed else "",
+                "last_event_start": response.get("event_start") if event_memory_allowed else "",
                 "last_has_alert": bool(response.get("has_alert")),
                 "last_alert_title": response.get("alert_title") or "",
                 "pending_event": response.get("pending_event") if response.get("action_type") == "CLARIFY" else None,
@@ -490,6 +491,8 @@ def infer_action_type(message: str) -> str:
         return "DELETE_EVENT"
     if any(keyword in message for keyword in add_keywords):
         return "ADD_EVENT"
+    if has_destination_phrase(message):
+        return "ADD_EVENT"
     if has_destination_intent(message) and (has_location_hint(message) or has_activity_hint(message)):
         return "ADD_EVENT"
     if has_time_hint(message) and has_location_hint(message) and has_trip_or_activity_hint(message):
@@ -540,6 +543,8 @@ def infer_location(message: str) -> Dict[str, str]:
 def has_time_hint(message: str) -> bool:
     if any(hint in message for hint in TIME_HINTS):
         return True
+    if re.search(r"\d{1,2}\s*月\s*\d{1,2}\s*(?:日|號|号)?", message):
+        return True
     return bool(re.search(r"(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2}", message))
 
 
@@ -554,6 +559,10 @@ def has_trip_or_activity_hint(message: str) -> bool:
 
 def has_destination_intent(message: str) -> bool:
     return any(hint in message for hint in GO_HINTS)
+
+
+def has_destination_phrase(message: str) -> bool:
+    return bool(re.search(r"(?:要去|我要去|會去|前往|到|去)\s*[^，。！？\s]{2,}", message))
 
 
 def has_activity_hint(message: str) -> bool:
@@ -697,8 +706,19 @@ def infer_event_time(message: str, now: Optional[datetime] = None) -> Dict[str, 
         end = start + timedelta(hours=2) if start else None
         return {"event_start": taipei_iso(start), "event_end": taipei_iso(end)}
 
+    month_day_match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|號|号)?", message)
     weekday = parse_weekday_hint(message)
-    if weekday is not None:
+    if month_day_match:
+        month = int(month_day_match.group(1))
+        day = int(month_day_match.group(2))
+        year = base.year
+        try:
+            start = base.replace(year=year, month=month, day=day, hour=9, minute=0, second=0, microsecond=0)
+            if start < base - timedelta(days=1):
+                start = start.replace(year=year + 1)
+        except ValueError:
+            start = (base + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    elif weekday is not None:
         start = next_weekday(base, weekday).replace(hour=9, minute=0, second=0, microsecond=0)
     elif "週末" in message or "周末" in message:
         saturday = next_weekday(base, 5).replace(hour=9, minute=0, second=0, microsecond=0)
@@ -735,6 +755,7 @@ def infer_event_title(message: str, action_type: str) -> str:
     text = normalize_text(message)
     for token in ["幫我", "請", "新增", "加入", "排入", "安排", "建立", "行程", "一個", "一筆", "一項", "我", "想要", "想"]:
         text = text.replace(token, " ")
+    text = re.sub(r"(\d{1,2}\s*月\s*\d{1,2}\s*(?:日|號|号)?)", " ", text)
     text = re.sub(r"(今天|明天|後天|下週|下周|下星期|這週末|本週末|週末|周末|星期[一二三四五六日天]|禮拜[一二三四五六日天]|週[一二三四五六日天]|周[一二三四五六日天]|上午|早上|下午|晚上|中午|(\d{1,2}|十[一二]?|[一二兩三四五六七八九])\s*[點:：]\s*\d{0,2})", " ", text)
     location = infer_location(message)
     normalized_city = (location.get("city") or "").replace("臺", "台")
@@ -749,6 +770,12 @@ def infer_event_title(message: str, action_type: str) -> str:
         "臺南市",
         "台南",
         "臺南",
+        "高雄市",
+        "高雄",
+        "臺中市",
+        "台中市",
+        "臺中",
+        "台中",
         "的公園",
         "公園",
     ]:
@@ -959,15 +986,15 @@ def infer_event_slots(message: str, pending: Optional[Dict[str, Any]] = None) ->
         event_start = event_time["event_start"]
         event_end = event_time["event_end"]
 
-    event_city = pending.get("event_city") or location.get("city") or ""
-    event_district = pending.get("event_district") or location.get("district") or ""
+    event_city = location.get("city") or pending.get("event_city") or ""
+    event_district = location.get("district") or pending.get("event_district") or ""
     event_location = pending.get("event_location") or "".join(part for part in [event_city, event_district] if part)
-    if not event_location and location.get("city"):
+    if location.get("city"):
         event_location = "".join(part for part in [location.get("city"), location.get("district")] if part)
 
-    event_title = pending.get("event_title") or ""
     inferred_title = infer_event_title(message, action_type)
-    if not event_title and inferred_title and inferred_title != "新行程":
+    event_title = pending.get("event_title") or ""
+    if inferred_title and inferred_title != "新行程":
         event_title = inferred_title
 
     return {
@@ -978,6 +1005,14 @@ def infer_event_slots(message: str, pending: Optional[Dict[str, Any]] = None) ->
         "event_district": event_district,
         "event_location": event_location,
     }
+
+
+def should_start_new_event_over_pending(message: str) -> bool:
+    return bool(
+        has_time_hint(message)
+        and (has_location_hint(message) or infer_location(message).get("city"))
+        and (has_activity_hint(message) or has_destination_phrase(message))
+    )
 
 
 def missing_event_slots(slots: Dict[str, Any]) -> List[str]:
@@ -1025,7 +1060,17 @@ def build_clarify_response(slots: Dict[str, Any], missing: List[str]) -> Dict[st
     }
 
 
-async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[str, Any]:
+async def refresh_event_risk_background(event_id: Any, event_payload: Dict[str, Any]) -> None:
+    if not event_id:
+        return
+    try:
+        enriched = await enrich_event_payload_with_risk(dict(event_payload), log_prefix="聊天建立行程背景風險")
+        persist_event_risk_fields(event_id, enriched)
+    except Exception as e:
+        print(f"聊天建立行程背景風險更新失敗: {e}")
+
+
+async def create_event_from_chat(user_id: str, slots: Dict[str, Any], defer_risk: bool = False) -> Dict[str, Any]:
     missing = missing_event_slots(slots)
     if missing:
         return build_clarify_response(slots, missing)
@@ -1046,28 +1091,38 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
     event_payload["location"] = event_payload.get("location") or f"{event_payload['city']}{event_payload['district']}"
 
     weather_summary: Dict[str, Any] = {}
-    weather_text = "目前天氣資料暫時無法取得，已先建立行程。"
-    try:
-        event_payload = await enrich_event_payload_with_risk(event_payload, log_prefix="聊天建立行程")
-        snapshot = event_payload.get("weather_snapshot") or {}
-        weather = snapshot.get("weather") or {}
-        weather_summary = {
-            "temp": weather.get("temp"),
-            "pop": weather.get("pop"),
-            "wx": weather.get("description") or weather.get("wx") or "未知",
-            "risk_level": event_payload.get("risk_level") or "low",
-            "risk_tags": event_payload.get("risk_tags") or [],
-            "has_weather_risk": bool(event_payload.get("has_weather_risk")),
-        }
-        weather_text = f"那天{event_payload['city']}{event_payload['district']}天氣「{weather.get('description', '未知')}」。{event_payload.get('ai_suggestion') or event_payload.get('recommended_action') or ''}"
-    except Exception as e:
+    weather_text = "天氣風險正在背景檢查，完成後會更新行程風險標記。"
+    if defer_risk:
         event_payload["has_weather_risk"] = False
         event_payload["risk_level"] = "low"
         event_payload["risk_tags"] = []
-        event_payload["weather_alert_status"] = "weather_update_failed"
+        event_payload["weather_alert_status"] = "pending"
         event_payload["ai_suggestion"] = weather_text
         event_payload["recommended_action"] = weather_text
-        print(f"聊天建立行程天氣查詢失敗: {e}")
+        weather_summary = {"risk_level": "low", "risk_tags": [], "has_weather_risk": False, "status": "pending"}
+    else:
+        try:
+            event_payload = await enrich_event_payload_with_risk(event_payload, log_prefix="聊天建立行程")
+            snapshot = event_payload.get("weather_snapshot") or {}
+            weather = snapshot.get("weather") or {}
+            weather_summary = {
+                "temp": weather.get("temp"),
+                "pop": weather.get("pop"),
+                "wx": weather.get("description") or weather.get("wx") or "未知",
+                "risk_level": event_payload.get("risk_level") or "low",
+                "risk_tags": event_payload.get("risk_tags") or [],
+                "has_weather_risk": bool(event_payload.get("has_weather_risk")),
+            }
+            weather_text = f"那天{event_payload['city']}{event_payload['district']}天氣「{weather.get('description', '未知')}」。{event_payload.get('ai_suggestion') or event_payload.get('recommended_action') or ''}"
+        except Exception as e:
+            event_payload["has_weather_risk"] = False
+            event_payload["risk_level"] = "low"
+            event_payload["risk_tags"] = []
+            event_payload["weather_alert_status"] = "weather_update_failed"
+            event_payload["ai_suggestion"] = "目前天氣資料暫時無法取得，已先建立行程。"
+            event_payload["recommended_action"] = event_payload["ai_suggestion"]
+            weather_text = event_payload["ai_suggestion"]
+            print(f"聊天建立行程天氣查詢失敗: {e}")
 
     try:
         with timed("db_ms"):
@@ -1132,8 +1187,10 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         }
 
     created_row = res.data[0] if res.data else event_payload
-    with timed("db_ms"):
-        persisted_risk = persist_event_risk_fields(created_row.get("id"), event_payload)
+    persisted_risk = {}
+    if not defer_risk:
+        with timed("db_ms"):
+            persisted_risk = persist_event_risk_fields(created_row.get("id"), event_payload)
     created = normalize_event({**created_row, **event_payload, **persisted_risk})
     reply = f"已幫你加入行程到行事曆了：{created.get('title')}。{weather_text}"
     created_city = created.get("city") or event_payload.get("city") or ""
@@ -1150,7 +1207,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         "has_weather_risk": bool(created.get("has_weather_risk") or event_payload.get("has_weather_risk") or False),
         "risk_level": created.get("risk_level") or event_payload.get("risk_level") or "low",
     }
-    return {
+    response = {
         **empty_chat_response(reply),
         "action_type": "CREATE_EVENT",
         "event_created": event_created,
@@ -1164,6 +1221,12 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any]) -> Dict[st
         "event_location": created_location,
         "pending_event": None,
     }
+    if defer_risk and created.get("id"):
+        response["_refresh_event_risk"] = {
+            "event_id": created.get("id"),
+            "event_payload": {**event_payload, "id": created.get("id")},
+        }
+    return response
 
 
 def build_local_fallback(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
@@ -1175,6 +1238,9 @@ def build_local_fallback(user_id: str, message: str, current_location: Optional[
         return build_game_start_response(message)
 
     pending = get_pending_event(user_id)
+    if pending and should_start_new_event_over_pending(message):
+        LOCAL_PENDING_EVENTS.pop(user_id, None)
+        pending = {}
     if pending:
         if current_location and not (pending.get("event_city") or pending.get("event_location")) and not has_location_hint(message) and not has_destination_intent(message):
             current_parts = infer_location(current_location)
@@ -1317,7 +1383,8 @@ def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Di
 async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
     now = taipei_now()
     memory = get_user_memory(user_id)
-    memory_markdown = memory.get("memory_markdown") or ""
+    summary_json = memory.get("summary_json") or {}
+    pending_event = summary_json.get("pending_event") if isinstance(summary_json, dict) else None
     training_prompt = xiaolan_training_prompt()
     prompt = (
         "你是 FastAPI 後端的行事曆、天氣與災防助理解析器。請只回傳 JSON object，不要 markdown。\n"
@@ -1325,6 +1392,7 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
         "任務：解析使用者是否要新增行程、刪除行程，或只是一般聊天。\n"
         "action_type 只能是 ADD_EVENT、UPDATE_EVENT、DELETE_EVENT、WEATHER_QUERY、DISASTER_GUIDE、GAME_START、CLARIFY、NONE。不要輸出 CREATE_EVENT 或 EVENT_SYNCED，CREATE_EVENT 由後端建立 DB 後產生。\n"
         "若 ADD_EVENT，請填 event_title、event_start、event_end、event_city、event_district、event_location。時間必須是 Asia/Taipei 的 ISO8601，例如 2026-07-25T09:00:00+08:00。\n"
+        "event_title 只能根據本次 message 擷取；除非本次 message 只是補 slot，否則不要沿用 pending_event 的舊標題。\n"
         "若缺少新增行程必填 slot，請輸出 CLARIFY，並填 missing_slots 與 clarify_slot。\n"
         "若使用者語句包含「去/到/前往 + 活動或地點」，即使缺時間或缺地點，也要回 CLARIFY，不要回 NONE。\n"
         "若 fallback_json 已經判斷 ADD_EVENT、CLARIFY、DELETE_EVENT、WEATHER_QUERY、DISASTER_GUIDE 或 GAME_START，除非明顯錯誤，請沿用該 action_type。\n"
@@ -1334,7 +1402,7 @@ async def parse_chat_with_gemini(user_id: str, message: str, fallback: Dict[str,
         "必須包含欄位：status, reply, has_alert, alert_title, alert_url, action_type, missing_slots, clarify_slot, event_created, event_updated, weather_summary, guideline, game, assistant_alerts, event_title, event_start, event_end, event_id, event_city, event_district, event_location, event_id_to_delete。\n"
         f"現在時間 Asia/Taipei: {now.isoformat()}\n"
         f"user_id: {user_id}\n"
-        f"user_memory_markdown: {memory_markdown}\n"
+        f"pending_event_json: {pending_event or {}}\n"
         f"message: {message}\n"
         f"fallback_json: {fallback}"
     )
@@ -1420,6 +1488,6 @@ async def build_chat_command(
         if missing:
             response = build_clarify_response(slots, missing)
         else:
-            response = await create_event_from_chat(user_id, slots)
+            response = await create_event_from_chat(user_id, slots, defer_risk=defer_persist)
 
     return prepare_chat_response(user_id, normalized, response, defer_persist)

@@ -175,6 +175,37 @@ class CoreLogicTests(unittest.TestCase):
         self.assertIn("+08:00", body["event_start"])
         self.assertIn("15:00:00", body["event_start"])
 
+    def test_chat_detects_absolute_date_event(self):
+        body = build_local_fallback("absolute-date-user", "9月12號早上十點高雄前鎮區路跑")
+        self.assertEqual(body["action_type"], "ADD_EVENT")
+        self.assertEqual(body["event_title"], "路跑")
+        self.assertEqual(body["event_city"], "高雄市")
+        self.assertEqual(body["event_district"], "前鎮區")
+        self.assertIn("10:00:00", body["event_start"])
+
+    def test_chat_clarifies_destination_phrase_without_history(self):
+        body = build_local_fallback("creek-user", "我要去溪邊")
+        self.assertEqual(body["action_type"], "CLARIFY")
+        self.assertIn("time", body["missing_slots"])
+        self.assertTrue(body["event_title"])
+
+    def test_chat_new_complete_message_ignores_old_pending_title(self):
+        user_id = "pending-pollution-user"
+        LOCAL_PENDING_EVENTS[user_id] = {
+            "event_title": "墾丁玩",
+            "event_city": "屏東縣",
+            "event_district": "恆春鎮",
+            "event_location": "屏東縣恆春鎮",
+        }
+        try:
+            body = build_local_fallback(user_id, "明天早上八點台中西屯區運動")
+            self.assertEqual(body["action_type"], "ADD_EVENT")
+            self.assertEqual(body["event_title"], "運動")
+            self.assertEqual(body["event_city"], "臺中市")
+            self.assertEqual(body["event_district"], "西屯區")
+        finally:
+            LOCAL_PENDING_EVENTS.pop(user_id, None)
+
     def test_chat_clarifies_city_only_event_location(self):
         body = build_local_fallback("test-user", "我明天下午三點要去台南爬山")
         self.assertEqual(body["action_type"], "CLARIFY")
