@@ -14,7 +14,7 @@ import auth
 import disaster_service
 import event_service
 import main
-from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_clarify_response, build_local_fallback, normalize_chat_response, prepare_chat_response
+from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_clarify_response, build_local_fallback, create_event_from_chat, normalize_chat_response, prepare_chat_response, sanitize_event_title
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
@@ -182,6 +182,66 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(body["event_city"], "高雄市")
         self.assertEqual(body["event_district"], "前鎮區")
         self.assertIn("10:00:00", body["event_start"])
+
+    def test_event_title_sanitizer_removes_quotes_and_spaces(self):
+        self.assertEqual(sanitize_event_title(" 「 路跑 」 "), "路跑")
+        fallback = {"action_type": "ADD_EVENT", "event_title": "「 路跑 」", "event_start": "2027-09-12T10:00:00+08:00", "event_end": "2027-09-12T12:00:00+08:00"}
+        body = normalize_chat_response({"action_type": "ADD_EVENT", "event_title": " 「 路跑 」 "}, fallback)
+        self.assertEqual(body["event_title"], "路跑")
+
+    def test_chat_create_event_reply_includes_year(self):
+        inserted_payloads = []
+
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def __init__(self, action, payload=None):
+                self.action = action
+                self.payload = payload or {}
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def insert(self, payload):
+                return FakeQuery("insert", payload)
+
+            def execute(self):
+                if self.action == "insert":
+                    inserted_payloads.append(dict(self.payload))
+                    return FakeResult([{**self.payload, "id": 999}])
+                return FakeResult([])
+
+        class FakeSupabase:
+            def table(self, _table_name):
+                return FakeQuery("select")
+
+        import chat_service
+
+        original_supabase = chat_service.supabase
+        try:
+            chat_service.supabase = FakeSupabase()
+            response = asyncio.run(create_event_from_chat("not-a-uuid", {
+                "event_title": " 「 路跑 」 ",
+                "event_start": "2027-09-12T10:00:00+08:00",
+                "event_end": "2027-09-12T12:00:00+08:00",
+                "event_city": "高雄市",
+                "event_district": "前鎮區",
+                "event_location": "高雄市前鎮區",
+            }, defer_risk=True))
+            self.assertEqual(response["action_type"], "CREATE_EVENT")
+            self.assertEqual(inserted_payloads[0]["title"], "路跑")
+            self.assertEqual(response["event_title"], "路跑")
+            self.assertIn("2027-09-12 10:00", response["reply"])
+        finally:
+            chat_service.supabase = original_supabase
 
     def test_chat_clarifies_destination_phrase_without_history(self):
         body = build_local_fallback("creek-user", "我要去溪邊")

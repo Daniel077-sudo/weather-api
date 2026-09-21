@@ -461,6 +461,23 @@ def ensure_taipei_iso(value: Any) -> str:
     return taipei_iso(parsed) if parsed else str(value or "")
 
 
+def sanitize_event_title(value: Any) -> str:
+    title = normalize_text(str(value or ""))
+    wrappers = set(" \t\r\n\"'`「」『』【】[]()（）")
+    while title and title[0] in wrappers:
+        title = title[1:]
+    while title and title[-1] in wrappers:
+        title = title[:-1]
+    return normalize_text(title) or "新行程"
+
+
+def format_event_time_for_reply(value: Any) -> str:
+    parsed = parse_datetime(str(value)) if value else None
+    if not parsed:
+        return str(value or "")
+    return parsed.astimezone(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+
+
 def next_weekday(now: datetime, weekday: int) -> datetime:
     days = (weekday - now.weekday()) % 7
     if days == 0:
@@ -789,7 +806,7 @@ def infer_event_title(message: str, action_type: str) -> str:
         if any(word in message for word in ["兩天一夜", "2天1夜", "週末", "周末"]):
             return "阿里山兩天一夜露營"
         return "阿里山露營"
-    return text or "新行程"
+    return sanitize_event_title(text)
 
 
 def find_event_id_to_delete(user_id: str, title: str) -> str:
@@ -1077,7 +1094,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any], defer_risk
 
     event_payload: Dict[str, Any] = {
         "user_id": db_user_id(user_id),
-        "title": slots.get("event_title") or "新行程",
+        "title": sanitize_event_title(slots.get("event_title") or "新行程"),
         "start_time": slots.get("event_start"),
         "end_time": slots.get("event_end"),
         "city": slots.get("event_city") or None,
@@ -1161,7 +1178,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any], defer_risk
         created_location = created.get("location") or event_payload.get("location") or ""
         event_created = {
             "id": str(created.get("id") or ""),
-            "title": created.get("title") or "",
+            "title": sanitize_event_title(created.get("title") or event_payload.get("title") or "新行程"),
             "start_time": ensure_taipei_iso(created.get("start_time")),
             "end_time": ensure_taipei_iso(created.get("end_time")),
             "city": created_city,
@@ -1171,7 +1188,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any], defer_risk
             "risk_level": created.get("risk_level") or event_payload.get("risk_level") or "low",
         }
         return {
-            **empty_chat_response(friendly_db_unavailable_reply(event_payload["title"])),
+            **empty_chat_response(friendly_db_unavailable_reply(event_created["title"])),
             "status": "partial_success",
             "action_type": "CREATE_EVENT",
             "event_created": event_created,
@@ -1192,13 +1209,16 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any], defer_risk
         with timed("db_ms"):
             persisted_risk = persist_event_risk_fields(created_row.get("id"), event_payload)
     created = normalize_event({**created_row, **event_payload, **persisted_risk})
-    reply = f"已幫你加入行程到行事曆了：{created.get('title')}。{weather_text}"
+    created_title = sanitize_event_title(created.get("title") or event_payload.get("title") or "新行程")
+    created_start_for_reply = format_event_time_for_reply(created.get("start_time") or event_payload.get("start_time"))
+    reply_subject = f"{created_start_for_reply} {created_title}".strip()
+    reply = f"已幫你加入行程到行事曆了：{reply_subject}。{weather_text}"
     created_city = created.get("city") or event_payload.get("city") or ""
     created_district = created.get("district") or event_payload.get("district") or ""
     created_location = created.get("location") or created.get("location_name") or event_payload.get("location") or ""
     event_created = {
         "id": str(created.get("id") or ""),
-        "title": created.get("title") or "",
+        "title": created_title,
         "start_time": ensure_taipei_iso(created.get("start_time")),
         "end_time": ensure_taipei_iso(created.get("end_time")),
         "city": created_city,
@@ -1213,7 +1233,7 @@ async def create_event_from_chat(user_id: str, slots: Dict[str, Any], defer_risk
         "event_created": event_created,
         "weather_summary": weather_summary,
         "event_id": str(created.get("id") or ""),
-        "event_title": created.get("title") or "",
+        "event_title": created_title,
         "event_start": event_created["start_time"],
         "event_end": event_created["end_time"],
         "event_city": created_city,
@@ -1332,6 +1352,9 @@ def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Di
     if fallback.get("action_type") in ["ADD_EVENT", "DELETE_EVENT", "CLARIFY"] and action_type == "NONE":
         action_type = fallback.get("action_type") or "NONE"
 
+    event_created = raw.get("event_created") or fallback.get("event_created") or {}
+    if isinstance(event_created, dict) and event_created.get("title"):
+        event_created = {**event_created, "title": sanitize_event_title(event_created.get("title"))}
     response = {
         "status": str(raw.get("status") or fallback.get("status") or "success"),
         "reply": str(raw.get("reply") or fallback.get("reply") or ""),
@@ -1341,13 +1364,13 @@ def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Di
         "action_type": action_type,
         "missing_slots": raw.get("missing_slots") or fallback.get("missing_slots") or [],
         "clarify_slot": str(raw.get("clarify_slot") or fallback.get("clarify_slot") or ""),
-        "event_created": raw.get("event_created") or fallback.get("event_created") or {},
+        "event_created": event_created,
         "event_updated": raw.get("event_updated") or fallback.get("event_updated") or {},
         "weather_summary": raw.get("weather_summary") or fallback.get("weather_summary") or {},
         "guideline": raw.get("guideline") or fallback.get("guideline") or {},
         "game": raw.get("game") or fallback.get("game") or {},
         "assistant_alerts": raw.get("assistant_alerts") or fallback.get("assistant_alerts") or [],
-        "event_title": str(raw.get("event_title") or fallback.get("event_title") or ""),
+        "event_title": sanitize_event_title(raw.get("event_title") or fallback.get("event_title") or "") if (raw.get("event_title") or fallback.get("event_title")) else "",
         "event_start": str(raw.get("event_start") or fallback.get("event_start") or ""),
         "event_end": str(raw.get("event_end") or fallback.get("event_end") or ""),
         "event_id": str(raw.get("event_id") or fallback.get("event_id") or ""),
@@ -1368,7 +1391,7 @@ def normalize_chat_response(raw: Dict[str, Any], fallback: Dict[str, Any]) -> Di
 
     if action_type == "ADD_EVENT" and (not response["event_title"] or not response["event_start"] or not response["event_end"]):
         response.update({
-            "event_title": fallback.get("event_title", ""),
+            "event_title": sanitize_event_title(fallback.get("event_title", "")) if fallback.get("event_title") else "",
             "event_start": fallback.get("event_start", ""),
             "event_end": fallback.get("event_end", ""),
             "event_city": fallback.get("event_city", ""),
