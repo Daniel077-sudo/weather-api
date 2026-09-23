@@ -842,6 +842,30 @@ def find_event_to_update(user_id: str, title: str = "") -> Dict[str, Any]:
         return {}
 
 
+def find_event_for_draft(user_id: str, title: str = "", target_start: str = "") -> Dict[str, Any]:
+    """Read-only lookup for confirmation cards; never falls back to an unrelated event."""
+    if not title and not target_start:
+        return {}
+    try:
+        query = supabase.table("events").select("*").order("start_time", desc=True).limit(50)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        rows = query.execute().data or []
+        target_dt = parse_datetime(target_start) if target_start else None
+        for row in rows:
+            row_title = str(row.get("title") or "")
+            if title and title not in row_title and row_title not in title:
+                continue
+            if target_dt:
+                row_dt = parse_datetime(row.get("start_time"))
+                if not row_dt or row_dt.astimezone(TAIPEI_TZ).date() != target_dt.astimezone(TAIPEI_TZ).date():
+                    continue
+            return row
+    except Exception:
+        pass
+    return {}
+
+
 async def update_event_from_chat(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
     title = infer_event_title(message, "ADD_EVENT")
     existing = find_event_to_update(user_id, title)

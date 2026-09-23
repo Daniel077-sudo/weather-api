@@ -20,6 +20,12 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     message: str
     current_location: Optional[str] = None
+    draft_mode: bool = False
+    contract_version: Optional[int] = None
+    client_now: Optional[str] = None
+    intent_hint: Optional[str] = None
+    draft_id: Optional[str] = None
+    draft_event: Optional[Dict[str, Any]] = None
 
 
 class ChatCommandResponse(BaseModel):
@@ -42,8 +48,8 @@ class ChatCommandResponse(BaseModel):
     ] = "NONE"
     missing_slots: List[str] = Field(default_factory=list)
     clarify_slot: str = ""
-    event_created: Dict[str, Any] = Field(default_factory=dict)
-    event_updated: Dict[str, Any] = Field(default_factory=dict)
+    event_created: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    event_updated: Optional[Dict[str, Any]] = Field(default_factory=dict)
     weather_summary: Dict[str, Any] = Field(default_factory=dict)
     guideline: Dict[str, Any] = Field(default_factory=dict)
     game: Dict[str, Any] = Field(default_factory=dict)
@@ -51,12 +57,31 @@ class ChatCommandResponse(BaseModel):
     event_title: str = ""
     event_start: str = ""
     event_end: str = ""
-    event_id: str = ""
+    event_id: Optional[str] = ""
     event_city: str = ""
     event_district: str = ""
     event_location: str = ""
-    event_id_to_delete: str = ""
+    event_id_to_delete: Optional[str] = ""
     timing: Dict[str, Any] = Field(default_factory=dict)
+    contract_version: Optional[int] = None
+    intent: Optional[Literal[
+        "CREATE_EVENT",
+        "UPDATE_EVENT",
+        "DELETE_EVENT",
+        "QUERY_EVENT",
+        "QUERY_WEATHER",
+        "EVENT_WEATHER",
+        "DISASTER_INFO",
+        "GENERAL_CHAT",
+    ]] = None
+    is_question: Optional[bool] = None
+    needs_clarification: Optional[bool] = None
+    missing_fields: Optional[List[Literal["title", "date", "start_time", "city", "district", "target"]]] = None
+    draft_id: Optional[str] = None
+    draft_event: Optional[Dict[str, Any]] = None
+    event_filter: Optional[Dict[str, Any]] = None
+    changes: Optional[Dict[str, Any]] = None
+    entities: Optional[Dict[str, Any]] = None
 
 
 class EventCreate(BaseModel):

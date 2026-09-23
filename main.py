@@ -13,7 +13,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, build_chat_command, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, persist_chat_turn, refresh_event_risk_background, reset_user_memory_response
+from chat_service import XIAOLAN_PERSONA, build_chat_command, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, persist_chat_turn, refresh_event_risk_background, reset_user_memory_response
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -21,6 +21,7 @@ from event_service import build_event_risk, create_memory_event, delete_memory_e
 from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from timing_service import get_timing, reset_timing, set_timing, start_timing
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
@@ -215,7 +216,53 @@ async def chat_command(
     timing_token = start_timing()
     try:
         user_id = resolve_user_id(auth, payload.user_id)
-        result = await build_chat_command(user_id, payload.message, payload.current_location, defer_persist=True)
+        if payload.contract_version == 2:
+            if not payload.client_now:
+                raise ValueError("client_now is required for contract_version 2")
+            result = build_chat_v2_response(payload.model_dump())
+            result.update({
+                "event_id": None,
+                "event_id_to_delete": None,
+                "event_created": None,
+                "event_updated": None,
+            })
+            result["action_type"] = {
+                "CREATE_EVENT": "CREATE_EVENT",
+                "UPDATE_EVENT": "UPDATE_EVENT",
+                "DELETE_EVENT": "DELETE_EVENT",
+                "QUERY_WEATHER": "WEATHER_QUERY",
+                "EVENT_WEATHER": "WEATHER_QUERY",
+                "DISASTER_INFO": "DISASTER_GUIDE",
+            }.get(result.get("intent"), "NONE")
+            result["_persist_chat_turn"] = {"user_id": user_id, "message": payload.message}
+        elif payload.draft_mode:
+            draft_payload = payload.model_dump()
+            draft_payload["contract_version"] = 2
+            draft_payload["client_now"] = payload.client_now or taipei_now().isoformat()
+            draft_result = build_chat_v2_response(draft_payload)
+            result = draft_to_legacy_response(draft_result)
+            if result.get("action_type") in {"DELETE_EVENT", "UPDATE_EVENT"}:
+                event_filter = draft_result.get("event_filter") or {}
+                lookup_start = ""
+                if event_filter.get("date"):
+                    lookup_start = f"{event_filter['date']}T{event_filter.get('time') or '00:00'}:00+08:00"
+                matched = find_event_for_draft(
+                    user_id,
+                    event_filter.get("title_keyword") or "",
+                    lookup_start,
+                )
+                if matched:
+                    result["event_title"] = str(matched.get("title") or result.get("event_title") or "")
+                    if result["action_type"] == "DELETE_EVENT":
+                        result["event_start"] = str(matched.get("start_time") or result.get("event_start") or "")
+                        result["event_id_to_delete"] = str(matched.get("id") or "")
+                        result["reply"] = f"找到「{result['event_title']}」，確認後才會刪除。"
+                    else:
+                        result["event_id"] = str(matched.get("id") or "")
+                        result["reply"] = f"找到「{result['event_title']}」，確認後才會修改。"
+            result["_persist_chat_turn"] = {"user_id": user_id, "message": payload.message}
+        else:
+            result = await build_chat_command(user_id, payload.message, payload.current_location, defer_persist=True)
         persist_info = result.pop("_persist_chat_turn", None)
         risk_info = result.pop("_refresh_event_risk", None)
         if persist_info:
@@ -241,9 +288,26 @@ async def chat_command(
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         set_timing("total_ms", total_ms)
         response.headers["X-Process-Time"] = str(total_ms)
+        if payload.contract_version == 2:
+            return {
+                "status": "error",
+                "contract_version": 2,
+                "intent": "GENERAL_CHAT",
+                "is_question": False,
+                "needs_clarification": False,
+                "missing_fields": [],
+                "reply": "我暫時無法處理這則訊息，請稍後再試。",
+                "draft_id": payload.draft_id,
+                "draft_event": None,
+                "event_filter": None,
+                "changes": None,
+                "entities": None,
+                "action_type": "NONE",
+                "timing": get_timing(),
+            }
         return {
             "status": "error",
-            "reply": f"小藍暫時無法完成這次操作，但服務沒有中斷。原因：{str(e)}",
+            "reply": "小藍暫時無法完成這次操作，請稍後再試。",
             "action_type": "NONE",
             "timing": get_timing(),
         }
