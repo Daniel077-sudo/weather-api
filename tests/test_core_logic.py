@@ -135,8 +135,8 @@ class CoreLogicTests(unittest.TestCase):
             start_time="2026-09-24T15:00:00+08:00",
             end_time="2026-09-24T16:00:00+08:00",
             city="臺南市",
-            district="東區",
-            location="臺南市東區",
+            district="左鎮區",
+            location="桃園市八德區",
         )
         with patch.object(main, "supabase", FakeSupabase()), patch.object(
             main, "enrich_event_payload_with_risk", new=AsyncMock(side_effect=fake_enrich)
@@ -146,6 +146,8 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["description"], "攜帶簡報")
         self.assertEqual(inserted[-1]["description"], "攜帶簡報")
+        self.assertEqual(inserted[-1]["city"], "臺南市")
+        self.assertEqual(inserted[-1]["district"], "左鎮區")
 
     def test_parse_weather_periods(self):
         dist_data = {
@@ -362,6 +364,23 @@ class CoreLogicTests(unittest.TestCase):
         parts = resolve_event_location_parts({"city": "臺南市", "district": "", "location": "臺南市"})
         self.assertEqual(parts["city"], "臺南市")
         self.assertEqual(parts["district"], "")
+
+    def test_location_resolver_treats_structured_city_as_authoritative(self):
+        parts = resolve_event_location_parts({
+            "city": "臺南市",
+            "district": "左鎮區",
+            "location": "桃園市八德區",
+        })
+        self.assertEqual(parts["city"], "臺南市")
+        self.assertEqual(parts["district"], "左鎮區")
+
+        city_only = resolve_event_location_parts({
+            "city": "臺南市",
+            "district": "",
+            "location": "桃園市八德區",
+        })
+        self.assertEqual(city_only["city"], "臺南市")
+        self.assertEqual(city_only["district"], "")
 
     def test_location_resolver_does_not_default_empty_event_to_taipei(self):
         parts = resolve_event_location_parts({"title": "沒有地點的行程"})

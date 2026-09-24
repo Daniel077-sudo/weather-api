@@ -1274,6 +1274,8 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
     try:
         db_payload = event.model_dump(mode="json", exclude_none=True)
         db_payload["transport_type"] = event.transport_type or determine_transport_type(event.url)
+        explicit_city = db_payload.get("city")
+        explicit_district = db_payload.get("district")
 
         location_parts = resolve_event_location_parts(db_payload)
         db_payload["city"] = db_payload.get("city") or location_parts["city"]
@@ -1288,6 +1290,9 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
             explicit_has_weather_risk=event.has_weather_risk,
             log_prefix="建立行程時",
         )
+        if explicit_city:
+            db_payload["city"] = explicit_city
+            db_payload["district"] = explicit_district or ""
         
         # 寫入 events 資料表 (請確保 Supabase 已有 transport_type 欄位)
         try:

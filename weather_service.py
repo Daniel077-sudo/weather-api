@@ -1166,7 +1166,9 @@ def resolve_event_location_parts(event: Dict[str, Any]) -> Dict[str, str]:
     district = event.get("district") or ""
     location = event.get("location") or event.get("location_name") or ""
 
-    if city and district:
+    # Structured location fields are authoritative. A free-form location may be
+    # stale or describe a venue in another city, so never mix it into city data.
+    if city:
         return {"city": city, "district": district}
 
     for known_city, districts in TAIWAN_LOCATIONS.items():
