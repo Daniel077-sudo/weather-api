@@ -34,6 +34,7 @@ XIAOLAN_PERSONA = (
 TAIPEI_TZ = timezone(timedelta(hours=8))
 MEMORY_MAX_CHARS = 4000
 CHAT_LOGS_TABLE = "chat_logs"
+DEPRECATED_MEMORY_KEYS = {"pending_event", "last_event_title", "last_event_start"}
 TRAINING_PATH = Path(__file__).resolve().parent / "data" / "xiaolan_training.json"
 LOCAL_PENDING_EVENTS: Dict[str, Dict[str, Any]] = {}
 LOCAL_CHAT_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
@@ -174,10 +175,58 @@ def persist_local_chat_turn(user_id: str, message: str, response: Dict[str, Any]
     })
     del rows[:-80]
 
-    if response.get("action_type") == "CLARIFY" and response.get("pending_event"):
-        LOCAL_PENDING_EVENTS[user_id] = response["pending_event"]
-    else:
-        LOCAL_PENDING_EVENTS.pop(user_id, None)
+    LOCAL_PENDING_EVENTS.pop(user_id, None)
+
+
+def build_chat_log_rows(user_id: str, message: str, response: Dict[str, Any], now: str) -> List[Dict[str, Any]]:
+    common = {
+        "user_id": user_id,
+        "event_title": "",
+        "event_start": None,
+        "event_end": None,
+        "has_alert": False,
+        "alert_title": "",
+        "alert_url": "",
+        "created_at": now,
+    }
+    return [
+        {
+            **common,
+            "role": "user",
+            "content": message,
+            "response_payload": {},
+            "action_type": "NONE",
+            "user_input": message,
+            "ai_response": "",
+        },
+        {
+            **common,
+            "role": "assistant",
+            "content": response.get("reply") or "",
+            "response_payload": response,
+            "action_type": response.get("action_type") or "NONE",
+            "event_title": response.get("event_title") or "",
+            "event_start": response.get("event_start") or None,
+            "event_end": response.get("event_end") or None,
+            "has_alert": bool(response.get("has_alert")),
+            "alert_title": response.get("alert_title") or "",
+            "alert_url": response.get("alert_url") or "",
+            "user_input": message,
+            "ai_response": response.get("reply") or "",
+        },
+    ]
+
+
+def build_memory_summary(existing: Any, response: Dict[str, Any]) -> Dict[str, Any]:
+    summary = dict(existing) if isinstance(existing, dict) else {}
+    for key in DEPRECATED_MEMORY_KEYS:
+        summary.pop(key, None)
+    summary.update({
+        "last_action_type": response.get("action_type") or "NONE",
+        "last_has_alert": bool(response.get("has_alert")),
+        "last_alert_title": response.get("alert_title") or "",
+    })
+    return summary
 
 
 def get_user_memory(user_id: str) -> Dict[str, Any]:
@@ -225,33 +274,10 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
         return
     now = taipei_now().isoformat()
     persist_local_chat_turn(user_id, message, response, now)
-    assistant_payload = {
-        "user_id": user_id,
-        "role": "assistant",
-        "content": response.get("reply") or "",
-        "response_payload": response,
-        "action_type": response.get("action_type") or "NONE",
-        "event_title": response.get("event_title") or "",
-        "event_start": response.get("event_start") or None,
-        "event_end": response.get("event_end") or None,
-        "has_alert": bool(response.get("has_alert")),
-        "alert_title": response.get("alert_title") or "",
-        "alert_url": response.get("alert_url") or "",
-        "user_input": message,
-        "ai_response": response.get("reply") or "",
-        "created_at": now,
-    }
+    chat_rows = build_chat_log_rows(user_id, message, response, now)
     try:
         with timed("memory_persist_ms"):
-            supabase.table(CHAT_LOGS_TABLE).insert({
-                "user_id": user_id,
-                "role": "user",
-                "content": message,
-                "user_input": message,
-                "ai_response": "",
-                "created_at": now,
-            }).execute()
-            supabase.table(CHAT_LOGS_TABLE).insert(assistant_payload).execute()
+            supabase.table(CHAT_LOGS_TABLE).insert(chat_rows).execute()
     except Exception:
         try:
             supabase.table(CHAT_LOGS_TABLE).insert({
@@ -265,15 +291,7 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
         with timed("memory_persist_ms"):
             current_memory = get_user_memory(user_id)
             memory_markdown = compact_memory(current_memory.get("memory_markdown") or "", message, response)
-            event_memory_allowed = response.get("action_type") not in {"CREATE_EVENT", "ADD_EVENT"}
-            summary_json = {
-                "last_action_type": response.get("action_type") or "NONE",
-                "last_event_title": response.get("event_title") if event_memory_allowed else "",
-                "last_event_start": response.get("event_start") if event_memory_allowed else "",
-                "last_has_alert": bool(response.get("has_alert")),
-                "last_alert_title": response.get("alert_title") or "",
-                "pending_event": response.get("pending_event") if response.get("action_type") == "CLARIFY" else None,
-            }
+            summary_json = build_memory_summary(current_memory.get("summary_json"), response)
             supabase.table("user_memory_profiles").upsert({
                 "user_id": user_id,
                 "memory_markdown": memory_markdown,
@@ -301,20 +319,24 @@ def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
             rows = res.data or []
         except Exception:
             rows = []
-        if not rows:
-            try:
-                legacy = (
-                    supabase.table(CHAT_LOGS_TABLE)
-                    .select("*")
-                    .ilike("user_input", f"[{user_id}]%")
-                    .limit(fetch_limit)
-                    .execute()
-                )
-                rows = legacy.data or []
-            except Exception:
-                rows = []
+        try:
+            legacy = (
+                supabase.table(CHAT_LOGS_TABLE)
+                .select("*")
+                .ilike("user_input", f"[{user_id}]%")
+                .order("created_at", desc=True)
+                .limit(fetch_limit)
+                .execute()
+            )
+            seen_ids = {str(row.get("id")) for row in rows if row.get("id") is not None}
+            rows.extend(
+                row for row in (legacy.data or [])
+                if row.get("id") is None or str(row.get("id")) not in seen_ids
+            )
+        except Exception:
+            pass
         normalized_rows: List[Dict[str, Any]] = []
-        for row in reversed(rows):
+        for row in sorted(rows, key=lambda item: str(item.get("created_at") or "")):
             normalized_rows.extend(expand_chat_history_row(row, user_id))
         local_rows = [normalize_chat_history_row(row, user_id) for row in LOCAL_CHAT_HISTORY.get(user_id, [])]
         if local_rows:
@@ -422,7 +444,7 @@ def reset_user_memory_response(user_id: str) -> Dict[str, Any]:
     payload = {
         "user_id": user_id,
         "memory_markdown": "",
-        "summary_json": {"pending_event": None},
+        "summary_json": {},
         "last_interaction_at": now,
         "updated_at": now,
     }

@@ -66,9 +66,7 @@ class ChatContractV2Tests(unittest.TestCase):
 
     def test_v2_endpoint_bypasses_legacy_mutating_flow(self):
         client = TestClient(main.app)
-        with patch.object(main, "build_chat_command", side_effect=AssertionError("legacy flow called")), patch.object(
-            main, "persist_chat_turn", return_value=None
-        ):
+        with patch.object(main, "persist_chat_turn", return_value=None):
             response = client.post("/api/chat", json=self.payload_for(SUITE["cases"][0]))
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -81,9 +79,7 @@ class ChatContractV2Tests(unittest.TestCase):
         payload = self.payload_for(SUITE["cases"][0])
         payload.pop("contract_version")
         payload["draft_mode"] = True
-        with patch.object(main, "build_chat_command", side_effect=AssertionError("legacy flow called")), patch.object(
-            main, "persist_chat_turn", return_value=None
-        ):
+        with patch.object(main, "persist_chat_turn", return_value=None):
             response = client.post("/api/chat", json=payload)
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -128,9 +124,9 @@ class ChatContractV2Tests(unittest.TestCase):
             "client_now": SUITE["client_now"],
         }
         matched = {"id": 123, "title": "開會", "start_time": "2026-09-24T15:00:00+08:00"}
-        with patch.object(main, "build_chat_command", side_effect=AssertionError("legacy flow called")), patch.object(
-            main, "find_event_for_draft", return_value=matched
-        ), patch.object(main, "persist_chat_turn", return_value=None):
+        with patch.object(main, "find_event_for_draft", return_value=matched), patch.object(
+            main, "persist_chat_turn", return_value=None
+        ):
             response = client.post("/api/chat", json=payload)
         body = response.json()
         self.assertEqual(body["action_type"], "DELETE_EVENT")
@@ -146,15 +142,25 @@ class ChatContractV2Tests(unittest.TestCase):
             "client_now": SUITE["client_now"],
         }
         matched = {"id": 456, "title": "開會", "start_time": "2026-09-24T15:00:00+08:00"}
-        with patch.object(main, "build_chat_command", side_effect=AssertionError("legacy flow called")), patch.object(
-            main, "find_event_for_draft", return_value=matched
-        ), patch.object(main, "persist_chat_turn", return_value=None):
+        with patch.object(main, "find_event_for_draft", return_value=matched), patch.object(
+            main, "persist_chat_turn", return_value=None
+        ):
             response = client.post("/api/chat", json=payload)
         body = response.json()
         self.assertEqual(body["action_type"], "UPDATE_EVENT")
         self.assertEqual(body["event_id"], "456")
         self.assertIn("16:00:00+08:00", body["event_start"])
         self.assertIn("確認後", body["reply"])
+
+    def test_unversioned_chat_contract_is_retired(self):
+        client = TestClient(main.app)
+        response = client.post("/api/chat", json={"user_id": "test-user", "message": "明天下午三點去台南開會"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["action_type"], "NONE")
+        self.assertIsNone(body["event_id"])
+        self.assertIn("contract_version: 2", body["reply"])
 
 
 if __name__ == "__main__":

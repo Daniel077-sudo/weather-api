@@ -13,7 +13,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, build_chat_command, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, persist_chat_turn, refresh_event_risk_background, reset_user_memory_response
+from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, persist_chat_turn, reset_user_memory_response
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -262,9 +262,16 @@ async def chat_command(
                         result["reply"] = f"找到「{result['event_title']}」，確認後才會修改。"
             result["_persist_chat_turn"] = {"user_id": user_id, "message": payload.message}
         else:
-            result = await build_chat_command(user_id, payload.message, payload.current_location, defer_persist=True)
+            result = {
+                "status": "error",
+                "reply": "此版本的聊天契約已停用，請更新 App 並使用 contract_version: 2。",
+                "action_type": "NONE",
+                "event_id": None,
+                "event_id_to_delete": None,
+                "event_created": None,
+                "event_updated": None,
+            }
         persist_info = result.pop("_persist_chat_turn", None)
-        risk_info = result.pop("_refresh_event_risk", None)
         if persist_info:
             response_for_history = dict(result)
             background_tasks.add_task(
@@ -272,12 +279,6 @@ async def chat_command(
                 persist_info.get("user_id") or "",
                 persist_info.get("message") or "",
                 response_for_history,
-            )
-        if risk_info:
-            background_tasks.add_task(
-                refresh_event_risk_background,
-                risk_info.get("event_id"),
-                risk_info.get("event_payload") or {},
             )
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         set_timing("total_ms", total_ms)

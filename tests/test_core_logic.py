@@ -15,7 +15,7 @@ import auth
 import disaster_service
 import event_service
 import main
-from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_clarify_response, build_local_fallback, create_event_from_chat, normalize_chat_response, prepare_chat_response, sanitize_event_title
+from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, normalize_chat_response, prepare_chat_response, sanitize_event_title
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
@@ -64,6 +64,32 @@ def public_key_to_jwk(private_key, kid: str = "test-kid") -> dict:
 
 
 class CoreLogicTests(unittest.TestCase):
+    def test_chat_log_rows_are_written_as_user_assistant_pair(self):
+        rows = build_chat_log_rows(
+            "user-1",
+            "明天去高雄",
+            {"reply": "要做什麼、幾點出發呢？", "action_type": "CREATE_EVENT"},
+            "2026-09-24T12:00:00+08:00",
+        )
+        self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
+        self.assertEqual(rows[0]["content"], "明天去高雄")
+        self.assertEqual(rows[1]["content"], "要做什麼、幾點出發呢？")
+
+    def test_memory_summary_preserves_profile_and_removes_legacy_draft_keys(self):
+        summary = build_memory_summary(
+            {
+                "preferred_transport": "tra",
+                "pending_event": {"title": "開會"},
+                "last_event_title": "開會",
+                "last_event_start": "2026-09-24T15:00:00+08:00",
+            },
+            {"action_type": "CREATE_EVENT", "has_alert": False},
+        )
+        self.assertEqual(summary["preferred_transport"], "tra")
+        self.assertNotIn("pending_event", summary)
+        self.assertNotIn("last_event_title", summary)
+        self.assertNotIn("last_event_start", summary)
+
     def test_event_description_is_returned_by_normalizer(self):
         event = event_service.normalize_event({
             "id": 1,
