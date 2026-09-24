@@ -12,6 +12,7 @@ HOURS = {
     "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12,
 }
 ACTIVITIES = [
+    "騎腳踏車", "騎自行車", "腳踏車", "自行車", "騎車",
     "開會", "游泳", "遊泳", "爬山", "跑步", "路跑", "打球", "運動", "露營",
     "上課", "看診", "考試", "聚餐", "旅遊", "出遊", "買菜", "通勤", "玩",
 ]
@@ -158,7 +159,11 @@ def _location(message: str, preferred_city: Optional[str] = None) -> Dict[str, O
 def _activity(message: str) -> Optional[str]:
     for item in ACTIVITIES:
         if item in message:
-            return "游泳" if item == "遊泳" else item
+            if item == "遊泳":
+                return "游泳"
+            if item in {"騎自行車", "腳踏車", "自行車", "騎車"}:
+                return "騎腳踏車"
+            return item
     return None
 
 
@@ -198,7 +203,8 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime) -> st
     dates = _date_mentions(message, now)
     times = _time_mentions(message)
     location = _location(message)
-    if create_signal or (activity and (dates or times or location["city"])) or (dates and times and location["city"]):
+    destination_signal = bool(re.search(r"(?:去|到|前往)\s*[^，。！？\s]+", message))
+    if create_signal or (dates and destination_signal and location["city"]) or (activity and (dates or times or location["city"])) or (dates and times and location["city"]):
         return "CREATE_EVENT"
     if intent_hint == "CREATE_EVENT" and (activity or _time_mentions(message) or _location(message)["city"]):
         return "CREATE_EVENT"
@@ -352,7 +358,12 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         if "地震" in message:
             response["reply"] = "地震時先趴下、掩護、穩住，遠離玻璃與高櫃；搖晃停止後再依官方指示疏散。"
         elif "颱風" in message or "台風" in message:
-            response["reply"] = "颱風警報分為海上與陸上警報，請以中央氣象署最新警報及地方政府疏散通知為準。"
+            response["reply"] = (
+                "中央氣象署的颱風警報分為海上與陸上兩種：預測颱風七級風暴風範圍可能在 24 小時內侵襲"
+                "臺灣本島、澎湖、金門或馬祖 100 公里內海域時，發布海上颱風警報並列出警戒海域；"
+                "預測可能在 18 小時內侵襲上述地區陸地時，發布陸上颱風警報並列出警戒縣市。"
+                "警報發布後仍要持續查看氣象署更新、地方政府停班停課與疏散通知。"
+            )
         else:
             response["reply"] = "請先確認官方警報，避開危險區域並準備飲水、藥品、證件與行動電源。"
         return response

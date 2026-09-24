@@ -26,6 +26,10 @@
       "_備註": "有縣市沒鄉鎮：district 必須是 null，不可捏造",
       "expect": { "intent": "CREATE_EVENT",
                   "draft_event": { "title": "爬山", "date": "2026-09-24", "start_time": "15:00", "city": "臺南市", "district": null } } },
+    { "id": "create-08-missing-title-time", "input": "後天去高雄",
+      "expect": { "intent": "CREATE_EVENT", "needs_clarification": true,
+                  "missing_fields_include": ["title", "start_time"],
+                  "draft_event": { "title": null, "date": "2026-09-25", "start_time": null, "city": "高雄市" } } },
 
     { "id": "query-event-01", "input": "後天有行程嗎？",
       "expect": { "intent": "QUERY_EVENT", "is_question": true, "entities": { "start_date": "2026-09-25", "end_date": "2026-09-25" } } },
@@ -69,6 +73,8 @@
       "expect": { "intent": "EVENT_WEATHER", "entities": { "start_date": "2026-09-24", "activity": "跑步" } } },
     { "id": "event-weather-03", "input": "明天是不是適合去跑步？",
       "expect": { "intent": "EVENT_WEATHER", "entities": { "activity": "跑步" } } },
+    { "id": "event-weather-04-bike", "input": "明天適合騎腳踏車嗎？",
+      "expect": { "intent": "EVENT_WEATHER", "entities": { "start_date": "2026-09-24", "activity": "騎腳踏車" } } },
 
     { "id": "disaster-01", "input": "台灣颱風警報怎麼分？", "expect": { "intent": "DISASTER_INFO" } },
     { "id": "disaster-02", "input": "地震的時候要躲在哪裡？", "expect": { "intent": "DISASTER_INFO" } },
@@ -91,4 +97,3 @@
       "expect": { "intent": "GENERAL_CHAT" } }
   ]
 }
-

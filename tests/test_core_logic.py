@@ -5,6 +5,7 @@ import hmac
 import json
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.primitives import hashes
@@ -63,6 +64,63 @@ def public_key_to_jwk(private_key, kid: str = "test-kid") -> dict:
 
 
 class CoreLogicTests(unittest.TestCase):
+    def test_event_description_is_returned_by_normalizer(self):
+        event = event_service.normalize_event({
+            "id": 1,
+            "title": "開會",
+            "description": "攜帶簡報",
+            "start_time": "2026-09-24T15:00:00+08:00",
+            "end_time": "2026-09-24T16:00:00+08:00",
+        })
+        self.assertEqual(event["description"], "攜帶簡報")
+
+    def test_create_event_compatibility_fallback_keeps_description(self):
+        inserted = []
+
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def __init__(self, payload):
+                self.payload = dict(payload)
+
+            def execute(self):
+                inserted.append(self.payload)
+                if "location" in self.payload:
+                    raise RuntimeError("simulated incompatible location column")
+                return FakeResult([{**self.payload, "id": 321}])
+
+        class FakeTable:
+            def insert(self, payload):
+                return FakeQuery(payload)
+
+        class FakeSupabase:
+            def table(self, _name):
+                return FakeTable()
+
+        async def fake_enrich(payload, **_kwargs):
+            return {**payload, "weather_checked_at": "2026-09-24T12:00:00+08:00"}
+
+        event = main.EventCreate(
+            user_id="00000000-0000-0000-0000-000000000001",
+            title="開會",
+            description="攜帶簡報",
+            start_time="2026-09-24T15:00:00+08:00",
+            end_time="2026-09-24T16:00:00+08:00",
+            city="臺南市",
+            district="東區",
+            location="臺南市東區",
+        )
+        with patch.object(main, "supabase", FakeSupabase()), patch.object(
+            main, "enrich_event_payload_with_risk", new=AsyncMock(side_effect=fake_enrich)
+        ), patch.object(main, "persist_event_risk_fields", return_value={}):
+            response = asyncio.run(main.create_event(event, main.BackgroundTasks()))
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["data"]["description"], "攜帶簡報")
+        self.assertEqual(inserted[-1]["description"], "攜帶簡報")
+
     def test_parse_weather_periods(self):
         dist_data = {
             "weatherElement": [

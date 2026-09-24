@@ -95,6 +95,7 @@ def normalize_event(event: dict) -> dict:
         "district": district,
         "url": event_url,
         "transport_type": transport_type or "",
+        "description": event.get("description") or "",
         "has_weather_risk": bool(event.get("has_weather_risk", False)),
         "ai_suggestion": str(ai_text),
         "risk_level": event.get("risk_level") or ("medium" if event.get("has_weather_risk") else "low"),

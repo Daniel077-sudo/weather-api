@@ -1298,7 +1298,7 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
 
             compatible_keys = {
                 "user_id", "city", "district",
-                "title", "start_time", "end_time", "location_name",
+                "title", "description", "start_time", "end_time", "location_name",
                 "transport_ticket_link", "has_weather_risk", "ai_suggestion",
                 "risk_level", "risk_tags", "recommended_action",
                 "weather_snapshot", "weather_checked_at", "weather_alert_status",
@@ -1308,13 +1308,25 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
             try:
                 res = supabase.table("events").insert(compatible_payload).execute()
             except Exception:
-                legacy_keys = {
-                    "user_id", "title", "start_time", "end_time", "location_name",
-                    "transport_ticket_link", "has_weather_risk", "ai_suggestion",
-                    "external_source", "external_event_id", "last_synced_at",
+                compatible_without_description = {
+                    key: value for key, value in compatible_payload.items() if key != "description"
                 }
-                legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
-                res = supabase.table("events").insert(legacy_payload).execute()
+                try:
+                    res = supabase.table("events").insert(compatible_without_description).execute()
+                except Exception:
+                    legacy_keys = {
+                        "user_id", "title", "description", "start_time", "end_time", "location_name",
+                        "transport_ticket_link", "has_weather_risk", "ai_suggestion",
+                        "external_source", "external_event_id", "last_synced_at",
+                    }
+                    legacy_payload = {key: value for key, value in db_payload.items() if key in legacy_keys}
+                    try:
+                        res = supabase.table("events").insert(legacy_payload).execute()
+                    except Exception:
+                        legacy_without_description = {
+                            key: value for key, value in legacy_payload.items() if key != "description"
+                        }
+                        res = supabase.table("events").insert(legacy_without_description).execute()
         if res.data:
             created_event = res.data[0]
             event_id = created_event.get("id")

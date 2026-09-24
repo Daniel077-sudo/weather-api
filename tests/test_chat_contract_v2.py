@@ -111,6 +111,14 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(result["draft_event"]["city"], "臺南市")
         self.assertEqual(result["draft_event"]["location"], "台南")
 
+    def test_typhoon_knowledge_explains_warning_thresholds(self):
+        payload = self.payload_for({"input": "颱風警報怎麼分？"})
+        result = build_chat_v2_response(payload)
+        self.assertEqual(result["intent"], "DISASTER_INFO")
+        self.assertIn("24 小時", result["reply"])
+        self.assertIn("18 小時", result["reply"])
+        self.assertIn("七級風暴風", result["reply"])
+
     def test_p0_delete_only_reads_target_and_never_calls_legacy_flow(self):
         client = TestClient(main.app)
         payload = {
