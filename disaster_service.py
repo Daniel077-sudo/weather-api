@@ -37,6 +37,18 @@ def _type_from_text(text: str) -> str:
     return "weather"
 
 
+def _alert_type_from_text(text: str, fallback: str = "天氣警特報") -> str:
+    if "颱風" in text:
+        if "海上" in text and "陸上" in text:
+            return "海上陸上颱風警報"
+        if "陸上" in text:
+            return "陸上颱風警報"
+        if "海上" in text:
+            return "海上颱風警報"
+        return "颱風警報"
+    return fallback or "天氣警特報"
+
+
 def normalize_cwa_alert(location_name: str, hazard: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
     info = hazard.get("info") or {}
     phenomena = str(info.get("phenomena") or "天氣警特報")
@@ -46,9 +58,11 @@ def normalize_cwa_alert(location_name: str, hazard: Dict[str, Any], raw: Dict[st
     starts_at = info.get("effectiveTime") or info.get("onset") or taipei_now().isoformat()
     expires_at = info.get("expires") or info.get("expiresTime") or (taipei_now() + timedelta(hours=6)).isoformat()
     combined = f"{title} {description}"
+    alert_type = _alert_type_from_text(combined, f"{phenomena}{significance}".strip())
     payload = {
         "source": "cwa",
         "type": _type_from_text(combined),
+        "alert_type": alert_type,
         "title": title,
         "description": description,
         "severity": _severity_from_text(combined),
@@ -86,7 +100,9 @@ async def refresh_disaster_alerts() -> Dict[str, Any]:
         errors = []
         for alert in alerts:
             try:
-                supabase.table("disaster_alerts").upsert(alert, on_conflict="alert_hash").execute()
+                # alert_type is derived for clients so older DB schemas do not need a new column.
+                db_alert = {key: value for key, value in alert.items() if key != "alert_type"}
+                supabase.table("disaster_alerts").upsert(db_alert, on_conflict="alert_hash").execute()
                 inserted += 1
             except Exception as e:
                 errors.append({"title": alert.get("title"), "message": str(e)})
@@ -164,6 +180,10 @@ def normalize_disaster_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
     primary = areas[0] if areas else {}
     return {
         **alert,
+        "alert_type": alert.get("alert_type") or _alert_type_from_text(
+            f"{alert.get('title') or ''} {alert.get('description') or ''}",
+            str(alert.get("type") or "天氣警特報"),
+        ),
         "affected_areas": areas,
         "city": alert.get("city") or primary.get("city") or "",
         "district": alert.get("district") or primary.get("district") or "",

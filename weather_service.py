@@ -1233,6 +1233,11 @@ async def _internal_sync(city: str, district: str):
         now = taipei_now()
         db_payload = {
             "city_name": f"{city}{district}",
+            "city": city,
+            "district": district,
+            "risk_level": weather_payload["risk_level"],
+            "risk_tags": weather_payload["risk_tags"],
+            "has_weather_risk": weather_payload["has_weather_risk"],
             "weather_data": {
                 "current": weather_payload["current"],
                 "forecast": weather_payload["forecast"],

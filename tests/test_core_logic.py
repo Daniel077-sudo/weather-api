@@ -138,16 +138,20 @@ class CoreLogicTests(unittest.TestCase):
             district="左鎮區",
             location="桃園市八德區",
         )
+        background_tasks = main.BackgroundTasks()
+        enrich_mock = AsyncMock(side_effect=fake_enrich)
         with patch.object(main, "supabase", FakeSupabase()), patch.object(
-            main, "enrich_event_payload_with_risk", new=AsyncMock(side_effect=fake_enrich)
-        ), patch.object(main, "persist_event_risk_fields", return_value={}):
-            response = asyncio.run(main.create_event(event, main.BackgroundTasks()))
+            main, "enrich_event_payload_with_risk", new=enrich_mock
+        ):
+            response = asyncio.run(main.create_event(event, background_tasks))
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["data"]["description"], "攜帶簡報")
         self.assertEqual(inserted[-1]["description"], "攜帶簡報")
         self.assertEqual(inserted[-1]["city"], "臺南市")
         self.assertEqual(inserted[-1]["district"], "左鎮區")
+        enrich_mock.assert_not_awaited()
+        self.assertEqual(len(background_tasks.tasks), 1)
 
     def test_parse_weather_periods(self):
         dist_data = {
@@ -523,6 +527,92 @@ class CoreLogicTests(unittest.TestCase):
         self.assertNotIn("started_at", payload)
         self.assertNotIn("city", payload)
         self.assertEqual(payload["affected_areas"][0]["city"], "臺南市")
+        self.assertEqual(payload["alert_type"], "大雨特報")
+
+    def test_typhoon_alert_type_is_stable_for_android_notifications(self):
+        payload = disaster_service.normalize_cwa_alert(
+            "臺南市",
+            {
+                "info": {
+                    "phenomena": "海上陸上颱風",
+                    "significance": "警報",
+                    "description": "海上及陸上警戒區域",
+                }
+            },
+            {"locationName": "臺南市"},
+        )
+        self.assertEqual(payload["alert_type"], "海上陸上颱風警報")
+        self.assertIn("颱風", payload["alert_type"])
+
+    def test_home_safety_vision_contract_uses_top_level_fields(self):
+        client = TestClient(main.app)
+        fake_result = {
+            "score": 72,
+            "safety_level": "WARNING",
+            "risks": ["櫥櫃未固定"],
+            "advice": "請將櫥櫃固定於牆面。",
+        }
+        with patch("main.call_gemini_vision", new=AsyncMock(return_value=fake_result)) as vision:
+            response = client.post(
+                "/api/home-safety/vision-check",
+                json={
+                    "mode": "earthquake_safety",
+                    "image_base64": base64.b64encode(b"test-image").decode("ascii"),
+                    "mime_type": "image/jpeg",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), fake_result)
+        self.assertEqual(vision.await_args.kwargs["timeout_seconds"], 25.0)
+
+    def test_guidelines_unknown_activity_returns_not_found(self):
+        client = TestClient(main.app)
+        response = client.get("/api/guidelines?activity=indoor&disaster=earthquake")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "not_found")
+        self.assertIsNone(body["data"])
+        self.assertEqual(body["message"], "查無資料")
+
+    def test_nearby_shelters_uses_database_rpc(self):
+        calls = []
+
+        class FakeResult:
+            data = [{
+                "id": 1,
+                "name": "測試收容所",
+                "city": "臺南市",
+                "district": "東區",
+                "address": "測試路 1 號",
+                "lat": 22.99,
+                "lng": 120.22,
+                "capacity": 100,
+                "shelter_type": "school",
+                "distance_km": 1.2,
+            }]
+
+        class FakeRpc:
+            def execute(self):
+                return FakeResult()
+
+        class FakeSupabase:
+            def rpc(self, name, params):
+                calls.append((name, params))
+                return FakeRpc()
+
+        original_supabase = main.supabase
+        try:
+            main.supabase = FakeSupabase()
+            client = TestClient(main.app)
+            response = client.get("/api/shelters/nearby?lat=22.99&lng=120.22&limit=3&max_km=20")
+        finally:
+            main.supabase = original_supabase
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source"], "supabase_rpc")
+        self.assertEqual(calls[0][0], "shelters_nearby")
+        self.assertEqual(calls[0][1]["p_limit"], 3)
+        self.assertEqual(calls[0][1]["p_max_km"], 20.0)
 
     def test_api_smoke_area_status(self):
         client = TestClient(main.app)
@@ -619,6 +709,7 @@ class CoreLogicTests(unittest.TestCase):
         self.assertIn("POST /api/chat", body["data"]["protected_when_auth_required"])
         self.assertIn("POST /api/chat/memory/reset", body["data"]["protected_when_auth_required"])
         self.assertIn("PATCH /api/events/{event_id}", body["data"]["protected_when_auth_required"])
+        self.assertIn("POST /api/home-safety/vision-check", body["data"]["protected_when_auth_required"])
 
     def test_supabase_jwt_uses_sub_as_user_id(self):
         original_secret = auth.SUPABASE_JWT_SECRET
@@ -798,7 +889,7 @@ class CoreLogicTests(unittest.TestCase):
         finally:
             main.call_gemini_json_cached = original_ai
 
-    def test_update_event_falls_back_when_risk_columns_missing(self):
+    def test_update_event_writes_user_fields_before_background_risk_refresh(self):
         stored_event = {
             "id": "215",
             "user_id": "jwt-user",
@@ -847,38 +938,28 @@ class CoreLogicTests(unittest.TestCase):
             def table(self, _table_name):
                 return FakeQuery("select")
 
-        async def fake_enrich(payload, **_kwargs):
-            return {
-                **payload,
-                "risk_level": "low",
-                "risk_tags": [],
-                "has_weather_risk": False,
-                "weather_alert_status": "checked",
-                "ai_suggestion": "ok",
-                "recommended_action": "ok",
-            }
-
         original_supabase = main.supabase
-        original_enrich = main.enrich_event_payload_with_risk
         try:
             main.supabase = FakeSupabase()
-            main.enrich_event_payload_with_risk = fake_enrich
+            background_tasks = main.BackgroundTasks()
             response = asyncio.run(
                 main.update_event_by_id(
                     "215",
                     main.EventUpdate(title="新標題", city="高雄市", district="鹽埕區", location="高雄市鹽埕區"),
                     auth.AuthContext(user_id="jwt-user", authenticated=True),
+                    background_tasks,
                 )
             )
             self.assertEqual(response["status"], "success")
-            self.assertGreaterEqual(len(attempted_updates), 2)
+            self.assertEqual(len(attempted_updates), 1)
+            self.assertNotIn("risk_level", attempted_updates[0])
             self.assertEqual(stored_event["title"], "新標題")
             self.assertEqual(stored_event["city"], "高雄市")
             self.assertEqual(stored_event["district"], "鹽埕區")
             self.assertNotEqual(stored_event["district"], "中正區")
+            self.assertEqual(len(background_tasks.tasks), 1)
         finally:
             main.supabase = original_supabase
-            main.enrich_event_payload_with_risk = original_enrich
 
 
 if __name__ == "__main__":

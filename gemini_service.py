@@ -189,7 +189,12 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
     return response
 
 
-async def call_gemini_vision(image_bytes: bytes, mime_type: str, prompt: str) -> Dict[str, Any]:
+async def call_gemini_vision(
+    image_bytes: bytes,
+    mime_type: str,
+    prompt: str,
+    timeout_seconds: float | None = None,
+) -> Dict[str, Any]:
     if not GEMINI_API_KEY:
         return {}
 
@@ -213,7 +218,11 @@ async def call_gemini_vision(image_bytes: bytes, mime_type: str, prompt: str) ->
     }
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=GEMINI_VISION_TIMEOUT_SECONDS)
+            response = await client.post(
+                url,
+                json=payload,
+                timeout=timeout_seconds or GEMINI_VISION_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             res_json = response.json()
             text = res_json.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")

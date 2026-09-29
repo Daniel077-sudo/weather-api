@@ -15,12 +15,12 @@ from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, resolve_user_id
 from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, persist_chat_turn, reset_user_memory_response
 from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
-from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, SHELTER_FALLBACKS, TAIWAN_LOCATIONS
+from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
-from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event, persist_event_risk_fields
+from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from timing_service import get_timing, reset_timing, set_timing, start_timing
@@ -383,6 +383,7 @@ async def get_auth_contract():
                 "GET /api/events/weather-alerts",
                 "PATCH /api/events/weather-alerts/{alert_id}/read",
                 "GET /api/assistant/alerts",
+                "POST /api/home-safety/vision-check",
                 "POST /api/emergency-kit/vision-check",
                 "GET /api/emergency-kit/scans",
                 "GET /api/quiz/generate",
@@ -804,6 +805,11 @@ async def get_weather(
             try:
                 cache_payload = {
                     "city_name": response["city_name"],
+                    "city": city,
+                    "district": district,
+                    "risk_level": response["weather_data"]["risk_level"],
+                    "risk_tags": response["weather_data"]["risk_tags"],
+                    "has_weather_risk": response["weather_data"]["has_weather_risk"],
                     "weather_data": response["weather_data"],
                     "radar_image_url": response["radar_image_url"],
                     "uvi": response["uvi"],
@@ -1282,14 +1288,10 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
         db_payload["district"] = db_payload.get("district") or location_parts["district"]
 
         should_refresh_weather = not db_payload.get("weather_snapshot")
-
-        db_payload = await enrich_event_payload_with_risk(
-            db_payload,
-            explicit_risk_level=event.risk_level or "",
-            explicit_risk_tags=event.risk_tags,
-            explicit_has_weather_risk=event.has_weather_risk,
-            log_prefix="建立行程時",
-        )
+        if should_refresh_weather:
+            db_payload["weather_alert_status"] = "pending"
+            db_payload["risk_level"] = event.risk_level or db_payload.get("risk_level") or "low"
+            db_payload["risk_tags"] = event.risk_tags or db_payload.get("risk_tags") or []
         if explicit_city:
             db_payload["city"] = explicit_city
             db_payload["district"] = explicit_district or ""
@@ -1321,7 +1323,7 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
                     res = supabase.table("events").insert(compatible_without_description).execute()
                 except Exception:
                     legacy_keys = {
-                        "user_id", "title", "description", "start_time", "end_time", "location_name",
+                        "user_id", "city", "district", "title", "description", "start_time", "end_time", "location_name",
                         "transport_ticket_link", "has_weather_risk", "ai_suggestion",
                         "external_source", "external_event_id", "last_synced_at",
                     }
@@ -1334,11 +1336,9 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
                         }
                         res = supabase.table("events").insert(legacy_without_description).execute()
         if res.data:
-            created_event = res.data[0]
+            created_event = {**res.data[0], **db_payload}
             event_id = created_event.get("id")
-            persisted_risk = persist_event_risk_fields(event_id, db_payload)
-            created_event = {**created_event, **db_payload, **persisted_risk}
-            if should_refresh_weather and db_payload.get("weather_alert_status") == "pending" and event_id and background_tasks:
+            if should_refresh_weather and event_id and background_tasks:
                 background_tasks.add_task(update_event_weather_snapshot, event_id, {**db_payload, **created_event})
             return {"status": "success", "data": normalize_event(created_event)}
         memory_event = create_memory_event(db_payload)
@@ -1423,6 +1423,7 @@ async def update_event_by_id(
     event_id: str,
     payload: EventUpdate,
     auth: AuthContext,
+    background_tasks: Optional[BackgroundTasks] = None,
 ):
     user_id = resolve_user_id(auth, None)
     update_payload = payload.model_dump(mode="json", exclude_unset=True, exclude_none=True)
@@ -1447,32 +1448,7 @@ async def update_event_by_id(
         merged_payload["district"] = merged_payload.get("district") or location_parts["district"]
 
         risk_keys = {"title", "start_time", "end_time", "city", "district", "location", "transport_type", "url"}
-        should_refresh_risk = bool(risk_keys.intersection(update_payload.keys())) or "weather_snapshot" in update_payload
-        if should_refresh_risk:
-            risk_input = {**merged_payload, "weather_snapshot": update_payload.get("weather_snapshot")}
-            enriched_payload = await enrich_event_payload_with_risk(
-                risk_input,
-                explicit_risk_level=str(update_payload.get("risk_level") or ""),
-                explicit_risk_tags=update_payload.get("risk_tags") or [],
-                explicit_has_weather_risk=bool(update_payload.get("has_weather_risk", False)),
-                log_prefix="更新行程時",
-            )
-            update_payload.update({
-                key: enriched_payload.get(key)
-                for key in {
-                    "city",
-                    "district",
-                    "weather_snapshot",
-                    "weather_checked_at",
-                    "risk_level",
-                    "risk_tags",
-                    "has_weather_risk",
-                    "weather_alert_status",
-                    "recommended_action",
-                    "ai_suggestion",
-                }
-                if key in enriched_payload
-            })
+        should_refresh_risk = bool(risk_keys.intersection(update_payload.keys()))
 
         update_candidates = []
         full_payload = dict(update_payload)
@@ -1536,7 +1512,10 @@ async def update_event_by_id(
 
         if last_error is not None:
             return safe_response("error", {"id": event_id}, str(last_error), "events", [{"service": "supabase", "message": str(last_error)}])
-        return safe_response("success", normalize_event({**merged_payload, **update_payload, **updated_event}), "event updated", "events")
+        result_event = {**merged_payload, **update_payload, **updated_event}
+        if should_refresh_risk and background_tasks:
+            background_tasks.add_task(update_event_weather_snapshot, event_id, result_event)
+        return safe_response("success", normalize_event(result_event), "event updated", "events")
     except Exception as e:
         return safe_response("error", {"id": event_id}, str(e), "events", [{"service": "supabase", "message": str(e)}])
 
@@ -1545,18 +1524,20 @@ async def update_event_by_id(
 async def patch_event(
     event_id: str,
     payload: EventUpdate,
+    background_tasks: BackgroundTasks,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    return await update_event_by_id(event_id, payload, auth)
+    return await update_event_by_id(event_id, payload, auth, background_tasks)
 
 
 @app.put("/api/events/{event_id}")
 async def put_event(
     event_id: str,
     payload: EventUpdate,
+    background_tasks: BackgroundTasks,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    return await update_event_by_id(event_id, payload, auth)
+    return await update_event_by_id(event_id, payload, auth, background_tasks)
 
 
 @app.delete("/api/events/{event_id}")
@@ -1896,6 +1877,90 @@ async def get_alerts():
         print(f"❌ 讀取警報失敗: {e}")
         return {"status": "error", "message": f"伺服器錯誤: {str(e)}"}
 
+
+HOME_SAFETY_VISION_PROMPTS = {
+    "earthquake_safety": (
+        "檢查電視、冰箱、櫥櫃等大型家具是否固定，是否可能傾倒壓到床邊，"
+        "以及家具或雜物是否阻擋門口與逃生動線。"
+    ),
+    "fire_safety": (
+        "檢查插座與延長線是否過載或串接、瓦斯爐與瓦斯桶周邊是否有可燃物，"
+        "以及滅火器是否可見、可取用且未被遮擋。"
+    ),
+    "typhoon_safety": (
+        "檢查陽台是否有易墜落或未固定物品、門窗是否有破損或未關妥，"
+        "以及儲水容器是否乾淨、加蓋並放置穩固。"
+    ),
+}
+
+
+def home_safety_error(advice: str) -> Dict[str, Any]:
+    return {
+        "score": 0,
+        "safety_level": "DANGER",
+        "risks": [advice],
+        "advice": advice,
+    }
+
+
+@app.post("/api/home-safety/vision-check")
+async def check_home_safety_image(
+    payload: HomeSafetyVisionRequest,
+    _auth: AuthContext = Depends(get_auth_context),
+):
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if payload.mime_type not in allowed_types:
+        return home_safety_error("只支援 jpeg、png、webp 圖片，請更換格式後重試。")
+
+    image_base64 = payload.image_base64.split(",", 1)[-1]
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except Exception:
+        return home_safety_error("圖片資料格式錯誤，請重新拍攝後上傳。")
+
+    if not image_bytes:
+        return home_safety_error("圖片內容為空，請重新拍攝後上傳。")
+    if len(image_bytes) > 8 * 1024 * 1024:
+        return home_safety_error("圖片超過 8MB，請壓縮後再上傳。")
+
+    prompt = (
+        "你是台灣居家防災安全檢查員。只能根據照片中實際可見的內容判斷，"
+        "看不清楚的項目要列入 risks 並建議使用者人工確認，不可捏造。"
+        f"本次任務：{HOME_SAFETY_VISION_PROMPTS[payload.mode]}"
+        "只回傳單一 JSON 物件，不要 markdown。欄位必須是："
+        "score（0到100整數，越高越安全）、"
+        "safety_level（只能是 SAFE、WARNING、DANGER）、"
+        "risks（繁體中文字串陣列）、advice（繁體中文具體改善建議）。"
+    )
+    raw = await call_gemini_vision(
+        image_bytes,
+        payload.mime_type,
+        prompt,
+        timeout_seconds=25.0,
+    )
+    if not raw:
+        return {
+            "score": 50,
+            "safety_level": "WARNING",
+            "risks": ["影像辨識服務暫時無法完成檢查。"],
+            "advice": "請稍後重試，並先依教室清單人工檢查環境。",
+        }
+
+    score = max(0, min(100, safe_int(raw.get("score"), 50)))
+    level = str(raw.get("safety_level") or "").upper()
+    if level not in {"SAFE", "WARNING", "DANGER"}:
+        level = "SAFE" if score >= 80 else "WARNING" if score >= 50 else "DANGER"
+    risks = raw.get("risks") if isinstance(raw.get("risks"), list) else []
+    risks = [str(item).strip() for item in risks if str(item).strip()]
+    advice = str(raw.get("advice") or "請依防災教室清單逐項人工確認。").strip()
+    return {
+        "score": score,
+        "safety_level": level,
+        "risks": risks,
+        "advice": advice,
+    }
+
+
 @app.post("/api/emergency-kit/vision-check")
 async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: AuthContext = Depends(get_auth_context)):
     payload.user_id = resolve_user_id(auth, payload.user_id) or payload.user_id
@@ -2062,12 +2127,24 @@ async def get_guidelines(
     範例網址：/api/guidelines?activity=driving&disaster=大雨
     """
     try:
-        resolved_activity = activity or user_activity
+        valid_activities = ["driving", "stationary", "walking", "sleeping", "cycling", "running", "automotive"]
+        resolved_activity = str(activity or user_activity or "").strip().lower()
         resolved_disaster = normalize_disaster_code(disaster or disaster_type)
         if not resolved_activity or not resolved_disaster:
             return {
                 "status": "error",
                 "message": "Missing activity/disaster. Example: /api/guidelines?activity=driving&disaster=earthquake",
+                "valid_user_activities": valid_activities,
+            }
+
+        if resolved_activity not in valid_activities:
+            return {
+                "status": "not_found",
+                "data": None,
+                "message": "查無資料",
+                "user_activity": resolved_activity,
+                "disaster_type": resolved_disaster,
+                "valid_user_activities": valid_activities,
             }
 
         # 直接使用翊翔提供的 SQL 邏輯，轉成 Supabase 語法
@@ -2083,18 +2160,13 @@ async def get_guidelines(
                 "data": res.data[0] # 回傳符合條件的第一筆指引
             }
         else:
-            fallback_priority = "high" if resolved_disaster in ["flood", "typhoon"] else "medium"
             return {
-                "status": "success",
-                "data": {
-                    "instruction": build_recommended_action(fallback_priority, [resolved_disaster], "目前位置"),
-                    "priority": fallback_priority,
-                    "disaster_type": resolved_disaster,
-                },
-            }
-            return {
-                "status": "success", 
-                "data": {"instruction": "請注意安全，隨時留意氣象變化。", "priority": "low"}
+                "status": "not_found",
+                "data": None,
+                "message": "查無資料",
+                "user_activity": resolved_activity,
+                "disaster_type": resolved_disaster,
+                "valid_user_activities": valid_activities,
             }
             
     except Exception as e:
@@ -2237,41 +2309,41 @@ async def get_geocode_location(query: str):
     return {"status": "success", "data": data}
 
 @app.get("/api/shelters")
-async def get_shelters(city: Optional[str] = None, district: Optional[str] = None):
+async def get_shelters(
+    city: Optional[str] = None,
+    district: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=1000),
+):
     try:
-        query = supabase.table("shelters").select("*")
+        query = supabase.table("shelters").select("*").limit(limit)
         if city:
             query = query.eq("city", city)
         if district:
             query = query.eq("district", district)
         res = query.execute()
         shelters = res.data or []
-        if shelters:
-            return {"status": "success", "data": [normalize_shelter(item) for item in shelters], "source": "supabase"}
-    except Exception:
-        pass
-
-    shelters = SHELTER_FALLBACKS
-    if city:
-        shelters = [item for item in shelters if item.get("city") == city]
-    if district:
-        shelters = [item for item in shelters if item.get("district") == district]
-    return {"status": "success", "data": [normalize_shelter(item) for item in shelters], "source": "fallback"}
+        return {"status": "success", "data": [normalize_shelter(item) for item in shelters], "source": "supabase"}
+    except Exception as e:
+        return {"status": "error", "data": [], "message": str(e), "source": "supabase"}
 
 @app.get("/api/shelters/nearby")
-async def get_nearby_shelters(lat: float, lng: float, limit: int = 5):
+async def get_nearby_shelters(
+    lat: float,
+    lng: float,
+    limit: int = Query(5, ge=1, le=50),
+    max_km: float = Query(50.0, gt=0, le=500),
+):
     try:
-        res = supabase.table("shelters").select("*").execute()
+        res = supabase.rpc(
+            "shelters_nearby",
+            {"p_lat": lat, "p_lng": lng, "p_limit": limit, "p_max_km": max_km},
+        ).execute()
         shelters = res.data or []
-    except Exception:
-        shelters = SHELTER_FALLBACKS
-
-    if not shelters:
-        shelters = SHELTER_FALLBACKS
-
-    normalized = [normalize_shelter(item, lat, lng) for item in shelters]
-    normalized.sort(key=lambda item: item.get("distance_km", 999999))
-    return {"status": "success", "data": normalized[:limit]}
+        normalized = [normalize_shelter(item, lat, lng) for item in shelters]
+        normalized.sort(key=lambda item: item.get("distance_km", 999999))
+        return {"status": "success", "data": normalized[:limit], "source": "supabase_rpc"}
+    except Exception as e:
+        return {"status": "error", "data": [], "message": str(e), "source": "supabase_rpc"}
 
 @app.get("/api/database/schema")
 async def get_database_schema_sql():

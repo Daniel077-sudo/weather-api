@@ -232,3 +232,9 @@ class EmergencyKitVisionRequest(BaseModel):
     kit_id: Optional[str] = None
 
 
+class HomeSafetyVisionRequest(BaseModel):
+    mode: Literal["earthquake_safety", "fire_safety", "typhoon_safety"]
+    image_base64: str
+    mime_type: str = "image/jpeg"
+
+
