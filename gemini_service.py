@@ -227,8 +227,9 @@ async def call_gemini_vision(
             }
         ],
         "generationConfig": {
-            "temperature": 0.2,
             "responseMimeType": "application/json",
+            "maxOutputTokens": 1024,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
         },
     }
     try:

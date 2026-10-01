@@ -631,7 +631,7 @@ class CoreLogicTests(unittest.TestCase):
         try:
             main.supabase = FakeSupabase()
             client = TestClient(main.app)
-            with patch("main.call_gemini_vision", new=AsyncMock(return_value=failure)):
+            with patch("main.call_gemini_vision", new=AsyncMock(return_value=failure)) as vision:
                 response = client.post(
                     "/api/emergency-kit/vision-check",
                     json={
@@ -647,6 +647,7 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(body["data"]["missing_items"], [])
         self.assertEqual(body["data"]["error_code"], "timeout")
         self.assertEqual(calls, [])
+        self.assertEqual(vision.await_args.kwargs["timeout_seconds"], 25.0)
 
     def test_gemini_vision_missing_key_returns_diagnostics(self):
         original_key = gemini_service.GEMINI_API_KEY

@@ -2097,7 +2097,12 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
         f"必要物資清單:{json.dumps(REQUIRED_EMERGENCY_KIT_ITEMS, ensure_ascii=False)}。"
         "JSON 欄位: detected_items(陣列), missing_items(陣列), extra_items(陣列), confidence(0到1), notes(字串)。"
     )
-    vision_result = await call_gemini_vision(image_bytes, payload.mime_type, prompt)
+    vision_result = await call_gemini_vision(
+        image_bytes,
+        payload.mime_type,
+        prompt,
+        timeout_seconds=25.0,
+    )
     if not vision_result or vision_result.get("_vision_status") == "error":
         error_code = str(vision_result.get("_vision_error_code") or "empty_response")
         model = str(vision_result.get("_vision_model") or "")
