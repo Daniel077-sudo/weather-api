@@ -386,6 +386,7 @@ async def get_auth_contract():
                 "POST /api/home-safety/vision-check",
                 "POST /api/emergency-kit/vision-check",
                 "GET /api/emergency-kit/scans",
+                "DELETE /api/emergency-kit/scans/{scan_id}",
                 "GET /api/quiz/generate",
                 "POST /api/quiz/submit",
                 "POST /api/game/scores",
@@ -1894,12 +1895,16 @@ HOME_SAFETY_VISION_PROMPTS = {
 }
 
 
-def home_safety_error(advice: str) -> Dict[str, Any]:
+def home_safety_error(advice: str, error_code: str = "validation_error", model: str = "") -> Dict[str, Any]:
     return {
+        "status": "error",
         "score": 0,
         "safety_level": "DANGER",
-        "risks": [advice],
+        "risks": [],
+        "risk_items": [],
         "advice": advice,
+        "vision_model": model,
+        "error_code": error_code,
     }
 
 
@@ -1930,7 +1935,9 @@ async def check_home_safety_image(
         "只回傳單一 JSON 物件，不要 markdown。欄位必須是："
         "score（0到100整數，越高越安全）、"
         "safety_level（只能是 SAFE、WARNING、DANGER）、"
-        "risks（繁體中文字串陣列）、advice（繁體中文具體改善建議）。"
+        "risks（繁體中文字串陣列）、advice（繁體中文具體改善建議）、"
+        "risk_items（物件陣列，每筆包含 finding、severity、recommendation、certainty；"
+        "severity 只能是 low、medium、high，certainty 是 0 到 1）。"
     )
     raw = await call_gemini_vision(
         image_bytes,
@@ -1938,13 +1945,12 @@ async def check_home_safety_image(
         prompt,
         timeout_seconds=25.0,
     )
-    if not raw:
-        return {
-            "score": 50,
-            "safety_level": "WARNING",
-            "risks": ["影像辨識服務暫時無法完成檢查。"],
-            "advice": "請稍後重試，並先依教室清單人工檢查環境。",
-        }
+    if not raw or raw.get("_vision_status") == "error":
+        return home_safety_error(
+            "影像辨識服務暫時無法完成檢查，請稍後重試或先依居家安全檢查清單人工確認。",
+            str(raw.get("_vision_error_code") or "empty_response"),
+            str(raw.get("_vision_model") or ""),
+        )
 
     score = max(0, min(100, safe_int(raw.get("score"), 50)))
     level = str(raw.get("safety_level") or "").upper()
@@ -1952,12 +1958,46 @@ async def check_home_safety_image(
         level = "SAFE" if score >= 80 else "WARNING" if score >= 50 else "DANGER"
     risks = raw.get("risks") if isinstance(raw.get("risks"), list) else []
     risks = [str(item).strip() for item in risks if str(item).strip()]
-    advice = str(raw.get("advice") or "請依防災教室清單逐項人工確認。").strip()
+    advice = str(raw.get("advice") or "請依居家安全檢查清單逐項人工確認。").strip()
+    default_severity = "high" if level == "DANGER" else "medium" if level == "WARNING" else "low"
+    raw_risk_items = raw.get("risk_items") if isinstance(raw.get("risk_items"), list) else []
+    risk_items = []
+    for item in raw_risk_items:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or default_severity).lower()
+        if severity not in {"low", "medium", "high"}:
+            severity = default_severity
+        try:
+            certainty = max(0.0, min(1.0, float(item.get("certainty", 0.5))))
+        except (TypeError, ValueError):
+            certainty = 0.5
+        finding = str(item.get("finding") or "").strip()
+        if finding:
+            risk_items.append({
+                "finding": finding,
+                "severity": severity,
+                "recommendation": str(item.get("recommendation") or advice).strip(),
+                "certainty": certainty,
+            })
+    if not risk_items:
+        risk_items = [
+            {
+                "finding": risk,
+                "severity": default_severity,
+                "recommendation": advice,
+                "certainty": 0.5,
+            }
+            for risk in risks
+        ]
     return {
+        "status": "success",
         "score": score,
         "safety_level": level,
         "risks": risks,
+        "risk_items": risk_items,
         "advice": advice,
+        "vision_model": str(raw.get("_vision_model") or ""),
     }
 
 
@@ -1997,12 +2037,19 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
     image_hash = hashlib.sha256(image_bytes).hexdigest()
     errors = []
     try:
-        cached_query = supabase.table("emergency_kit_scans").select("*").eq("image_hash", image_hash).order("created_at", desc=True).limit(1)
+        cached_query = supabase.table("emergency_kit_scans").select("*").eq("image_hash", image_hash).order("created_at", desc=True)
         if payload.user_id:
             cached_query = cached_query.eq("user_id", payload.user_id)
-        cached_scan = cached_query.execute()
-        if cached_scan.data:
-            cached = cached_scan.data[0]
+        cached_scan = cached_query.limit(5).execute()
+        cached = next(
+            (
+                item for item in (cached_scan.data or [])
+                if float(item.get("confidence") or 0) > 0
+                and "未回傳結果" not in str(item.get("notes") or "")
+            ),
+            None,
+        )
+        if cached:
             cached_result = {
                 "user_id": payload.user_id or cached.get("user_id"),
                 "kit_id": payload.kit_id or cached.get("kit_id"),
@@ -2028,6 +2075,7 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
                 supabase.table("emergency_kit_scans")
                 .select("id", count="exact")
                 .eq("user_id", payload.user_id)
+                .gt("confidence", 0)
                 .gte("created_at", f"{today}T00:00:00+08:00")
                 .limit(1)
                 .execute()
@@ -2050,6 +2098,32 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
         "JSON 欄位: detected_items(陣列), missing_items(陣列), extra_items(陣列), confidence(0到1), notes(字串)。"
     )
     vision_result = await call_gemini_vision(image_bytes, payload.mime_type, prompt)
+    if not vision_result or vision_result.get("_vision_status") == "error":
+        error_code = str(vision_result.get("_vision_error_code") or "empty_response")
+        model = str(vision_result.get("_vision_model") or "")
+        return safe_response(
+            "error",
+            {
+                "user_id": payload.user_id,
+                "kit_id": payload.kit_id,
+                "detected_items": [],
+                "missing_items": [],
+                "extra_items": [],
+                "confidence": 0,
+                "supplement_suggestions": [],
+                "daily_limit": VISION_DAILY_LIMIT,
+                "notes": "影像辨識服務暫時無法完成檢查，請稍後重試。",
+                "checked_at": taipei_now().isoformat(),
+                "image_hash": image_hash,
+                "cache_hit": False,
+                "vision_model": model,
+                "error_code": error_code,
+            },
+            "Gemini Vision failed; scan was not saved.",
+            "gemini_vision",
+            [{"service": "gemini", "code": error_code}],
+        )
+
     detected_items = vision_result.get("detected_items") or []
     if not isinstance(detected_items, list):
         detected_items = []
@@ -2074,6 +2148,7 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
         "checked_at": taipei_now().isoformat(),
         "image_hash": image_hash,
         "cache_hit": False,
+        "vision_model": str(vision_result.get("_vision_model") or ""),
     }
 
     try:
@@ -2106,14 +2181,41 @@ async def get_emergency_kit_scans(
     auth: AuthContext = Depends(get_auth_context),
 ):
     user_id = resolve_user_id(auth, user_id) or user_id
+    if not user_id:
+        return safe_response("error", [], "user_id is required", "auth", [{"code": "missing_user_id"}])
     try:
         query = supabase.table("emergency_kit_scans").select("*").order("created_at", desc=True).limit(limit)
-        if user_id:
-            query = query.eq("user_id", user_id)
+        query = query.eq("user_id", user_id)
         res = query.execute()
         return safe_response("success", res.data or [], "emergency kit scans loaded", "emergency_kit_scans")
     except Exception as e:
         return safe_response("error", [], str(e), "emergency_kit_scans", [{"service": "supabase", "message": str(e)}])
+
+
+@app.delete("/api/emergency-kit/scans/{scan_id}")
+async def delete_emergency_kit_scan(
+    scan_id: int,
+    user_id: Optional[str] = Query(None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    user_id = resolve_user_id(auth, user_id) or user_id
+    if not user_id:
+        return safe_response("error", {}, "user_id is required", "auth", [{"code": "missing_user_id"}])
+    try:
+        existing = (
+            supabase.table("emergency_kit_scans")
+            .select("id")
+            .eq("id", scan_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            return safe_response("not_found", {"id": scan_id}, "scan not found", "emergency_kit_scans")
+        supabase.table("emergency_kit_scans").delete().eq("id", scan_id).eq("user_id", user_id).execute()
+        return safe_response("success", {"id": scan_id}, "scan deleted", "emergency_kit_scans")
+    except Exception as e:
+        return safe_response("error", {"id": scan_id}, str(e), "emergency_kit_scans", [{"service": "supabase", "message": str(e)}])
      
 @app.get("/api/guidelines")
 async def get_guidelines(

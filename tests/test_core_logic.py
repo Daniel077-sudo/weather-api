@@ -562,8 +562,117 @@ class CoreLogicTests(unittest.TestCase):
                 },
             )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), fake_result)
+        body = response.json()
+        self.assertEqual(body["status"], "success")
+        self.assertEqual(body["score"], fake_result["score"])
+        self.assertEqual(body["safety_level"], fake_result["safety_level"])
+        self.assertEqual(body["risks"], fake_result["risks"])
+        self.assertEqual(body["risk_items"][0]["finding"], "櫥櫃未固定")
         self.assertEqual(vision.await_args.kwargs["timeout_seconds"], 25.0)
+
+    def test_home_safety_vision_failure_is_explicit_error(self):
+        client = TestClient(main.app)
+        failure = {
+            "_vision_status": "error",
+            "_vision_error_code": "http_404",
+            "_vision_model": "invalid-model",
+        }
+        with patch("main.call_gemini_vision", new=AsyncMock(return_value=failure)):
+            response = client.post(
+                "/api/home-safety/vision-check",
+                json={
+                    "mode": "fire_safety",
+                    "image_base64": base64.b64encode(b"test-image").decode("ascii"),
+                    "mime_type": "image/jpeg",
+                },
+            )
+        body = response.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["error_code"], "http_404")
+        self.assertEqual(body["risks"], [])
+        self.assertEqual(body["risk_items"], [])
+
+    def test_emergency_kit_vision_failure_is_not_saved(self):
+        calls = []
+
+        class FakeResult:
+            data = []
+
+        class FakeQuery:
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def order(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                return FakeResult()
+
+            def insert(self, *_args, **_kwargs):
+                calls.append("insert")
+                raise AssertionError("failed vision result must not be inserted")
+
+        class FakeSupabase:
+            def table(self, _table_name):
+                return FakeQuery()
+
+        failure = {
+            "_vision_status": "error",
+            "_vision_error_code": "timeout",
+            "_vision_model": "gemini-3.5-flash-lite",
+        }
+        original_supabase = main.supabase
+        try:
+            main.supabase = FakeSupabase()
+            client = TestClient(main.app)
+            with patch("main.call_gemini_vision", new=AsyncMock(return_value=failure)):
+                response = client.post(
+                    "/api/emergency-kit/vision-check",
+                    json={
+                        "image_base64": base64.b64encode(b"test-image").decode("ascii"),
+                        "mime_type": "image/jpeg",
+                    },
+                )
+        finally:
+            main.supabase = original_supabase
+
+        body = response.json()
+        self.assertEqual(body["status"], "error")
+        self.assertEqual(body["data"]["missing_items"], [])
+        self.assertEqual(body["data"]["error_code"], "timeout")
+        self.assertEqual(calls, [])
+
+    def test_gemini_vision_missing_key_returns_diagnostics(self):
+        original_key = gemini_service.GEMINI_API_KEY
+        try:
+            gemini_service.GEMINI_API_KEY = ""
+            result = asyncio.run(
+                gemini_service.call_gemini_vision(b"image", "image/jpeg", "return JSON")
+            )
+        finally:
+            gemini_service.GEMINI_API_KEY = original_key
+        self.assertEqual(result["_vision_status"], "error")
+        self.assertEqual(result["_vision_error_code"], "missing_api_key")
+
+    def test_emergency_kit_scan_history_never_lists_all_users(self):
+        client = TestClient(main.app)
+        response = client.get("/api/emergency-kit/scans")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "error")
+        self.assertEqual(response.json()["errors"][0]["code"], "missing_user_id")
+
+    def test_emergency_kit_scan_delete_requires_user(self):
+        client = TestClient(main.app)
+        response = client.delete("/api/emergency-kit/scans/1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "error")
+        self.assertEqual(response.json()["errors"][0]["code"], "missing_user_id")
 
     def test_guidelines_unknown_activity_returns_not_found(self):
         client = TestClient(main.app)
@@ -710,6 +819,7 @@ class CoreLogicTests(unittest.TestCase):
         self.assertIn("POST /api/chat/memory/reset", body["data"]["protected_when_auth_required"])
         self.assertIn("PATCH /api/events/{event_id}", body["data"]["protected_when_auth_required"])
         self.assertIn("POST /api/home-safety/vision-check", body["data"]["protected_when_auth_required"])
+        self.assertIn("DELETE /api/emergency-kit/scans/{scan_id}", body["data"]["protected_when_auth_required"])
 
     def test_supabase_jwt_uses_sub_as_user_id(self):
         original_secret = auth.SUPABASE_JWT_SECRET

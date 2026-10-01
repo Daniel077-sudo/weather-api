@@ -195,10 +195,22 @@ async def call_gemini_vision(
     prompt: str,
     timeout_seconds: float | None = None,
 ) -> Dict[str, Any]:
-    if not GEMINI_API_KEY:
-        return {}
+    model = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash-lite")
+    if model in {"gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-2.0-flash"}:
+        model = "gemini-3.5-flash-lite"
 
-    model = os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash")
+    def error_result(code: str, message: str = "") -> Dict[str, Any]:
+        safe_message = message.replace(GEMINI_API_KEY or "__missing_key__", "[redacted]")[:300]
+        print(f"[gemini_vision] model={model} error={code} detail={safe_message}")
+        return {
+            "_vision_status": "error",
+            "_vision_error_code": code,
+            "_vision_model": model,
+        }
+
+    if not GEMINI_API_KEY:
+        return error_result("missing_api_key")
+
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [
@@ -214,7 +226,10 @@ async def call_gemini_vision(
                 ]
             }
         ],
-        "generationConfig": {"temperature": 0.2},
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
     }
     try:
         async with httpx.AsyncClient() as client:
@@ -226,8 +241,23 @@ async def call_gemini_vision(
             response.raise_for_status()
             res_json = response.json()
             text = res_json.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            return parse_json_object(text)
-    except Exception:
-        return {}
+            parsed = parse_json_object(text)
+            if not parsed:
+                return error_result("invalid_json_response")
+            return {
+                **parsed,
+                "_vision_status": "success",
+                "_vision_model": model,
+            }
+    except httpx.TimeoutException as e:
+        return error_result("timeout", str(e))
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code if e.response is not None else "unknown"
+        detail = e.response.text if e.response is not None else str(e)
+        return error_result(f"http_{status_code}", detail)
+    except httpx.RequestError as e:
+        return error_result("request_error", str(e))
+    except Exception as e:
+        return error_result("unexpected_error", str(e))
 
 
