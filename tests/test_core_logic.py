@@ -592,6 +592,17 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(body["risks"], [])
         self.assertEqual(body["risk_items"], [])
 
+    def test_home_safety_advice_normalizes_lists_and_python_list_strings(self):
+        fallback = "請人工確認。"
+        self.assertEqual(
+            main.normalize_home_safety_advice(["固定家具", "清空動線"], fallback),
+            "固定家具；清空動線",
+        )
+        self.assertEqual(
+            main.normalize_home_safety_advice("['檢查陽台', '關閉窗戶']", fallback),
+            "檢查陽台；關閉窗戶",
+        )
+
     def test_emergency_kit_vision_failure_is_not_saved(self):
         calls = []
 
@@ -660,6 +671,86 @@ class CoreLogicTests(unittest.TestCase):
             gemini_service.GEMINI_API_KEY = original_key
         self.assertEqual(result["_vision_status"], "error")
         self.assertEqual(result["_vision_error_code"], "missing_api_key")
+
+    def test_gemini_vision_retries_transient_503_once(self):
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def post(self, url, **_kwargs):
+                calls.append(url)
+                if len(calls) == 1:
+                    return FakeResponse(503, text="temporarily unavailable")
+                return FakeResponse(200, {
+                    "candidates": [{"content": {"parts": [{"text": '{"score": 88}'}]}}]
+                })
+
+        with patch.object(gemini_service, "GEMINI_API_KEY", "test-key"), \
+                patch("gemini_service.httpx.AsyncClient", return_value=FakeClient()), \
+                patch("gemini_service.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = asyncio.run(
+                gemini_service.call_gemini_vision(b"image", "image/jpeg", "return JSON", 25)
+            )
+
+        self.assertEqual(result["_vision_status"], "success")
+        self.assertEqual(result["score"], 88)
+        self.assertEqual(len(result["_vision_attempts"]), 2)
+        self.assertEqual(result["_vision_attempts"][0]["error_code"], "http_503")
+        sleep_mock.assert_awaited_once()
+
+    def test_gemini_vision_timeout_switches_to_fallback_model(self):
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"candidates": [{"content": {"parts": [{"text": '{"score": 77}'}]}}]}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def post(self, url, **_kwargs):
+                calls.append(url)
+                if len(calls) == 1:
+                    raise gemini_service.httpx.ReadTimeout("timed out")
+                return FakeResponse()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "GEMINI_VISION_MODEL": "gemini-3.5-flash-lite",
+                "GEMINI_VISION_FALLBACK_MODEL": "gemini-3.5-flash",
+            },
+        ), patch.object(gemini_service, "GEMINI_API_KEY", "test-key"), \
+                patch("gemini_service.httpx.AsyncClient", return_value=FakeClient()):
+            result = asyncio.run(
+                gemini_service.call_gemini_vision(b"image", "image/jpeg", "return JSON", 25)
+            )
+
+        self.assertEqual(result["_vision_status"], "success")
+        self.assertEqual(result["_vision_model"], "gemini-3.5-flash")
+        self.assertIn("gemini-3.5-flash-lite", calls[0])
+        self.assertIn("gemini-3.5-flash", calls[1])
 
     def test_emergency_kit_scan_history_never_lists_all_users(self):
         client = TestClient(main.app)

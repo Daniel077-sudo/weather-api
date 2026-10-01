@@ -1,4 +1,5 @@
 import base64
+import ast
 import hashlib
 import json
 import time
@@ -1908,6 +1909,23 @@ def home_safety_error(advice: str, error_code: str = "validation_error", model: 
     }
 
 
+def normalize_home_safety_advice(value: Any, fallback: str) -> str:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return "；".join(parts) or fallback
+    text = str(value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            parsed = None
+        if isinstance(parsed, (list, tuple)):
+            parts = [str(item).strip() for item in parsed if str(item).strip()]
+            if parts:
+                return "；".join(parts)
+    return text or fallback
+
+
 @app.post("/api/home-safety/vision-check")
 async def check_home_safety_image(
     payload: HomeSafetyVisionRequest,
@@ -1958,7 +1976,10 @@ async def check_home_safety_image(
         level = "SAFE" if score >= 80 else "WARNING" if score >= 50 else "DANGER"
     risks = raw.get("risks") if isinstance(raw.get("risks"), list) else []
     risks = [str(item).strip() for item in risks if str(item).strip()]
-    advice = str(raw.get("advice") or "請依居家安全檢查清單逐項人工確認。").strip()
+    advice = normalize_home_safety_advice(
+        raw.get("advice"),
+        "請依居家安全檢查清單逐項人工確認。",
+    )
     default_severity = "high" if level == "DANGER" else "medium" if level == "WARNING" else "low"
     raw_risk_items = raw.get("risk_items") if isinstance(raw.get("risk_items"), list) else []
     risk_items = []
@@ -1977,7 +1998,7 @@ async def check_home_safety_image(
             risk_items.append({
                 "finding": finding,
                 "severity": severity,
-                "recommendation": str(item.get("recommendation") or advice).strip(),
+                "recommendation": normalize_home_safety_advice(item.get("recommendation"), advice),
                 "certainty": certainty,
             })
     if not risk_items:

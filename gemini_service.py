@@ -1,6 +1,8 @@
+import asyncio
 import base64
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 import httpx
@@ -195,23 +197,26 @@ async def call_gemini_vision(
     prompt: str,
     timeout_seconds: float | None = None,
 ) -> Dict[str, Any]:
-    model = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash-lite")
-    if model in {"gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-2.0-flash"}:
-        model = "gemini-3.5-flash-lite"
+    primary_model = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash-lite")
+    if primary_model in {"gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-2.0-flash"}:
+        primary_model = "gemini-3.5-flash-lite"
+    fallback_model = os.getenv("GEMINI_VISION_FALLBACK_MODEL", "gemini-3.5-flash")
+    total_timeout = max(1.0, timeout_seconds or GEMINI_VISION_TIMEOUT_SECONDS)
+    attempts = []
 
-    def error_result(code: str, message: str = "") -> Dict[str, Any]:
+    def error_result(code: str, model: str, message: str = "") -> Dict[str, Any]:
         safe_message = message.replace(GEMINI_API_KEY or "__missing_key__", "[redacted]")[:300]
         print(f"[gemini_vision] model={model} error={code} detail={safe_message}")
         return {
             "_vision_status": "error",
             "_vision_error_code": code,
             "_vision_model": model,
+            "_vision_attempts": attempts,
         }
 
     if not GEMINI_API_KEY:
-        return error_result("missing_api_key")
+        return error_result("missing_api_key", primary_model)
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [
             {
@@ -232,33 +237,78 @@ async def call_gemini_vision(
             "thinkingConfig": {"thinkingLevel": "minimal"},
         },
     }
-    try:
-        async with httpx.AsyncClient() as client:
+
+    async def request_model(client: httpx.AsyncClient, model: str, request_timeout: float):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        try:
             response = await client.post(
                 url,
                 json=payload,
-                timeout=timeout_seconds or GEMINI_VISION_TIMEOUT_SECONDS,
+                timeout=request_timeout,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                return None, f"http_{response.status_code}", response.text
             res_json = response.json()
             text = res_json.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             parsed = parse_json_object(text)
             if not parsed:
-                return error_result("invalid_json_response")
-            return {
-                **parsed,
-                "_vision_status": "success",
-                "_vision_model": model,
-            }
-    except httpx.TimeoutException as e:
-        return error_result("timeout", str(e))
-    except httpx.HTTPStatusError as e:
-        status_code = e.response.status_code if e.response is not None else "unknown"
-        detail = e.response.text if e.response is not None else str(e)
-        return error_result(f"http_{status_code}", detail)
-    except httpx.RequestError as e:
-        return error_result("request_error", str(e))
-    except Exception as e:
-        return error_result("unexpected_error", str(e))
+                return None, "invalid_json_response", ""
+            return parsed, "", ""
+        except httpx.TimeoutException as e:
+            return None, "timeout", str(e)
+        except httpx.RequestError as e:
+            return None, "request_error", str(e)
+        except Exception as e:
+            return None, "unexpected_error", str(e)
+
+    deadline = time.monotonic() + total_timeout
+    transient_codes = {"http_429", "http_500", "http_502", "http_503", "http_504"}
+    last_code = "empty_response"
+    last_detail = ""
+    last_model = primary_model
+
+    async with httpx.AsyncClient() as client:
+        for primary_attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.5:
+                break
+            attempt_timeout = min(8.0, max(0.5, remaining - 0.25))
+            parsed, code, detail = await request_model(client, primary_model, attempt_timeout)
+            attempts.append({"model": primary_model, "error_code": code or ""})
+            if parsed is not None:
+                return {
+                    **parsed,
+                    "_vision_status": "success",
+                    "_vision_model": primary_model,
+                    "_vision_attempts": attempts,
+                }
+            last_code, last_detail, last_model = code, detail, primary_model
+            if code == "timeout" or code not in transient_codes or primary_attempt == 1:
+                break
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic() - 0.5)))
+
+        if fallback_model and fallback_model != primary_model:
+            remaining = deadline - time.monotonic()
+            if remaining > 0.5:
+                if last_code in transient_codes:
+                    await asyncio.sleep(min(1.0, max(0.0, remaining - 0.5)))
+                    remaining = deadline - time.monotonic()
+                if remaining > 0.5:
+                    parsed, code, detail = await request_model(
+                        client,
+                        fallback_model,
+                        max(0.5, remaining - 0.25),
+                    )
+                    attempts.append({"model": fallback_model, "error_code": code or ""})
+                    if parsed is not None:
+                        return {
+                            **parsed,
+                            "_vision_status": "success",
+                            "_vision_model": fallback_model,
+                            "_vision_attempts": attempts,
+                        }
+                    last_code, last_detail, last_model = code, detail, fallback_model
+
+    return error_result(last_code or "empty_response", last_model, last_detail)
 
 
