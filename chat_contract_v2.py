@@ -1,4 +1,5 @@
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,7 +15,7 @@ HOURS = {
 ACTIVITIES = [
     "騎腳踏車", "騎自行車", "腳踏車", "自行車", "騎車",
     "開會", "游泳", "遊泳", "爬山", "跑步", "路跑", "打球", "運動", "露營",
-    "上課", "看診", "考試", "聚餐", "旅遊", "出遊", "買菜", "通勤", "玩",
+    "上課", "看診", "考試", "聚餐", "旅遊", "出遊", "買菜", "通勤", "吃冰", "玩",
 ]
 WEATHER_WORDS = ["天氣", "下雨", "降雨", "帶傘", "氣溫", "熱不熱", "冷不冷", "會不會下雨"]
 
@@ -183,7 +184,7 @@ def _has_weather_question(message: str) -> bool:
     return any(word in message for word in WEATHER_WORDS) or "適合" in message
 
 
-def _infer_intent(message: str, intent_hint: Optional[str], now: datetime) -> str:
+def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_draft: bool = False) -> str:
     if message in {"不用了", "算了", "取消好了", "先不用"}:
         return "GENERAL_CHAT"
     if any(word in message for word in ["刪掉", "刪除", "取消行程", "移除行程"]) or (
@@ -206,7 +207,7 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime) -> st
     destination_signal = bool(re.search(r"(?:去|到|前往)\s*[^，。！？\s]+", message))
     if create_signal or (dates and destination_signal and location["city"]) or (activity and (dates or times or location["city"])) or (dates and times and location["city"]):
         return "CREATE_EVENT"
-    if intent_hint == "CREATE_EVENT" and (activity or _time_mentions(message) or _location(message)["city"]):
+    if intent_hint == "CREATE_EVENT" and (has_draft or activity or dates or times or location["city"]):
         return "CREATE_EVENT"
     return "GENERAL_CHAT"
 
@@ -241,6 +242,8 @@ def _draft_title(message: str) -> Optional[str]:
             if value.endswith(("市", "縣")):
                 text = text.replace(value[:-1], " ")
     text = re.sub(r"要去|前往|到|去|在|的|嗎|呢|[？?！!，。]", " ", text)
+    text = re.sub(r"^[\s「『\"']*(?:我|我們)[\s「『\"']*", "", text)
+    text = text.strip(" \t\r\n「」『』\"'，。！？!?：:")
     return _text(text) or None
 
 
@@ -272,12 +275,16 @@ def _entity_dates(message: str, now: datetime) -> Tuple[Optional[str], Optional[
 
 def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     message = _text(payload.get("message"))
+    assistant_name = " ".join(str(payload.get("assistant_name") or "").split())[:24] or "小藍"
     now = _client_now(payload.get("client_now"))
-    intent = _infer_intent(message, payload.get("intent_hint"), now)
-    response = _base_response(intent, message, payload.get("draft_id"))
+    existing_draft = dict(payload.get("draft_event") or {})
+    intent = _infer_intent(message, payload.get("intent_hint"), now, bool(existing_draft))
+    draft_id = payload.get("draft_id") or (f"draft-{uuid.uuid4().hex}" if intent == "CREATE_EVENT" else None)
+    response = _base_response(intent, message, draft_id)
+    response["assistant_name"] = assistant_name
 
     if intent == "CREATE_EVENT":
-        existing = dict(payload.get("draft_event") or {})
+        existing = existing_draft
         dates = _date_mentions(message, now)
         times = _time_mentions(message)
         preferred_city = existing.get("city")
@@ -368,7 +375,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             response["reply"] = "請先確認官方警報，避開危險區域並準備飲水、藥品、證件與行動電源。"
         return response
 
-    response["reply"] = "不用了" in message and "好的，這次不建立草稿。" or "嗨，我是小藍。需要查行程、天氣或防災資訊都可以告訴我。"
+    response["reply"] = "不用了" in message and "好的，這次不建立草稿。" or f"嗨，我是{assistant_name}。需要查行程、天氣或防災資訊都可以告訴我。"
     return response
 
 

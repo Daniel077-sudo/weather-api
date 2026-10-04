@@ -660,6 +660,29 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(vision.await_args.kwargs["timeout_seconds"], 25.0)
 
+    def test_emergency_kit_tea_cannot_count_as_drinking_water(self):
+        result = main.normalize_emergency_kit_water_result({
+            "detected_items": ["飲用水", "茉莉蜜茶", "手電筒"],
+            "extra_items": [],
+            "notes": "辨識到一瓶茶飲。",
+        })
+        self.assertNotIn("飲用水", result["detected_items"])
+        self.assertNotIn("茉莉蜜茶", result["detected_items"])
+        self.assertIn("茉莉蜜茶", result["extra_items"])
+        self.assertIn("飲料不能取代飲用水", result["notes"])
+
+    def test_emergency_kit_keeps_real_water_when_beverage_is_also_present(self):
+        result = main.normalize_emergency_kit_water_result({
+            "detected_items": ["瓶裝礦泉水", "運動飲料"],
+            "extra_items": [],
+            "notes": "",
+        })
+        self.assertIn("飲用水", result["detected_items"])
+        self.assertIn("瓶裝礦泉水", result["detected_items"])
+        self.assertNotIn("運動飲料", result["detected_items"])
+        self.assertIn("運動飲料", result["extra_items"])
+        self.assertIn("飲料不能取代飲用水", result["notes"])
+
     def test_gemini_vision_missing_key_returns_diagnostics(self):
         original_key = gemini_service.GEMINI_API_KEY
         try:
@@ -1160,6 +1183,63 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(stored_event["district"], "鹽埕區")
             self.assertNotEqual(stored_event["district"], "中正區")
             self.assertEqual(len(background_tasks.tasks), 1)
+        finally:
+            main.supabase = original_supabase
+
+    def test_update_event_failure_does_not_partially_mutate_event(self):
+        stored_event = {
+            "id": "atomic-test",
+            "user_id": "jwt-user",
+            "title": "原標題",
+            "city": "臺北市",
+            "district": "大安區",
+            "location": "臺北市大安區",
+        }
+
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def __init__(self, action="select", payload=None):
+                self.action = action
+                self.payload = payload or {}
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def update(self, payload):
+                return FakeQuery("update", payload)
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                if self.action == "select":
+                    return FakeResult([dict(stored_event)])
+                raise Exception("simulated atomic database failure")
+
+        class FakeSupabase:
+            def table(self, _table_name):
+                return FakeQuery()
+
+        original_supabase = main.supabase
+        try:
+            main.supabase = FakeSupabase()
+            response = asyncio.run(
+                main.update_event_by_id(
+                    "atomic-test",
+                    main.EventUpdate(title="新標題", city="高雄市", district="鹽埕區"),
+                    auth.AuthContext(user_id="jwt-user", authenticated=True),
+                )
+            )
+            self.assertEqual(response["status"], "error")
+            self.assertEqual(stored_event["title"], "原標題")
+            self.assertEqual(stored_event["city"], "臺北市")
+            self.assertEqual(stored_event["district"], "大安區")
         finally:
             main.supabase = original_supabase
 

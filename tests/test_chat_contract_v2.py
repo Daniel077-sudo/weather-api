@@ -1,7 +1,7 @@
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -161,6 +161,69 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(body["action_type"], "NONE")
         self.assertIsNone(body["event_id"])
         self.assertIn("contract_version: 2", body["reply"])
+
+    def test_general_chat_uses_gemini_and_custom_assistant_name(self):
+        client = TestClient(main.app)
+        payload = {
+            "user_id": "test-user",
+            "message": "我今天心情有點累",
+            "assistant_name": "晴晴",
+            "contract_version": 2,
+            "client_now": SUITE["client_now"],
+        }
+        with patch.object(main, "get_chat_history", return_value={"status": "success", "data": []}), patch.object(
+            main,
+            "generate_general_chat_reply",
+            new=AsyncMock(return_value="我是晴晴。辛苦了，今天可以先讓自己喘口氣。"),
+        ) as generate_reply, patch.object(main, "persist_chat_turn", return_value=None):
+            response = client.post("/api/chat", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["intent"], "GENERAL_CHAT")
+        self.assertEqual(body["assistant_name"], "晴晴")
+        self.assertIn("晴晴", body["reply"])
+        generate_reply.assert_awaited_once()
+
+    def test_cancel_general_chat_stays_deterministic_without_gemini(self):
+        client = TestClient(main.app)
+        payload = {
+            "user_id": "test-user",
+            "message": "不用了",
+            "assistant_name": "阿晴",
+            "contract_version": 2,
+            "client_now": SUITE["client_now"],
+        }
+        with patch.object(main, "generate_general_chat_reply", new=AsyncMock()) as generate_reply, patch.object(
+            main, "persist_chat_turn", return_value=None
+        ):
+            response = client.post("/api/chat", json=payload)
+
+        body = response.json()
+        self.assertEqual(body["reply"], "好的，這次不建立草稿。")
+        self.assertEqual(body["assistant_name"], "阿晴")
+        generate_reply.assert_not_awaited()
+
+    def test_date_only_follow_up_completes_existing_create_draft(self):
+        first = self.payload_for({"input": "我下午兩點要去台北吃冰"})
+        first_result = build_chat_v2_response(first)
+        self.assertEqual(first_result["intent"], "CREATE_EVENT")
+        self.assertIn("date", first_result["missing_fields"])
+        self.assertTrue(first_result["draft_id"].startswith("draft-"))
+        self.assertEqual(first_result["draft_event"]["title"], "吃冰")
+
+        follow_up = self.payload_for({"input": "10/4"})
+        follow_up.update({
+            "intent_hint": "CREATE_EVENT",
+            "draft_id": first_result["draft_id"],
+            "draft_event": first_result["draft_event"],
+        })
+        second_result = build_chat_v2_response(follow_up)
+        self.assertEqual(second_result["intent"], "CREATE_EVENT")
+        self.assertEqual(second_result["draft_id"], first_result["draft_id"])
+        self.assertEqual(second_result["draft_event"]["date"], "2026-10-04")
+        self.assertEqual(second_result["draft_event"]["title"], "吃冰")
+        self.assertFalse(second_result["needs_clarification"])
 
 
 if __name__ == "__main__":

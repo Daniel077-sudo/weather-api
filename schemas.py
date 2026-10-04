@@ -19,6 +19,7 @@ class WeatherSuggestionRequest(BaseModel):
 class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     message: str
+    assistant_name: Optional[str] = None
     current_location: Optional[str] = None
     draft_mode: bool = False
     contract_version: Optional[int] = None
@@ -31,6 +32,8 @@ class ChatRequest(BaseModel):
 class ChatCommandResponse(BaseModel):
     status: str = "success"
     reply: str = ""
+    assistant_name: str = "小藍"
+    gemini_status: str = "not_called"
     has_alert: bool = False
     alert_title: str = ""
     alert_url: str = ""

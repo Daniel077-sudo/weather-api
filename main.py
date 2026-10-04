@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import ast
 import hashlib
@@ -19,7 +20,7 @@ from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event
-from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, summarize_ai_usage
+from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, generate_general_chat_reply, normalize_assistant_name, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response
@@ -221,6 +222,13 @@ async def chat_command(
             if not payload.client_now:
                 raise ValueError("client_now is required for contract_version 2")
             result = build_chat_v2_response(payload.model_dump())
+            if result.get("intent") == "GENERAL_CHAT" and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
+                history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
+                history = history_response.get("data") if isinstance(history_response, dict) else []
+                result["reply"] = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
+                result["gemini_status"] = get_timing().get("gemini_status", "error")
+            result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
+            result.setdefault("gemini_status", "not_called")
             result.update({
                 "event_id": None,
                 "event_id_to_delete": None,
@@ -241,7 +249,14 @@ async def chat_command(
             draft_payload["contract_version"] = 2
             draft_payload["client_now"] = payload.client_now or taipei_now().isoformat()
             draft_result = build_chat_v2_response(draft_payload)
+            if draft_result.get("intent") == "GENERAL_CHAT" and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
+                history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
+                history = history_response.get("data") if isinstance(history_response, dict) else []
+                draft_result["reply"] = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
+                draft_result["gemini_status"] = get_timing().get("gemini_status", "error")
             result = draft_to_legacy_response(draft_result)
+            result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
+            result["gemini_status"] = draft_result.get("gemini_status", "not_called")
             if result.get("action_type") in {"DELETE_EVENT", "UPDATE_EVENT"}:
                 event_filter = draft_result.get("event_filter") or {}
                 lookup_start = ""
@@ -266,6 +281,8 @@ async def chat_command(
             result = {
                 "status": "error",
                 "reply": "此版本的聊天契約已停用，請更新 App 並使用 contract_version: 2。",
+                "assistant_name": normalize_assistant_name(payload.assistant_name),
+                "gemini_status": "not_called",
                 "action_type": "NONE",
                 "event_id": None,
                 "event_id_to_delete": None,
@@ -299,6 +316,8 @@ async def chat_command(
                 "needs_clarification": False,
                 "missing_fields": [],
                 "reply": "我暫時無法處理這則訊息，請稍後再試。",
+                "assistant_name": normalize_assistant_name(payload.assistant_name),
+                "gemini_status": get_timing().get("gemini_status", "error"),
                 "draft_id": payload.draft_id,
                 "draft_event": None,
                 "event_filter": None,
@@ -309,7 +328,9 @@ async def chat_command(
             }
         return {
             "status": "error",
-            "reply": "小藍暫時無法完成這次操作，請稍後再試。",
+            "reply": f"{normalize_assistant_name(payload.assistant_name)}暫時無法完成這次操作，請稍後再試。",
+            "assistant_name": normalize_assistant_name(payload.assistant_name),
+            "gemini_status": get_timing().get("gemini_status", "error"),
             "action_type": "NONE",
             "timing": get_timing(),
         }
@@ -1452,68 +1473,22 @@ async def update_event_by_id(
         risk_keys = {"title", "start_time", "end_time", "city", "district", "location", "transport_type", "url"}
         should_refresh_risk = bool(risk_keys.intersection(update_payload.keys()))
 
-        update_candidates = []
-        full_payload = dict(update_payload)
-        update_candidates.append(full_payload)
-        update_candidates.append({
-            key: value
-            for key, value in full_payload.items()
-            if key not in {"weather_snapshot", "weather_checked_at"}
-        })
-        update_candidates.append({
-            key: value
-            for key, value in full_payload.items()
-            if key
-            in {
-                "user_id",
-                "title",
-                "start_time",
-                "end_time",
-                "city",
-                "district",
-                "location",
-                "location_name",
-                "url",
-                "transport_ticket_link",
-                "transport_type",
-                "has_weather_risk",
-                "ai_suggestion",
-                "description",
-                "external_source",
-                "external_event_id",
-                "last_synced_at",
-            }
-        })
-        update_candidates.append({
-            key: value
-            for key, value in full_payload.items()
-            if key in {"title", "start_time", "end_time", "location", "has_weather_risk", "ai_suggestion"}
-        })
-
-        updated_event = {}
-        last_error = None
-        seen_payloads = set()
-        for candidate in update_candidates:
-            candidate = {key: value for key, value in candidate.items() if value is not None}
-            signature = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str)
-            if not candidate or signature in seen_payloads:
-                continue
-            seen_payloads.add(signature)
-            try:
-                update_query = supabase.table("events").update(candidate).eq("id", event_id)
-                if user_id:
-                    update_query = update_query.eq("user_id", user_id)
-                updated_res = update_query.execute()
-                updated_event = (updated_res.data or [{}])[0]
-                update_payload = candidate
-                last_error = None
-                break
-            except Exception as update_e:
-                last_error = update_e
-                continue
-
-        if last_error is not None:
-            return safe_response("error", {"id": event_id}, str(last_error), "events", [{"service": "supabase", "message": str(last_error)}])
+        # A single PostgREST UPDATE is atomic. Do not retry with reduced field sets:
+        # that can report success after silently dropping part of the user's edit.
+        update_payload = {key: value for key, value in update_payload.items() if value is not None}
+        update_query = supabase.table("events").update(update_payload).eq("id", event_id)
+        if user_id:
+            update_query = update_query.eq("user_id", user_id)
+        updated_res = update_query.execute()
+        if not updated_res.data:
+            return safe_response(
+                "error",
+                {"id": event_id},
+                "Event update did not modify any row",
+                "events",
+                [{"code": "update_not_applied"}],
+            )
+        updated_event = updated_res.data[0]
         result_event = {**merged_payload, **update_payload, **updated_event}
         if should_refresh_risk and background_tasks:
             background_tasks.add_task(update_event_weather_snapshot, event_id, result_event)
@@ -2022,6 +1997,52 @@ async def check_home_safety_image(
     }
 
 
+NON_WATER_BEVERAGE_KEYWORDS = (
+    "茶", "蜜茶", "紅茶", "綠茶", "奶茶", "咖啡", "果汁", "汽水", "可樂",
+    "運動飲料", "能量飲料", "機能飲料", "乳飲", "牛奶", "豆漿", "飲料",
+)
+PURE_WATER_KEYWORDS = ("瓶裝水", "礦泉水", "純水", "蒸餾水")
+
+
+def normalize_emergency_kit_water_result(vision_result: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(vision_result or {})
+    raw_detected = normalized.get("detected_items") or []
+    raw_extras = normalized.get("extra_items") or []
+    if not isinstance(raw_detected, list):
+        raw_detected = []
+    if not isinstance(raw_extras, list):
+        raw_extras = []
+    detected = [str(item).strip() for item in raw_detected if str(item).strip()]
+    extras = [str(item).strip() for item in raw_extras if str(item).strip()]
+    notes = str(normalized.get("notes") or "").strip()
+
+    beverage_items = [
+        item for item in detected + extras
+        if any(keyword in item for keyword in NON_WATER_BEVERAGE_KEYWORDS)
+    ]
+    detected = [item for item in detected if item not in beverage_items]
+    for item in beverage_items:
+        if item not in extras:
+            extras.append(item)
+
+    has_explicit_pure_water = any(
+        any(keyword in item for keyword in PURE_WATER_KEYWORDS)
+        for item in detected
+    )
+    if has_explicit_pure_water and "飲用水" not in detected:
+        detected.append("飲用水")
+    if beverage_items and not has_explicit_pure_water:
+        detected = [item for item in detected if item != "飲用水" and "飲用水" not in item]
+
+    if beverage_items and "飲料不能取代飲用水" not in notes:
+        notes = f"{notes} 飲料不能取代飲用水。".strip()
+
+    normalized["detected_items"] = list(dict.fromkeys(detected))
+    normalized["extra_items"] = list(dict.fromkeys(extras))
+    normalized["notes"] = notes
+    return normalized
+
+
 @app.post("/api/emergency-kit/vision-check")
 async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: AuthContext = Depends(get_auth_context)):
     payload.user_id = resolve_user_id(auth, payload.user_id) or payload.user_id
@@ -2055,7 +2076,9 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
             "validation",
         )
 
-    image_hash = hashlib.sha256(image_bytes).hexdigest()
+    # Salt the cache key when recognition rules change so stale classifications
+    # are not returned for the same image after a deployment.
+    image_hash = hashlib.sha256(b"emergency-kit-water-v2\0" + image_bytes).hexdigest()
     errors = []
     try:
         cached_query = supabase.table("emergency_kit_scans").select("*").eq("image_hash", image_hash).order("created_at", desc=True)
@@ -2116,6 +2139,10 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
         "你是台灣防災避難包檢查助手。請辨識圖片中出現的避難物資。"
         "只回傳 JSON，不要 markdown。"
         f"必要物資清單:{json.dumps(REQUIRED_EMERGENCY_KIT_ITEMS, ensure_ascii=False)}。"
+        "飲用水判定規則：只有瓶裝水、礦泉水、純水等不含糖且不是調味飲料的純水，才可列入 detected_items 的飲用水。"
+        "含糖飲料、無糖茶飲、咖啡、果汁、汽水、乳飲品、能量飲料與運動飲料都不能算飲用水；"
+        "請用影像上可辨識的實際品名放入 extra_items，並在 notes 明確寫出「飲料不能取代飲用水」。"
+        "若只有上述飲料而沒有純水，missing_items 必須包含飲用水。若純水和飲料同時存在，純水可算飲用水，飲料仍放 extra_items。"
         "JSON 欄位: detected_items(陣列), missing_items(陣列), extra_items(陣列), confidence(0到1), notes(字串)。"
     )
     vision_result = await call_gemini_vision(
@@ -2150,23 +2177,26 @@ async def check_emergency_kit_image(payload: EmergencyKitVisionRequest, auth: Au
             [{"service": "gemini", "code": error_code}],
         )
 
-    detected_items = vision_result.get("detected_items") or []
-    if not isinstance(detected_items, list):
-        detected_items = []
+    vision_result = normalize_emergency_kit_water_result(vision_result)
+    detected_items = vision_result["detected_items"]
     detected_text = " ".join(str(item) for item in detected_items)
     missing_items = [
         item for item in REQUIRED_EMERGENCY_KIT_ITEMS
         if item not in detected_items and item not in detected_text
     ]
     if isinstance(vision_result.get("missing_items"), list) and vision_result.get("missing_items"):
-        missing_items = sorted(set(missing_items + [str(item) for item in vision_result["missing_items"]]))
+        reported_missing = [
+            str(item) for item in vision_result["missing_items"]
+            if str(item) not in detected_items and str(item) not in detected_text
+        ]
+        missing_items = sorted(set(missing_items + reported_missing))
 
     result = {
         "user_id": payload.user_id,
         "kit_id": payload.kit_id,
         "detected_items": [str(item) for item in detected_items],
         "missing_items": missing_items,
-        "extra_items": vision_result.get("extra_items") or [],
+        "extra_items": vision_result["extra_items"],
         "confidence": vision_result.get("confidence") or 0,
         "supplement_suggestions": [f"請補齊：{item}" for item in missing_items],
         "daily_limit": VISION_DAILY_LIMIT,
