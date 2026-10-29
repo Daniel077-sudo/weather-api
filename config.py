@@ -42,6 +42,7 @@ GEMINI_TIMEOUT_SECONDS = env_float("GEMINI_TIMEOUT_SECONDS", 12.0)
 GEMINI_VISION_TIMEOUT_SECONDS = env_float("GEMINI_VISION_TIMEOUT_SECONDS", 45.0)
 SUPABASE_JWT_SECRET = env_str("SUPABASE_JWT_SECRET").strip()
 AUTH_REQUIRED = env_str("AUTH_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+BACKEND_INTERNAL_KEY = env_str("BACKEND_INTERNAL_KEY").strip()
 
 
 class MissingSupabaseClient:

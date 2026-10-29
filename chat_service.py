@@ -153,7 +153,11 @@ def friendly_db_unavailable_reply(title: str) -> str:
     return f"小藍已理解要建立「{title}」，但目前資料庫暫時無法寫入。請稍後再試。"
 
 
-def persist_local_chat_turn(user_id: str, message: str, response: Dict[str, Any], now: str):
+def normalize_chat_channel(value: Any) -> str:
+    return "line" if str(value or "").lower() == "line" else "app"
+
+
+def persist_local_chat_turn(user_id: str, message: str, response: Dict[str, Any], now: str, channel: str = "app"):
     if not user_id:
         return
     rows = LOCAL_CHAT_HISTORY.setdefault(user_id, [])
@@ -162,6 +166,7 @@ def persist_local_chat_turn(user_id: str, message: str, response: Dict[str, Any]
         "user_id": user_id,
         "role": "user",
         "content": message,
+        "channel": normalize_chat_channel(channel),
         "created_at": now,
     })
     rows.append({
@@ -171,6 +176,7 @@ def persist_local_chat_turn(user_id: str, message: str, response: Dict[str, Any]
         "content": response.get("reply") or "",
         "response_payload": response,
         "action_type": response.get("action_type") or "NONE",
+        "channel": normalize_chat_channel(channel),
         "created_at": now,
     })
     del rows[:-80]
@@ -178,9 +184,10 @@ def persist_local_chat_turn(user_id: str, message: str, response: Dict[str, Any]
     LOCAL_PENDING_EVENTS.pop(user_id, None)
 
 
-def build_chat_log_rows(user_id: str, message: str, response: Dict[str, Any], now: str) -> List[Dict[str, Any]]:
+def build_chat_log_rows(user_id: str, message: str, response: Dict[str, Any], now: str, channel: str = "app") -> List[Dict[str, Any]]:
     common = {
         "user_id": user_id,
+        "channel": normalize_chat_channel(channel),
         "event_title": "",
         "event_start": None,
         "event_end": None,
@@ -269,12 +276,13 @@ def compact_memory(existing_markdown: str, message: str, response: Dict[str, Any
     return memory
 
 
-def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
+def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any], channel: str = "app"):
     if not user_id:
         return
     now = taipei_now().isoformat()
-    persist_local_chat_turn(user_id, message, response, now)
-    chat_rows = build_chat_log_rows(user_id, message, response, now)
+    channel = normalize_chat_channel(channel)
+    persist_local_chat_turn(user_id, message, response, now, channel)
+    chat_rows = build_chat_log_rows(user_id, message, response, now, channel)
     try:
         with timed("memory_persist_ms"):
             supabase.table(CHAT_LOGS_TABLE).insert(chat_rows).execute()
@@ -283,6 +291,7 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any]):
             supabase.table(CHAT_LOGS_TABLE).insert({
                 "user_input": f"[{user_id}] {message}",
                 "ai_response": response.get("reply") or "",
+                "channel": channel,
             }).execute()
         except Exception:
             pass
@@ -340,9 +349,9 @@ def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
             normalized_rows.extend(expand_chat_history_row(row, user_id))
         local_rows = [normalize_chat_history_row(row, user_id) for row in LOCAL_CHAT_HISTORY.get(user_id, [])]
         if local_rows:
-            seen = {(item.get("sender"), item.get("message"), item.get("created_at")) for item in normalized_rows}
+            seen = {(item.get("sender"), item.get("message"), item.get("created_at"), item.get("channel")) for item in normalized_rows}
             for item in local_rows:
-                key = (item.get("sender"), item.get("message"), item.get("created_at"))
+                key = (item.get("sender"), item.get("message"), item.get("created_at"), item.get("channel"))
                 if key not in seen:
                     normalized_rows.append(item)
         return safe_response("success", dedupe_chat_history(normalized_rows)[-limit:], "chat history loaded", CHAT_LOGS_TABLE)
@@ -391,6 +400,7 @@ def normalize_chat_history_row(row: Dict[str, Any], requested_user_id: str = "")
         "created_at": row.get("created_at"),
         "action_type": row.get("action_type") or "",
         "response_payload": row.get("response_payload") or {},
+        "channel": normalize_chat_channel(row.get("channel")),
     }
 
 
@@ -404,10 +414,7 @@ def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         response_payload = row.get("response_payload") or {}
         action_type = row.get("action_type") or response_payload.get("action_type") or ""
-        if sender == "assistant":
-            key = (row.get("user_id") or "", sender, message)
-        else:
-            key = (row.get("user_id") or "", sender, message)
+        key = (row.get("user_id") or "", sender, message, normalize_chat_channel(row.get("channel")))
         if key in seen:
             existing_index = seen[key]
             existing = deduped[existing_index]
@@ -440,6 +447,7 @@ def reset_user_memory_response(user_id: str) -> Dict[str, Any]:
         )
 
     LOCAL_PENDING_EVENTS.pop(user_id, None)
+    LOCAL_CHAT_HISTORY.pop(user_id, None)
     now = taipei_now().isoformat()
     payload = {
         "user_id": user_id,
@@ -449,12 +457,27 @@ def reset_user_memory_response(user_id: str) -> Dict[str, Any]:
         "updated_at": now,
     }
     try:
+        deleted_logs = 0
+        delete_errors = []
+        try:
+            deleted = supabase.table(CHAT_LOGS_TABLE).delete().eq("user_id", user_id).execute()
+            deleted_logs += len(deleted.data or [])
+        except Exception as exc:
+            delete_errors.append({"service": CHAT_LOGS_TABLE, "message": str(exc)})
+        try:
+            legacy = supabase.table(CHAT_LOGS_TABLE).delete().ilike("user_input", f"[{user_id}]%").execute()
+            deleted_logs += len(legacy.data or [])
+        except Exception as exc:
+            delete_errors.append({"service": CHAT_LOGS_TABLE, "message": str(exc)})
         res = supabase.table("user_memory_profiles").upsert(payload, on_conflict="user_id").execute()
+        data = res.data[0] if res.data else payload
+        data = {**data, "reset": True, "deleted_chat_logs": deleted_logs}
         return safe_response(
-            "success",
-            res.data[0] if res.data else payload,
-            "user memory reset",
+            "success" if not delete_errors else "partial_success",
+            data,
+            "user memory and chat history reset",
             "user_memory_profiles",
+            delete_errors,
         )
     except Exception as e:
         return safe_response(

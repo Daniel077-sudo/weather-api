@@ -27,6 +27,13 @@ class ChatRequest(BaseModel):
     intent_hint: Optional[str] = None
     draft_id: Optional[str] = None
     draft_event: Optional[Dict[str, Any]] = None
+    channel: Literal["app", "line"] = "app"
+
+
+class ChatDraftActionRequest(BaseModel):
+    user_id: str
+    channel: Literal["line"] = "line"
+    draft_event: Optional[Dict[str, Any]] = None
 
 
 class ChatCommandResponse(BaseModel):
@@ -34,6 +41,7 @@ class ChatCommandResponse(BaseModel):
     reply: str = ""
     assistant_name: str = "小藍"
     gemini_status: str = "not_called"
+    channel: Literal["app", "line"] = "app"
     has_alert: bool = False
     alert_title: str = ""
     alert_url: str = ""

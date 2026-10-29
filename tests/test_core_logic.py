@@ -15,7 +15,7 @@ import auth
 import disaster_service
 import event_service
 import main
-from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, normalize_chat_response, prepare_chat_response, sanitize_event_title
+from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, dedupe_chat_history, normalize_chat_history_row, normalize_chat_response, prepare_chat_response, sanitize_event_title
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
@@ -413,6 +413,143 @@ class CoreLogicTests(unittest.TestCase):
 
     def test_chat_history_uses_existing_chat_logs_table(self):
         self.assertEqual(CHAT_LOGS_TABLE, "chat_logs")
+
+    def test_chat_log_rows_and_history_preserve_channel(self):
+        rows = build_chat_log_rows(
+            "user-id",
+            "明天下午三點開會",
+            {"reply": "收到", "action_type": "CREATE_EVENT"},
+            "2026-10-22T10:00:00+08:00",
+            "line",
+        )
+        self.assertEqual([row["channel"] for row in rows], ["line", "line"])
+        normalized = normalize_chat_history_row(rows[0], "user-id")
+        self.assertEqual(normalized["channel"], "line")
+
+        duplicated_text = [
+            {"user_id": "user-id", "sender": "user", "message": "同一句", "channel": "app"},
+            {"user_id": "user-id", "sender": "user", "message": "同一句", "channel": "line"},
+        ]
+        self.assertEqual(len(dedupe_chat_history(duplicated_text)), 2)
+
+    def test_draft_event_conversion_uses_taipei_time_and_idempotency_fields(self):
+        event = main.draft_event_to_event_create(
+            "f0bda093-41c6-43b9-b88a-d5966cf17f77",
+            "draft-test",
+            {
+                "title": "開會",
+                "date": "2026-10-23",
+                "start_time": "15:00",
+                "city": "高雄市",
+                "district": "前鎮區",
+                "location": "高雄市前鎮區",
+            },
+        )
+        self.assertEqual(event.start_time, "2026-10-23T15:00:00+08:00")
+        self.assertEqual(event.end_time, "2026-10-23T16:00:00+08:00")
+        self.assertEqual(event.external_source, "chat_draft")
+        self.assertEqual(event.external_event_id, "draft-test")
+
+    def test_internal_chat_requires_key_and_marks_line_channel(self):
+        client = TestClient(main.app)
+        user_id = "f0bda093-41c6-43b9-b88a-d5966cf17f77"
+        payload = {
+            "user_id": user_id,
+            "channel": "line",
+            "contract_version": 2,
+            "message": "明天下午三點去高雄前鎮區開會",
+            "client_now": "2026-10-22T10:00:00+08:00",
+        }
+        with patch.object(main, "BACKEND_INTERNAL_KEY", "shared-test-key"):
+            denied = client.post("/api/chat/internal", json=payload, headers={"X-Internal-Key": "wrong"})
+            self.assertEqual(denied.status_code, 401)
+
+            with patch.object(main, "persist_chat_turn", return_value=None) as persist:
+                allowed = client.post(
+                    "/api/chat/internal",
+                    json=payload,
+                    headers={"X-Internal-Key": "shared-test-key"},
+                )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json()["channel"], "line")
+        self.assertEqual(allowed.json()["intent"], "CREATE_EVENT")
+        self.assertEqual(persist.call_args.args[3], "line")
+
+    def test_public_chat_cannot_spoof_line_channel(self):
+        client = TestClient(main.app)
+        payload = {
+            "user_id": "test-user",
+            "channel": "line",
+            "contract_version": 2,
+            "message": "明天下午三點去高雄前鎮區開會",
+            "client_now": "2026-10-22T10:00:00+08:00",
+        }
+        with patch.object(main, "persist_chat_turn", return_value=None) as persist:
+            response = client.post("/api/chat", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["channel"], "app")
+        self.assertEqual(persist.call_args.args[3], "app")
+
+    def test_confirmed_line_draft_is_idempotent(self):
+        user_id = "f0bda093-41c6-43b9-b88a-d5966cf17f77"
+        existing_event = {
+            "id": 99,
+            "user_id": user_id,
+            "title": "開會",
+            "start_time": "2026-10-23T15:00:00+08:00",
+            "end_time": "2026-10-23T16:00:00+08:00",
+            "city": "高雄市",
+            "district": "前鎮區",
+            "location": "高雄市前鎮區",
+            "external_source": "chat_draft",
+            "external_event_id": "draft-repeat",
+        }
+
+        class FakeResult:
+            data = [existing_event]
+
+        class FakeQuery:
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                return FakeResult()
+
+        class FakeSupabase:
+            def table(self, _name):
+                return FakeQuery()
+
+        body = {
+            "user_id": user_id,
+            "channel": "line",
+            "draft_event": {
+                "title": "開會",
+                "date": "2026-10-23",
+                "start_time": "15:00",
+                "city": "高雄市",
+                "district": "前鎮區",
+                "location": "高雄市前鎮區",
+            },
+        }
+        client = TestClient(main.app)
+        with patch.object(main, "BACKEND_INTERNAL_KEY", "shared-test-key"), patch.object(
+            main, "supabase", FakeSupabase()
+        ), patch.object(main, "create_event", new=AsyncMock()) as create:
+            response = client.post(
+                "/api/chat/drafts/draft-repeat/confirm",
+                json=body,
+                headers={"X-Internal-Key": "shared-test-key"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["data"]["idempotent_replay"])
+        self.assertEqual(response.json()["data"]["event"]["id"], 99)
+        create.assert_not_awaited()
 
     def test_cwa_ssl_fallback_is_scoped_to_certificate_errors(self):
         self.assertIn("CERTIFICATE_VERIFY_FAILED", CWA_SSL_ERROR_MARKERS)

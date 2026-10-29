@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import ast
+import hmac
 import hashlib
 import json
 import time
@@ -8,21 +9,21 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks, Depends, Header, Query, Response
+from fastapi import FastAPI, BackgroundTasks, Depends, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, persist_chat_turn, reset_user_memory_response
-from config import CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
+from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
+from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
 from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, generate_general_chat_reply, normalize_assistant_name, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
-from schemas import ChatCommandResponse, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
+from schemas import ChatCommandResponse, ChatDraftActionRequest, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
 from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from timing_service import get_timing, reset_timing, set_timing, start_timing
@@ -207,17 +208,18 @@ async def ask_assistant(query: UserQuery):
         return {"status": "error", "message": f"解析失敗: {str(e)}"}
 
 
-@app.post("/api/chat", response_model=ChatCommandResponse)
-async def chat_command(
+async def _process_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
     response: Response,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext,
+    channel: str,
 ):
     started = time.perf_counter()
     timing_token = start_timing()
     try:
         user_id = resolve_user_id(auth, payload.user_id)
+        result_channel = "line" if channel == "line" else "app"
         if payload.contract_version == 2:
             if not payload.client_now:
                 raise ValueError("client_now is required for contract_version 2")
@@ -229,6 +231,7 @@ async def chat_command(
                 result["gemini_status"] = get_timing().get("gemini_status", "error")
             result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
             result.setdefault("gemini_status", "not_called")
+            result["channel"] = result_channel
             result.update({
                 "event_id": None,
                 "event_id_to_delete": None,
@@ -257,6 +260,7 @@ async def chat_command(
             result = draft_to_legacy_response(draft_result)
             result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
             result["gemini_status"] = draft_result.get("gemini_status", "not_called")
+            result["channel"] = result_channel
             if result.get("action_type") in {"DELETE_EVENT", "UPDATE_EVENT"}:
                 event_filter = draft_result.get("event_filter") or {}
                 lookup_start = ""
@@ -283,6 +287,7 @@ async def chat_command(
                 "reply": "此版本的聊天契約已停用，請更新 App 並使用 contract_version: 2。",
                 "assistant_name": normalize_assistant_name(payload.assistant_name),
                 "gemini_status": "not_called",
+                "channel": result_channel,
                 "action_type": "NONE",
                 "event_id": None,
                 "event_id_to_delete": None,
@@ -297,6 +302,7 @@ async def chat_command(
                 persist_info.get("user_id") or "",
                 persist_info.get("message") or "",
                 response_for_history,
+                result_channel,
             )
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         set_timing("total_ms", total_ms)
@@ -318,6 +324,7 @@ async def chat_command(
                 "reply": "我暫時無法處理這則訊息，請稍後再試。",
                 "assistant_name": normalize_assistant_name(payload.assistant_name),
                 "gemini_status": get_timing().get("gemini_status", "error"),
+                "channel": "line" if channel == "line" else "app",
                 "draft_id": payload.draft_id,
                 "draft_event": None,
                 "event_filter": None,
@@ -331,11 +338,193 @@ async def chat_command(
             "reply": f"{normalize_assistant_name(payload.assistant_name)}暫時無法完成這次操作，請稍後再試。",
             "assistant_name": normalize_assistant_name(payload.assistant_name),
             "gemini_status": get_timing().get("gemini_status", "error"),
+            "channel": "line" if channel == "line" else "app",
             "action_type": "NONE",
             "timing": get_timing(),
         }
     finally:
         reset_timing(timing_token)
+
+
+@app.post("/api/chat", response_model=ChatCommandResponse)
+async def chat_command(
+    payload: ChatRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    payload.channel = "app"
+    return await _process_chat_command(payload, background_tasks, response, auth, "app")
+
+
+def require_internal_key(value: Optional[str]) -> None:
+    if not BACKEND_INTERNAL_KEY:
+        raise HTTPException(status_code=503, detail={"status": "error", "code": "internal_auth_not_configured"})
+    if not value or not hmac.compare_digest(value, BACKEND_INTERNAL_KEY):
+        raise HTTPException(status_code=401, detail={"status": "error", "code": "invalid_internal_key"})
+
+
+@app.post("/api/chat/internal", response_model=ChatCommandResponse)
+async def internal_chat_command(
+    payload: ChatRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    x_internal_key: Optional[str] = Header(None, alias="X-Internal-Key"),
+):
+    require_internal_key(x_internal_key)
+    if (
+        payload.channel != "line"
+        or payload.contract_version != 2
+        or not payload.client_now
+        or not payload.message.strip()
+        or not is_valid_uuid(payload.user_id or "")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"status": "error", "code": "invalid_internal_chat_request", "message": "channel=line, contract_version=2, client_now, message and a UUID user_id are required."},
+        )
+    auth = AuthContext(user_id=payload.user_id, authenticated=True)
+    try:
+        return await asyncio.wait_for(
+            _process_chat_command(payload, background_tasks, response, auth, "line"),
+            timeout=14.5,
+        )
+    except asyncio.TimeoutError:
+        response.headers["X-Process-Time"] = "14500"
+        return ChatCommandResponse(
+            status="error",
+            reply="訊息處理逾時，請稍後再試。",
+            channel="line",
+            action_type="NONE",
+            timing={"total_ms": 14500, "timeout": True},
+        )
+
+
+def draft_event_to_event_create(user_id: str, draft_id: str, draft: Dict[str, Any]) -> EventCreate:
+    title = str(draft.get("title") or "").strip()
+    date_value = str(draft.get("date") or "").strip()
+    raw_start = str(draft.get("start_time") or "").strip()
+    raw_end = str(draft.get("end_time") or "").strip()
+    city = str(draft.get("city") or "").strip()
+    district = str(draft.get("district") or "").strip()
+    location = str(draft.get("location") or "").strip()
+
+    def combine_datetime(raw_value: str) -> str:
+        if not raw_value:
+            return ""
+        if "T" in raw_value:
+            parsed = parse_datetime(raw_value)
+        elif date_value:
+            parsed = parse_datetime(f"{date_value}T{raw_value}:00+08:00")
+        else:
+            parsed = None
+        return parsed.astimezone(timezone(timedelta(hours=8))).isoformat(timespec="seconds") if parsed else ""
+
+    start_time = combine_datetime(raw_start)
+    end_time = combine_datetime(raw_end)
+    if start_time and not end_time:
+        end_time = (datetime.fromisoformat(start_time) + timedelta(hours=1)).isoformat(timespec="seconds")
+
+    location_parts = resolve_event_location_parts({"city": city, "district": district, "location": location})
+    city = city or location_parts.get("city") or ""
+    district = district or location_parts.get("district") or ""
+    location = location or f"{city}{district}"
+    missing = [
+        field for field, value in {
+            "title": title,
+            "start_time": start_time,
+            "location": location or city,
+        }.items() if not value
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={"status": "error", "code": "incomplete_draft", "missing_fields": missing},
+        )
+    return EventCreate(
+        user_id=user_id,
+        title=title,
+        start_time=start_time,
+        end_time=end_time,
+        city=city or None,
+        district=district or None,
+        location=location or None,
+        description=str(draft.get("description") or "").strip() or None,
+        url=str(draft.get("url") or "").strip() or None,
+        transport_type=str(draft.get("transport_type") or "").strip() or None,
+        external_source="chat_draft",
+        external_event_id=draft_id,
+    )
+
+
+@app.post("/api/chat/drafts/{draft_id}/confirm")
+async def confirm_chat_draft(
+    draft_id: str,
+    payload: ChatDraftActionRequest,
+    background_tasks: BackgroundTasks,
+    x_internal_key: Optional[str] = Header(None, alias="X-Internal-Key"),
+):
+    require_internal_key(x_internal_key)
+    if not is_valid_uuid(payload.user_id):
+        raise HTTPException(status_code=422, detail={"status": "error", "code": "invalid_user_id"})
+    if not draft_id or not payload.draft_event:
+        raise HTTPException(status_code=422, detail={"status": "error", "code": "missing_draft_event"})
+    try:
+        existing = (
+            supabase.table("events")
+            .select("*")
+            .eq("user_id", payload.user_id)
+            .eq("external_source", "chat_draft")
+            .eq("external_event_id", draft_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "error", "code": "idempotency_check_failed", "message": str(exc)},
+        ) from exc
+    if existing.data:
+        return safe_response(
+            "success",
+            {"draft_id": draft_id, "confirmed": True, "idempotent_replay": True, "event": normalize_event(existing.data[0])},
+            "draft was already confirmed",
+            "events",
+        )
+
+    event = draft_event_to_event_create(payload.user_id, draft_id, payload.draft_event)
+    result = await create_event(event, background_tasks)
+    if result.get("status") != "success" or result.get("source") == "memory_fallback":
+        event_data = result.get("data") or {}
+        if event_data.get("id"):
+            delete_memory_event(str(event_data["id"]), payload.user_id)
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "error", "code": "event_write_failed", "message": "The event was not persisted."},
+        )
+    return safe_response(
+        "success",
+        {"draft_id": draft_id, "confirmed": True, "idempotent_replay": False, "event": result.get("data")},
+        "draft confirmed and event created",
+        "events",
+    )
+
+
+@app.post("/api/chat/drafts/{draft_id}/cancel")
+async def cancel_chat_draft(
+    draft_id: str,
+    payload: ChatDraftActionRequest,
+    x_internal_key: Optional[str] = Header(None, alias="X-Internal-Key"),
+):
+    require_internal_key(x_internal_key)
+    if not is_valid_uuid(payload.user_id):
+        raise HTTPException(status_code=422, detail={"status": "error", "code": "invalid_user_id"})
+    return safe_response(
+        "success",
+        {"draft_id": draft_id, "user_id": payload.user_id, "channel": "line", "cancelled": True},
+        "draft cancelled",
+        "chat_draft",
+    )
 
 
 @app.get("/api/assistant/profile")
@@ -424,6 +613,15 @@ async def get_auth_contract():
                 "POST /api/push/device-tokens",
                 "GET /api/push/device-tokens",
             ],
+            "internal_endpoints": {
+                "authentication": "X-Internal-Key: <BACKEND_INTERNAL_KEY>",
+                "endpoints": [
+                    "POST /api/chat/internal",
+                    "POST /api/chat/drafts/{draft_id}/confirm",
+                    "POST /api/chat/drafts/{draft_id}/cancel",
+                ],
+                "note": "Server-to-server only. A user bearer token is not accepted as a substitute.",
+            },
             "public_endpoints": [
                 "GET /api/weather/live",
                 "GET /api/weather/history",
@@ -2582,6 +2780,7 @@ alter table public.chat_logs add column if not exists has_alert boolean default 
 alter table public.chat_logs add column if not exists alert_title text;
 alter table public.chat_logs add column if not exists alert_url text;
 alter table public.chat_logs add column if not exists created_at timestamptz default now();
+alter table public.chat_logs add column if not exists channel text not null default 'app';
 
 create table if not exists public.user_memory_profiles (
   user_id text primary key,
