@@ -32,8 +32,19 @@ class GeneralChatReplyTests(unittest.IsolatedAsyncioTestCase):
             with patch("gemini_service.call_gemini_raw", new=AsyncMock(return_value="[Gemini request error]: ReadTimeout")):
                 await generate_general_chat_reply("陪我聊聊", "晴晴", [])
             self.assertEqual(get_timing()["gemini_status"], "timeout")
+            self.assertIn("ReadTimeout", get_timing()["gemini_error"])
         finally:
             reset_timing(token)
+
+    async def test_general_chat_cannot_claim_an_action_was_completed(self):
+        with patch(
+            "gemini_service.call_gemini_raw",
+            new=AsyncMock(return_value="已經幫你設定好提醒了。"),
+        ):
+            reply = await generate_general_chat_reply("提醒我準備考試", "晴晴", [])
+
+        self.assertIn("還沒有建立或設定任何內容", reply)
+        self.assertNotIn("設定好提醒", reply)
 
 
 if __name__ == "__main__":

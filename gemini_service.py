@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -105,6 +106,18 @@ def _general_chat_fallback(message: str, assistant_name: str) -> str:
     return f"我是{assistant_name}。我有收到你的訊息，但現在暫時無法產生完整回覆，請稍後再試。"
 
 
+def _prevent_false_action_confirmation(reply: str, assistant_name: str) -> str:
+    false_completion = re.compile(
+        r"(?:已經|已|幫你|替你).{0,12}(?:設定|設好|記下|記錄|新增|建立|加入|安排)(?:好|完成|了)?"
+    )
+    if false_completion.search(reply):
+        return (
+            f"我是{assistant_name}。我目前還沒有建立或設定任何內容；"
+            "如果你要新增提醒或行程，請告訴我日期、時間和事項。"
+        )
+    return reply
+
+
 async def generate_general_chat_reply(
     message: str,
     assistant_name: Optional[str] = None,
@@ -134,6 +147,7 @@ async def generate_general_chat_reply(
     if not reply or reply.startswith("["):
         error_text = str(reply or "").lower()
         set_timing("gemini_status", "timeout" if "timeout" in error_text else "error")
+        set_timing("gemini_error", str(reply or "empty_response")[:240])
         return _general_chat_fallback(message, name)
     cleaned = reply.strip().strip('"').strip()
     if not cleaned:
@@ -142,7 +156,7 @@ async def generate_general_chat_reply(
     set_timing("gemini_status", "ok")
     if name not in cleaned:
         cleaned = f"我是{name}。{cleaned}"
-    return cleaned[:1200]
+    return _prevent_false_action_confirmation(cleaned[:1200], name)
 
 
 def parse_json_object(text: str) -> Dict[str, Any]:

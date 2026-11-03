@@ -117,6 +117,24 @@ def _time_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
     return found
 
 
+def _time_requires_clarification(message: str) -> bool:
+    """Return true when the user mentioned time but did not provide a precise clock time."""
+    pattern = re.compile(
+        r"(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?"
+        r"(十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*"
+        r"(?:點|时|時|:|：)\s*(半|\d{1,2})?"
+    )
+    matches = list(pattern.finditer(message))
+    if not matches:
+        return any(period in message for period in ["早上", "上午", "中午", "下午", "晚上", "凌晨"])
+
+    for match in matches:
+        hour = _parse_hour(match.group(2))
+        if not match.group(1) and hour is not None and 1 <= hour <= 12:
+            return True
+    return False
+
+
 def _location(message: str, preferred_city: Optional[str] = None) -> Dict[str, Optional[str]]:
     normalized = message.replace("台", "臺")
     city = None
@@ -155,6 +173,14 @@ def _location(message: str, preferred_city: Optional[str] = None) -> Dict[str, O
     if city:
         location = (raw_city or city) + (raw_district or "")
     return {"city": city, "district": district, "location": location}
+
+
+def _explicit_location_name(message: str) -> Optional[str]:
+    match = re.search(r"(?:地點\s*(?:在|是|為|：|:)|位於)\s*([^，。！？!?]+)", message)
+    if not match:
+        return None
+    value = _text(match.group(1)).strip(" \t\r\n，。！？!?：:")
+    return value[:120] or None
 
 
 def _activity(message: str) -> Optional[str]:
@@ -200,7 +226,7 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
     if any(word in message for word in ["颱風", "台風", "地震", "防災", "淹水", "洪水", "避難", "豪雨"]):
         return "DISASTER_INFO"
     activity = _activity(message)
-    create_signal = any(word in message for word in ["我要去", "想去", "要去", "幫我排", "安排", "新增", "建立"])
+    create_signal = any(word in message for word in ["我要去", "想去", "要去", "幫我排", "安排", "新增", "建立", "提醒我"])
     dates = _date_mentions(message, now)
     times = _time_mentions(message)
     location = _location(message)
@@ -231,7 +257,7 @@ def _draft_title(message: str) -> Optional[str]:
     if activity:
         return activity
     text = message
-    text = re.sub(r"可以?幫我|請幫我|幫我|我要|我想|想要|想|安排|新增|建立|排", " ", text)
+    text = re.sub(r"可以?幫我|請幫我|幫我|提醒我|我要|我想|想要|想|安排|新增|建立|排", " ", text)
     text = re.sub(r"大後天|後天|明天|今天|下?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
     text = re.sub(r"\d{1,2}\s*(?:/|月)\s*\d{1,2}\s*(?:日|號|号)?", " ", text)
     text = re.sub(r"(?:早上|上午|中午|下午|晚上|凌晨)?\s*(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時|:|：)\s*(?:半|\d{1,2})?", " ", text)
@@ -287,19 +313,48 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         existing = existing_draft
         dates = _date_mentions(message, now)
         times = _time_mentions(message)
+        time_needs_clarification = _time_requires_clarification(message)
+        has_time_wording = bool(times) or time_needs_clarification
+        is_reminder = bool(existing.get("is_reminder")) or "提醒我" in message
         preferred_city = existing.get("city")
         location = _location(message, preferred_city)
+        explicit_location = _explicit_location_name(message)
+        if explicit_location:
+            location["location"] = explicit_location
         title = _draft_title(message)
+        existing_start = existing.get("start_time")
+        if times and not time_needs_clarification:
+            start_time = times[0][1]
+            end_time = times[1][1] if len(times) > 1 else existing.get("end_time")
+            all_day = False
+        elif time_needs_clarification:
+            start_time = existing_start
+            end_time = existing.get("end_time")
+            all_day = False
+        elif existing_start:
+            start_time = existing_start
+            end_time = existing.get("end_time")
+            all_day = bool(existing.get("all_day", False))
+        else:
+            start_time = None
+            end_time = None
+            all_day = True
         draft = {
             "title": title if title is not None else existing.get("title"),
-            "date": dates[0][1] if dates else existing.get("date"),
-            "start_time": times[0][1] if times else existing.get("start_time"),
-            "end_time": times[1][1] if len(times) > 1 else existing.get("end_time"),
+            "date": dates[0][1] if dates else existing.get("date") or now.strftime("%Y-%m-%d"),
+            "start_time": start_time,
+            "end_time": end_time,
+            "all_day": all_day,
+            "is_reminder": is_reminder,
             "city": location["city"] if location["city"] is not None else existing.get("city"),
             "district": location["district"] if location["city"] is not None else existing.get("district"),
-            "location": location["location"] if location["city"] is not None else existing.get("location"),
+            "location": location["location"] if location["location"] is not None else existing.get("location"),
         }
-        missing = [key for key in ["title", "date", "start_time", "city"] if not draft.get(key)]
+        missing = [key for key in ["title", "date"] if not draft.get(key)]
+        if not is_reminder and not (draft.get("city") or draft.get("location")):
+            missing.append("city")
+        if (has_time_wording or existing_start) and not draft.get("start_time"):
+            missing.append("start_time")
         response.update({
             "draft_event": draft,
             "missing_fields": missing,

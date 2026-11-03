@@ -1380,6 +1380,110 @@ class CoreLogicTests(unittest.TestCase):
         finally:
             main.supabase = original_supabase
 
+    def test_update_event_empty_city_and_district_clear_location(self):
+        stored_event = {
+            "id": "clear-location",
+            "user_id": "jwt-user",
+            "title": "辦護照",
+            "start_time": "2026-11-03T00:00:01+08:00",
+            "end_time": "2026-11-03T23:59:01+08:00",
+            "city": "臺南市",
+            "district": "東區",
+            "location": "臺南市東區",
+            "description": "[提醒:300][時間:無]攜帶證件",
+        }
+
+        class FakeResult:
+            def __init__(self, data):
+                self.data = data
+
+        class FakeQuery:
+            def __init__(self, action="select", payload=None):
+                self.action = action
+                self.payload = payload or {}
+
+            def select(self, *_args, **_kwargs):
+                return self
+
+            def update(self, payload):
+                return FakeQuery("update", payload)
+
+            def eq(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def execute(self):
+                if self.action == "select":
+                    return FakeResult([dict(stored_event)])
+                stored_event.update(self.payload)
+                return FakeResult([dict(stored_event)])
+
+        class FakeSupabase:
+            def table(self, _table_name):
+                return FakeQuery()
+
+        original_supabase = main.supabase
+        try:
+            main.supabase = FakeSupabase()
+            coroutine = main.update_event_by_id(
+                "clear-location",
+                main.EventUpdate(city="", district=""),
+                auth.AuthContext(user_id="jwt-user", authenticated=True),
+            )
+            with self.assertRaises(StopIteration) as completed:
+                coroutine.send(None)
+            response = completed.exception.value
+            self.assertEqual(response["status"], "success")
+            self.assertEqual(stored_event["city"], "")
+            self.assertEqual(stored_event["district"], "")
+            self.assertEqual(stored_event["location"], "")
+            self.assertEqual(stored_event["start_time"], "2026-11-03T00:00:01+08:00")
+            self.assertEqual(stored_event["description"], "[提醒:300][時間:無]攜帶證件")
+        finally:
+            main.supabase = original_supabase
+
+    def test_all_day_chat_draft_converts_to_full_day_event(self):
+        event = main.draft_event_to_event_create(
+            "00000000-0000-0000-0000-000000000001",
+            "draft-all-day",
+            {
+                "title": "辦護照",
+                "date": "2026-11-03",
+                "start_time": None,
+                "end_time": None,
+                "all_day": True,
+                "city": "臺南市",
+                "district": "中西區",
+                "location": "臺南市中西區",
+            },
+        )
+
+        self.assertEqual(event.start_time, "2026-11-03T00:00:00+08:00")
+        self.assertEqual(event.end_time, "2026-11-03T23:59:00+08:00")
+
+    def test_reminder_chat_draft_can_be_confirmed_without_location(self):
+        event = main.draft_event_to_event_create(
+            "00000000-0000-0000-0000-000000000001",
+            "draft-reminder",
+            {
+                "title": "準備期中考",
+                "date": "2026-11-03",
+                "start_time": "13:00",
+                "end_time": None,
+                "all_day": False,
+                "is_reminder": True,
+                "city": None,
+                "district": None,
+                "location": None,
+            },
+        )
+
+        self.assertEqual(event.start_time, "2026-11-03T13:00:00+08:00")
+        self.assertEqual(event.end_time, "2026-11-03T14:00:00+08:00")
+        self.assertIsNone(event.location)
+
 
 if __name__ == "__main__":
     unittest.main()

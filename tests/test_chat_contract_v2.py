@@ -208,7 +208,7 @@ class ChatContractV2Tests(unittest.TestCase):
         first = self.payload_for({"input": "我下午兩點要去台北吃冰"})
         first_result = build_chat_v2_response(first)
         self.assertEqual(first_result["intent"], "CREATE_EVENT")
-        self.assertIn("date", first_result["missing_fields"])
+        self.assertEqual(first_result["draft_event"]["date"], "2026-09-23")
         self.assertTrue(first_result["draft_id"].startswith("draft-"))
         self.assertEqual(first_result["draft_event"]["title"], "吃冰")
 
@@ -224,6 +224,55 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(second_result["draft_event"]["date"], "2026-10-04")
         self.assertEqual(second_result["draft_event"]["title"], "吃冰")
         self.assertFalse(second_result["needs_clarification"])
+
+    def test_create_without_time_becomes_all_day_and_defaults_to_today(self):
+        payload = self.payload_for({"input": "幫我新增台南辦護照的行程"})
+        result = build_chat_v2_response(payload)
+
+        self.assertEqual(result["intent"], "CREATE_EVENT")
+        self.assertFalse(result["needs_clarification"])
+        self.assertEqual(result["missing_fields"], [])
+        self.assertEqual(result["draft_event"]["date"], "2026-09-23")
+        self.assertTrue(result["draft_event"]["all_day"])
+        self.assertIsNone(result["draft_event"]["start_time"])
+        self.assertIsNone(result["draft_event"]["end_time"])
+
+    def test_ambiguous_clock_time_still_requires_clarification(self):
+        payload = self.payload_for({"input": "明天三點去台南辦護照"})
+        result = build_chat_v2_response(payload)
+
+        self.assertTrue(result["needs_clarification"])
+        self.assertIn("start_time", result["missing_fields"])
+        self.assertFalse(result["draft_event"]["all_day"])
+        self.assertIsNone(result["draft_event"]["start_time"])
+
+    def test_period_without_clock_time_still_requires_clarification(self):
+        payload = self.payload_for({"input": "明天晚上去台南辦護照"})
+        result = build_chat_v2_response(payload)
+
+        self.assertTrue(result["needs_clarification"])
+        self.assertIn("start_time", result["missing_fields"])
+        self.assertFalse(result["draft_event"]["all_day"])
+
+    def test_remind_me_creates_location_optional_event_draft(self):
+        payload = self.payload_for({"input": "下午一點提醒我準備期中考"})
+        result = build_chat_v2_response(payload)
+
+        self.assertEqual(result["intent"], "CREATE_EVENT")
+        self.assertFalse(result["needs_clarification"])
+        self.assertEqual(result["draft_event"]["title"], "準備期中考")
+        self.assertEqual(result["draft_event"]["start_time"], "13:00")
+        self.assertTrue(result["draft_event"]["is_reminder"])
+        self.assertIsNone(result["draft_event"]["location"])
+
+    def test_named_landmark_satisfies_location_without_city(self):
+        payload = self.payload_for({"input": "明天下午三點開會，地點在新光三越"})
+        result = build_chat_v2_response(payload)
+
+        self.assertEqual(result["intent"], "CREATE_EVENT")
+        self.assertNotIn("city", result["missing_fields"])
+        self.assertFalse(result["needs_clarification"])
+        self.assertEqual(result["draft_event"]["location"], "新光三越")
 
 
 if __name__ == "__main__":

@@ -420,10 +420,15 @@ def draft_event_to_event_create(user_id: str, draft_id: str, draft: Dict[str, An
             parsed = None
         return parsed.astimezone(timezone(timedelta(hours=8))).isoformat(timespec="seconds") if parsed else ""
 
-    start_time = combine_datetime(raw_start)
-    end_time = combine_datetime(raw_end)
-    if start_time and not end_time:
-        end_time = (datetime.fromisoformat(start_time) + timedelta(hours=1)).isoformat(timespec="seconds")
+    all_day = bool(draft.get("all_day"))
+    if all_day and date_value:
+        start_time = f"{date_value}T00:00:00+08:00"
+        end_time = f"{date_value}T23:59:00+08:00"
+    else:
+        start_time = combine_datetime(raw_start)
+        end_time = combine_datetime(raw_end)
+        if start_time and not end_time:
+            end_time = (datetime.fromisoformat(start_time) + timedelta(hours=1)).isoformat(timespec="seconds")
 
     location_parts = resolve_event_location_parts({"city": city, "district": district, "location": location})
     city = city or location_parts.get("city") or ""
@@ -433,7 +438,7 @@ def draft_event_to_event_create(user_id: str, draft_id: str, draft: Dict[str, An
         field for field, value in {
             "title": title,
             "start_time": start_time,
-            "location": location or city,
+            "location": (location or city) if not draft.get("is_reminder") else True,
         }.items() if not value
     ]
     if missing:
@@ -1650,6 +1655,18 @@ async def update_event_by_id(
     update_payload = payload.model_dump(mode="json", exclude_unset=True, exclude_none=True)
     if not update_payload:
         return safe_response("error", {"id": event_id}, "No fields to update", "validation", [{"code": "empty_update"}])
+
+    # Sending both structured location fields as empty strings explicitly clears
+    # the location. Omitted fields still retain their existing values.
+    fields_set = payload.model_fields_set
+    if (
+        "city" in fields_set
+        and "district" in fields_set
+        and update_payload.get("city") == ""
+        and update_payload.get("district") == ""
+        and "location" not in fields_set
+    ):
+        update_payload["location"] = ""
 
     if update_payload.get("url") and not update_payload.get("transport_type"):
         update_payload["transport_type"] = determine_transport_type(update_payload.get("url"))
