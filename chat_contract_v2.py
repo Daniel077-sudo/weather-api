@@ -15,7 +15,7 @@ HOURS = {
 ACTIVITIES = [
     "騎腳踏車", "騎自行車", "腳踏車", "自行車", "騎車",
     "開會", "游泳", "遊泳", "爬山", "跑步", "路跑", "打球", "運動", "露營",
-    "上課", "看診", "考試", "聚餐", "旅遊", "出遊", "買菜", "通勤", "吃冰", "玩",
+    "上課", "看診", "考試", "辦護照", "聚餐", "旅遊", "出遊", "買菜", "通勤", "吃冰", "玩",
 ]
 WEATHER_WORDS = ["天氣", "下雨", "降雨", "帶傘", "氣溫", "熱不熱", "冷不冷", "會不會下雨"]
 
@@ -93,7 +93,7 @@ def _time_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
     pattern = re.compile(
         r"(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?"
         r"(十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*"
-        r"(?:點|时|時|:|：)\s*(半|\d{1,2})?"
+        r"(?:點|时|時|:|：)\s*(半|\d{1,2})?\s*(?:分)?"
     )
     found = []
     for match in pattern.finditer(message):
@@ -122,7 +122,7 @@ def _time_requires_clarification(message: str) -> bool:
     pattern = re.compile(
         r"(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?"
         r"(十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*"
-        r"(?:點|时|時|:|：)\s*(半|\d{1,2})?"
+        r"(?:點|时|時|:|：)\s*(半|\d{1,2})?\s*(?:分)?"
     )
     matches = list(pattern.finditer(message))
     if not matches:
@@ -258,9 +258,9 @@ def _draft_title(message: str) -> Optional[str]:
         return activity
     text = message
     text = re.sub(r"可以?幫我|請幫我|幫我|提醒我|我要|我想|想要|想|安排|新增|建立|排", " ", text)
-    text = re.sub(r"大後天|後天|明天|今天|下?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
+    text = re.sub(r"大後天|後天|明天|今天|等一下|下?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
     text = re.sub(r"\d{1,2}\s*(?:/|月)\s*\d{1,2}\s*(?:日|號|号)?", " ", text)
-    text = re.sub(r"(?:早上|上午|中午|下午|晚上|凌晨)?\s*(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時|:|：)\s*(?:半|\d{1,2})?", " ", text)
+    text = re.sub(r"(?:早上|上午|中午|下午|晚上|凌晨)?\s*(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時|:|：)\s*(?:半|\d{1,2})?\s*(?:分)?", " ", text)
     location = _location(message)
     for value in [location.get("city"), location.get("district"), location.get("location")]:
         if value:
@@ -350,16 +350,22 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             "district": location["district"] if location["city"] is not None else existing.get("district"),
             "location": location["location"] if location["location"] is not None else existing.get("location"),
         }
+        location_optional = is_reminder or draft.get("title") == "辦護照"
+        draft["location_optional"] = location_optional
         missing = [key for key in ["title", "date"] if not draft.get(key)]
-        if not is_reminder and not (draft.get("city") or draft.get("location")):
+        if not location_optional and not (draft.get("city") or draft.get("location")):
             missing.append("city")
         if (has_time_wording or existing_start) and not draft.get("start_time"):
             missing.append("start_time")
+        if missing == ["start_time"] and time_needs_clarification:
+            reply = "你說的時間是上午還是下午？請告訴我完整時段。"
+        else:
+            reply = ("還需要告訴我" + "、".join({"title": "要做什麼", "date": "日期", "start_time": "時間", "city": "地點"}[key] for key in missing) + "。") if missing else "我幫你整理好了，確認後就會加入行事曆。"
         response.update({
             "draft_event": draft,
             "missing_fields": missing,
             "needs_clarification": bool(missing),
-            "reply": ("還需要告訴我" + "、".join({"title": "要做什麼", "date": "日期", "start_time": "時間", "city": "地點"}[key] for key in missing) + "。") if missing else "我幫你整理好了，確認後就會加入行事曆。",
+            "reply": reply,
         })
         return response
 

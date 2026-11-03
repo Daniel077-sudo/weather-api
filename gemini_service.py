@@ -110,7 +110,8 @@ def _prevent_false_action_confirmation(reply: str, assistant_name: str) -> str:
     false_completion = re.compile(
         r"(?:已經|已|幫你|替你).{0,12}(?:設定|設好|記下|記錄|新增|建立|加入|安排)(?:好|完成|了)?"
     )
-    if false_completion.search(reply):
+    prepared_reminder = re.compile(r"(?:幫你|替你).{0,12}準備好.{0,30}(?:提醒|行程)")
+    if false_completion.search(reply) or prepared_reminder.search(reply):
         return (
             f"我是{assistant_name}。我目前還沒有建立或設定任何內容；"
             "如果你要新增提醒或行程，請告訴我日期、時間和事項。"

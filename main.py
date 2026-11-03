@@ -438,7 +438,7 @@ def draft_event_to_event_create(user_id: str, draft_id: str, draft: Dict[str, An
         field for field, value in {
             "title": title,
             "start_time": start_time,
-            "location": (location or city) if not draft.get("is_reminder") else True,
+            "location": (location or city) if not (draft.get("location_optional") or draft.get("is_reminder")) else True,
         }.items() if not value
     ]
     if missing:
@@ -1659,13 +1659,14 @@ async def update_event_by_id(
     # Sending both structured location fields as empty strings explicitly clears
     # the location. Omitted fields still retain their existing values.
     fields_set = payload.model_fields_set
-    if (
+    clearing_location = (
         "city" in fields_set
         and "district" in fields_set
         and update_payload.get("city") == ""
         and update_payload.get("district") == ""
-        and "location" not in fields_set
-    ):
+        and ("location" not in fields_set or update_payload.get("location") == "")
+    )
+    if clearing_location:
         update_payload["location"] = ""
 
     if update_payload.get("url") and not update_payload.get("transport_type"):
@@ -1681,12 +1682,15 @@ async def update_event_by_id(
 
         existing_event = existing_res.data[0] or {}
         merged_payload = {**existing_event, **update_payload}
-        location_parts = resolve_event_location_parts(merged_payload)
-        merged_payload["city"] = merged_payload.get("city") or location_parts["city"]
-        merged_payload["district"] = merged_payload.get("district") or location_parts["district"]
+        if clearing_location:
+            merged_payload.update({"city": "", "district": "", "location": ""})
+        else:
+            location_parts = resolve_event_location_parts(merged_payload)
+            merged_payload["city"] = merged_payload.get("city") or location_parts["city"]
+            merged_payload["district"] = merged_payload.get("district") or location_parts["district"]
 
         risk_keys = {"title", "start_time", "end_time", "city", "district", "location", "transport_type", "url"}
-        should_refresh_risk = bool(risk_keys.intersection(update_payload.keys()))
+        should_refresh_risk = not clearing_location and bool(risk_keys.intersection(update_payload.keys()))
 
         # A single PostgREST UPDATE is atomic. Do not retry with reduced field sets:
         # that can report success after silently dropping part of the user's edit.

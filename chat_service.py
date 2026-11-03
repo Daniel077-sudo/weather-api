@@ -354,7 +354,13 @@ def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
                 key = (item.get("sender"), item.get("message"), item.get("created_at"), item.get("channel"))
                 if key not in seen:
                     normalized_rows.append(item)
-        return safe_response("success", dedupe_chat_history(normalized_rows)[-limit:], "chat history loaded", CHAT_LOGS_TABLE)
+        history = []
+        for item in dedupe_chat_history(normalized_rows):
+            message = str(item.get("message") or "").strip()
+            if not message:
+                continue
+            history.append({**item, "message": message})
+        return safe_response("success", history[-limit:], "chat history loaded", CHAT_LOGS_TABLE)
     except Exception as e:
         return safe_response("error", [], str(e), CHAT_LOGS_TABLE, [{"service": "supabase", "message": str(e)}])
 

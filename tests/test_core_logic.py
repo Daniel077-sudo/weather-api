@@ -15,7 +15,7 @@ import auth
 import disaster_service
 import event_service
 import main
-from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, dedupe_chat_history, normalize_chat_history_row, normalize_chat_response, prepare_chat_response, sanitize_event_title
+from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, dedupe_chat_history, expand_chat_history_row, normalize_chat_history_row, normalize_chat_response, prepare_chat_response, sanitize_event_title
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
@@ -391,6 +391,11 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(parts["city"], "")
         self.assertEqual(parts["district"], "")
 
+    def test_location_resolver_does_not_default_unknown_venue_to_taipei(self):
+        parts = resolve_event_location_parts({"location": "新光三越"})
+        self.assertEqual(parts["city"], "")
+        self.assertEqual(parts["district"], "")
+
     def test_chat_local_fallback_answers_disaster_qa(self):
         body = build_local_fallback("test-user", "地震來的時候應該怎麼辦")
         self.assertEqual(body["action_type"], "DISASTER_GUIDE")
@@ -431,6 +436,28 @@ class CoreLogicTests(unittest.TestCase):
             {"user_id": "user-id", "sender": "user", "message": "同一句", "channel": "line"},
         ]
         self.assertEqual(len(dedupe_chat_history(duplicated_text)), 2)
+
+    def test_chat_history_supports_legacy_rows_and_never_returns_null_message(self):
+        legacy = {
+            "id": 1,
+            "user_id": None,
+            "user_input": "[user-id] 明天辦護照",
+            "ai_response": "我幫你整理全天草稿。",
+            "role": None,
+            "content": None,
+            "channel": "line",
+        }
+        rows = expand_chat_history_row(legacy, "user-id")
+        self.assertEqual([row["sender"] for row in rows], ["user", "assistant"])
+        self.assertEqual([row["message"] for row in rows], ["明天辦護照", "我幫你整理全天草稿。"])
+        self.assertTrue(all(isinstance(row["message"], str) and row["message"] for row in rows))
+
+        empty = normalize_chat_history_row(
+            {"id": 2, "user_id": "user-id", "role": "assistant", "content": None, "ai_response": None},
+            "user-id",
+        )
+        self.assertEqual(empty["message"], "")
+        self.assertEqual(dedupe_chat_history([empty]), [])
 
     def test_draft_event_conversion_uses_taipei_time_and_idempotency_fields(self):
         event = main.draft_event_to_event_create(
@@ -1427,10 +1454,12 @@ class CoreLogicTests(unittest.TestCase):
         original_supabase = main.supabase
         try:
             main.supabase = FakeSupabase()
+            background_tasks = main.BackgroundTasks()
             coroutine = main.update_event_by_id(
                 "clear-location",
                 main.EventUpdate(city="", district=""),
                 auth.AuthContext(user_id="jwt-user", authenticated=True),
+                background_tasks,
             )
             with self.assertRaises(StopIteration) as completed:
                 coroutine.send(None)
@@ -1441,6 +1470,22 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(stored_event["location"], "")
             self.assertEqual(stored_event["start_time"], "2026-11-03T00:00:01+08:00")
             self.assertEqual(stored_event["description"], "[提醒:300][時間:無]攜帶證件")
+            self.assertEqual(len(background_tasks.tasks), 0)
+
+            stored_event.update({"city": "臺南市", "district": "東區", "location": "臺南市東區"})
+            explicit_background_tasks = main.BackgroundTasks()
+            explicit_coroutine = main.update_event_by_id(
+                "clear-location",
+                main.EventUpdate(city="", district="", location=""),
+                auth.AuthContext(user_id="jwt-user", authenticated=True),
+                explicit_background_tasks,
+            )
+            with self.assertRaises(StopIteration) as explicit_completed:
+                explicit_coroutine.send(None)
+            explicit_response = explicit_completed.exception.value
+            self.assertEqual(explicit_response["status"], "success")
+            self.assertEqual((stored_event["city"], stored_event["district"], stored_event["location"]), ("", "", ""))
+            self.assertEqual(len(explicit_background_tasks.tasks), 0)
         finally:
             main.supabase = original_supabase
 

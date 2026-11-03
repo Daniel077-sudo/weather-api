@@ -46,6 +46,16 @@ class GeneralChatReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("還沒有建立或設定任何內容", reply)
         self.assertNotIn("設定好提醒", reply)
 
+    async def test_general_chat_cannot_claim_a_reminder_was_prepared(self):
+        with patch(
+            "gemini_service.call_gemini_raw",
+            new=AsyncMock(return_value="小藍幫你準備好了『明天去辦護照』的提醒囉。"),
+        ):
+            reply = await generate_general_chat_reply("明天辦護照", "小藍", [])
+
+        self.assertIn("還沒有建立或設定任何內容", reply)
+        self.assertNotIn("準備好了", reply)
+
 
 if __name__ == "__main__":
     unittest.main()

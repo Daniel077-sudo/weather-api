@@ -274,6 +274,37 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertFalse(result["needs_clarification"])
         self.assertEqual(result["draft_event"]["location"], "新光三越")
 
+    def test_passport_phrase_without_hint_creates_all_day_draft(self):
+        payload = self.payload_for({"input": "明天辦護照"})
+        payload["intent_hint"] = None
+        result = build_chat_v2_response(payload)
+
+        self.assertEqual(result["intent"], "CREATE_EVENT")
+        self.assertFalse(result["needs_clarification"])
+        self.assertEqual(result["draft_event"]["title"], "辦護照")
+        self.assertTrue(result["draft_event"]["all_day"])
+        self.assertIsNone(result["draft_event"]["start_time"])
+
+    def test_time_only_follow_up_preserves_title_and_asks_for_period(self):
+        first = self.payload_for({"input": "等一下2點45分提醒我去國防期中考"})
+        first_result = build_chat_v2_response(first)
+        self.assertEqual(first_result["intent"], "CREATE_EVENT")
+        self.assertEqual(first_result["draft_event"]["title"], "國防期中考")
+        self.assertIn("start_time", first_result["missing_fields"])
+        self.assertIn("上午還是下午", first_result["reply"])
+
+        follow_up = self.payload_for({"input": "2點45分"})
+        follow_up.update({
+            "intent_hint": "CREATE_EVENT",
+            "draft_id": first_result["draft_id"],
+            "draft_event": first_result["draft_event"],
+        })
+        second_result = build_chat_v2_response(follow_up)
+        self.assertEqual(second_result["draft_event"]["title"], "國防期中考")
+        self.assertNotEqual(second_result["draft_event"]["title"], "分")
+        self.assertIn("start_time", second_result["missing_fields"])
+        self.assertIn("上午還是下午", second_result["reply"])
+
 
 if __name__ == "__main__":
     unittest.main()
