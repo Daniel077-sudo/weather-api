@@ -15,9 +15,17 @@ HOURS = {
 ACTIVITIES = [
     "騎腳踏車", "騎自行車", "腳踏車", "自行車", "騎車",
     "開會", "游泳", "遊泳", "爬山", "跑步", "路跑", "打球", "運動", "露營",
-    "上課", "看診", "考試", "辦護照", "聚餐", "旅遊", "出遊", "買菜", "通勤", "吃冰", "玩",
+    "看牙醫", "看醫生", "看電影", "上班", "上課", "吃飯", "晨跑",
+    "看診", "考試", "辦護照", "聚餐", "旅遊", "出遊", "買菜", "通勤", "吃冰", "玩",
 ]
-WEATHER_WORDS = ["天氣", "下雨", "降雨", "帶傘", "氣溫", "熱不熱", "冷不冷", "會不會下雨"]
+WEATHER_WORDS = ["天氣", "下雨", "降雨", "帶傘", "氣溫", "外套", "熱不熱", "冷不冷", "會不會下雨"]
+TIME_PERIODS = ["早上", "上午", "中午", "下午", "晚上", "凌晨"]
+VAGUE_LOCATION_NAMES = {"全聯", "學校", "成大", "小西門"}
+VALID_INTENTS = {
+    "CREATE_EVENT", "UPDATE_EVENT", "DELETE_EVENT", "QUERY_EVENT",
+    "QUERY_WEATHER", "EVENT_WEATHER", "DISASTER_INFO", "GENERAL_CHAT",
+}
+VALID_MISSING_FIELDS = {"title", "date", "start_time", "city", "district", "target"}
 
 
 def _text(value: Any) -> str:
@@ -47,13 +55,14 @@ def _date_mentions(message: str, now: datetime) -> List[Tuple[Tuple[int, int], s
         occupied.append(span)
         found.append((span, day.strftime("%Y-%m-%d")))
 
-    for match in re.finditer(r"大後天|後天|明天|今天", message):
-        offset = {"今天": 0, "明天": 1, "後天": 2, "大後天": 3}[match.group(0)]
+    for match in re.finditer(r"大後天|後天|明天|今天|tomorrow", message, re.IGNORECASE):
+        token = match.group(0).lower()
+        offset = {"今天": 0, "明天": 1, "後天": 2, "大後天": 3, "tomorrow": 1}[token]
         add(match, now + timedelta(days=offset))
 
-    for match in re.finditer(r"(下)?(?:星期|禮拜|週|周)([一二三四五六日天])", message):
+    for match in re.finditer(r"(下|這|本)?(?:星期|禮拜|週|周)([一二三四五六日天])", message):
         target = WEEKDAYS[match.group(2)]
-        if match.group(1):
+        if match.group(1) == "下":
             next_monday = now + timedelta(days=(7 - now.weekday()))
             day = next_monday + timedelta(days=target)
         else:
@@ -89,7 +98,45 @@ def _parse_hour(raw: str) -> Optional[int]:
     return HOURS.get(raw)
 
 
+def _clock_value(hour_raw: str, minute_raw: Optional[str], period: str = "") -> Optional[str]:
+    hour = _parse_hour(hour_raw)
+    if hour is None:
+        return None
+    minute = 30 if minute_raw == "半" else int(minute_raw or "0")
+    if minute > 59:
+        return None
+    if period in {"下午", "晚上", "pm"} and hour < 12:
+        hour += 12
+    elif period == "中午" and hour < 11:
+        hour += 12
+    elif period in {"凌晨", "am"} and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _time_range_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
+    hour = r"十一|十二|十|[一二兩三四五六七八九]|\d{1,2}"
+    pattern = re.compile(
+        rf"(?:從\s*)?(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?({hour})\s*(?:點|时|時)?\s*(半|\d{{1,2}})?\s*(?:分)?"
+        rf"\s*(?:到|至|~|～|－|-)\s*"
+        rf"(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?({hour})\s*(?:點|时|時)\s*(半|\d{{1,2}})?\s*(?:分)?"
+    )
+    match = pattern.search(message)
+    if not match:
+        return []
+    first_period = match.group(1) or match.group(4) or ""
+    second_period = match.group(4) or match.group(1) or ""
+    start = _clock_value(match.group(2), match.group(3), first_period)
+    end = _clock_value(match.group(5), match.group(6), second_period)
+    if not start or not end:
+        return []
+    return [(match.span(), start), (match.span(), end)]
+
+
 def _time_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
+    range_values = _time_range_mentions(message)
+    if range_values:
+        return range_values
     pattern = re.compile(
         r"(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?"
         r"(十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*"
@@ -97,28 +144,31 @@ def _time_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
     )
     found = []
     for match in pattern.finditer(message):
-        hour = _parse_hour(match.group(2))
-        if hour is None:
-            continue
-        minute_raw = match.group(3) or "0"
-        minute = 30 if minute_raw == "半" else int(minute_raw)
-        if minute > 59:
-            continue
         period = match.group(1) or ""
-        if period in {"下午", "晚上"} and hour < 12:
-            hour += 12
-        elif period == "中午" and hour < 11:
-            hour += 12
-        elif period == "凌晨" and hour == 12:
-            hour = 0
-        elif not period and 1 <= hour <= 6:
-            hour += 12
-        found.append((match.span(), f"{hour:02d}:{minute:02d}"))
+        value = _clock_value(match.group(2), match.group(3), period)
+        if value:
+            found.append((match.span(), value))
+
+    english = re.compile(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.IGNORECASE)
+    for match in english.finditer(message):
+        value = _clock_value(match.group(1), match.group(2), match.group(3).lower())
+        if value:
+            found.append((match.span(), value))
+    found.sort(key=lambda item: item[0][0])
     return found
 
 
 def _time_requires_clarification(message: str) -> bool:
     """Return true when the user mentioned time but did not provide a precise clock time."""
+    range_values = _time_range_mentions(message)
+    if range_values:
+        range_text = message[range_values[0][0][0]:range_values[0][0][1]]
+        if any(period in range_text for period in TIME_PERIODS):
+            return False
+        hours = [int(value.split(":", 1)[0]) for _, value in range_values]
+        return any(1 <= value <= 12 for value in hours)
+    if re.search(r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", message, re.IGNORECASE):
+        return False
     pattern = re.compile(
         r"(?:(早上|上午|中午|下午|晚上|凌晨)\s*)?"
         r"(十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*"
@@ -126,7 +176,7 @@ def _time_requires_clarification(message: str) -> bool:
     )
     matches = list(pattern.finditer(message))
     if not matches:
-        return any(period in message for period in ["早上", "上午", "中午", "下午", "晚上", "凌晨"])
+        return any(period in message for period in TIME_PERIODS)
 
     for match in matches:
         hour = _parse_hour(match.group(2))
@@ -183,7 +233,31 @@ def _explicit_location_name(message: str) -> Optional[str]:
     return value[:120] or None
 
 
+def _generic_location_name(message: str, title: Optional[str] = None) -> Optional[str]:
+    if _location(message).get("city"):
+        return None
+    patterns = [
+        r"(?:去|前往)\s*([^，。！？!?\s]+)",
+        r"(?:地點\s*(?:在|是|為|：|:)|位於|在)\s*([^，。！？!?\s]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message)
+        if not match:
+            continue
+        value = _text(match.group(1))
+        if title and value.endswith(title) and value != title:
+            value = value[:-len(title)]
+        if value and value not in ACTIVITIES:
+            return value[:120]
+    return None
+
+
 def _activity(message: str) -> Optional[str]:
+    english = re.search(r"\bremind\s+me\s+to\s+(.+?)(?:\s+tomorrow|\s+at\s+\d|$)", message, re.IGNORECASE)
+    if english:
+        return _text(english.group(1)) or None
+    if message.startswith("跟") and "吃飯" in message:
+        return _text(message)
     for item in ACTIVITIES:
         if item in message:
             if item == "遊泳":
@@ -226,12 +300,15 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
     if any(word in message for word in ["颱風", "台風", "地震", "防災", "淹水", "洪水", "避難", "豪雨"]):
         return "DISASTER_INFO"
     activity = _activity(message)
-    create_signal = any(word in message for word in ["我要去", "想去", "要去", "幫我排", "安排", "新增", "建立", "提醒我"])
+    create_signal = any(word in message for word in ["我要去", "想去", "要去", "幫我排", "安排", "新增", "建立", "提醒我"]) or bool(
+        re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
+    )
     dates = _date_mentions(message, now)
     times = _time_mentions(message)
     location = _location(message)
     destination_signal = bool(re.search(r"(?:去|到|前往)\s*[^，。！？\s]+", message))
-    if create_signal or (dates and destination_signal and location["city"]) or (activity and (dates or times or location["city"])) or (dates and times and location["city"]):
+    social_signal = bool(activity and message.startswith("跟"))
+    if create_signal or social_signal or (dates and destination_signal) or (activity and (dates or times or location["city"])) or (dates and times and location["city"]):
         return "CREATE_EVENT"
     if intent_hint == "CREATE_EVENT" and (has_draft or activity or dates or times or location["city"]):
         return "CREATE_EVENT"
@@ -258,9 +335,15 @@ def _draft_title(message: str) -> Optional[str]:
         return activity
     text = message
     text = re.sub(r"可以?幫我|請幫我|幫我|提醒我|我要|我想|想要|想|安排|新增|建立|排", " ", text)
-    text = re.sub(r"大後天|後天|明天|今天|等一下|下?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
+    text = re.sub(r"大後天|後天|明天|今天|等一下|(?:下|這|本)?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
+    text = re.sub(r"\btomorrow\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\d{1,2}\s*(?:/|月)\s*\d{1,2}\s*(?:日|號|号)?", " ", text)
+    text = re.sub(
+        r"(?:從\s*)?(?:(?:早上|上午|中午|下午|晚上|凌晨)\s*)?(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時)?\s*(?:半|\d{1,2})?\s*(?:分)?\s*(?:到|至|~|～|－|-)\s*(?:(?:早上|上午|中午|下午|晚上|凌晨)\s*)?(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時)\s*(?:半|\d{1,2})?\s*(?:分)?",
+        " ", text,
+    )
     text = re.sub(r"(?:早上|上午|中午|下午|晚上|凌晨)?\s*(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時|:|：)\s*(?:半|\d{1,2})?\s*(?:分)?", " ", text)
+    text = re.sub(r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", " ", text, flags=re.IGNORECASE)
     location = _location(message)
     for value in [location.get("city"), location.get("district"), location.get("location")]:
         if value:
@@ -290,6 +373,57 @@ def _base_response(intent: str, message: str, draft_id: Optional[str]) -> Dict[s
     }
 
 
+def validate_chat_v2_response(result: Dict[str, Any], assistant_name: str = "小藍") -> Dict[str, Any]:
+    """Enforce the public v2 contract before a response reaches mobile clients."""
+    errors: List[str] = []
+    intent = result.get("intent")
+    if intent not in VALID_INTENTS:
+        errors.append("invalid_intent")
+
+    missing = result.get("missing_fields")
+    if not isinstance(missing, list) or any(field not in VALID_MISSING_FIELDS for field in missing):
+        errors.append("invalid_missing_fields")
+        missing = []
+    result["missing_fields"] = missing
+    result["needs_clarification"] = bool(missing)
+
+    if not _text(result.get("reply")):
+        errors.append("empty_reply")
+
+    draft = result.get("draft_event")
+    if isinstance(draft, dict):
+        date_value = draft.get("date")
+        if date_value:
+            try:
+                datetime.strptime(str(date_value), "%Y-%m-%d")
+            except ValueError:
+                errors.append("invalid_date")
+        for field in ["start_time", "end_time"]:
+            value = draft.get(field)
+            if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value)):
+                errors.append(f"invalid_{field}")
+        city = draft.get("city")
+        if city:
+            normalized_city = str(city).replace("台", "臺")
+            if normalized_city not in TAIWAN_LOCATIONS:
+                errors.append("invalid_city")
+            else:
+                draft["city"] = normalized_city
+
+    if not errors:
+        return result
+
+    safe = _base_response("GENERAL_CHAT", "", result.get("draft_id"))
+    safe.update({
+        "status": "success",
+        "assistant_name": assistant_name,
+        "reply": "我沒聽清楚，可以再說一次嗎？",
+        "validation_errors": errors,
+        "_skip_gemini": True,
+    })
+    return safe
+
+
 def _entity_dates(message: str, now: datetime) -> Tuple[Optional[str], Optional[str]]:
     weekend = _weekend_range(message, now)
     if weekend:
@@ -315,13 +449,18 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         times = _time_mentions(message)
         time_needs_clarification = _time_requires_clarification(message)
         has_time_wording = bool(times) or time_needs_clarification
-        is_reminder = bool(existing.get("is_reminder")) or "提醒我" in message
+        is_reminder = bool(existing.get("is_reminder")) or "提醒我" in message or bool(
+            re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
+        )
         preferred_city = existing.get("city")
         location = _location(message, preferred_city)
         explicit_location = _explicit_location_name(message)
+        title = _draft_title(message)
+        generic_location = _generic_location_name(message, title)
         if explicit_location:
             location["location"] = explicit_location
-        title = _draft_title(message)
+        elif generic_location:
+            location["location"] = generic_location
         existing_start = existing.get("start_time")
         if times and not time_needs_clarification:
             start_time = times[0][1]
@@ -350,10 +489,16 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             "district": location["district"] if location["city"] is not None else existing.get("district"),
             "location": location["location"] if location["location"] is not None else existing.get("location"),
         }
+        location_requires_city = bool(existing.get("location_requires_city")) or bool(
+            generic_location and generic_location in VAGUE_LOCATION_NAMES
+        )
+        if location.get("city"):
+            location_requires_city = False
         location_optional = is_reminder or draft.get("title") == "辦護照"
         draft["location_optional"] = location_optional
+        draft["location_requires_city"] = location_requires_city
         missing = [key for key in ["title", "date"] if not draft.get(key)]
-        if not location_optional and not (draft.get("city") or draft.get("location")):
+        if not location_optional and (location_requires_city or not (draft.get("city") or draft.get("location"))):
             missing.append("city")
         if (has_time_wording or existing_start) and not draft.get("start_time"):
             missing.append("start_time")

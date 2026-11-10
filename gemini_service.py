@@ -62,7 +62,13 @@ def summarize_ai_usage() -> Dict[str, Any]:
         "errors": errors,
     }
 
-async def call_gemini_raw(prompt: str):
+async def call_gemini_raw(
+    prompt: str,
+    *,
+    temperature: float = 0.2,
+    response_schema: Optional[Dict[str, Any]] = None,
+    max_retries: int = 1,
+):
     """非同步呼叫 Gemini AI，避免拖垮主執行緒"""
     if not GEMINI_API_KEY:
         return ""
@@ -71,25 +77,49 @@ async def call_gemini_raw(prompt: str):
     set_timing("gemini_model", model)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
+    generation_config: Dict[str, Any] = {"temperature": max(0.0, min(float(temperature), 1.0))}
+    if response_schema:
+        generation_config.update({
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+        })
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.8}
+        "generationConfig": generation_config,
     }
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=payload, timeout=GEMINI_TIMEOUT_SECONDS)
-            response.raise_for_status()
-            res_json = response.json()
-            if 'candidates' in res_json and len(res_json['candidates']) > 0:
-                return res_json['candidates'][0]['content']['parts'][0]['text'].strip()
-            return f"[AI 罷工原因]: {json.dumps(res_json, ensure_ascii=False)}"
-    except httpx.HTTPStatusError as e:
-        status_code = e.response.status_code if e.response is not None else "unknown"
-        return f"[Gemini HTTP error]: status={status_code}, model={model}"
-    except httpx.RequestError as e:
-        return f"[Gemini request error]: {e.__class__.__name__}, model={model}"
-    except Exception as e:
-        return f"[Gemini error]: {e.__class__.__name__}, model={model}"
+    transient_statuses = {429, 500, 502, 503, 504}
+    retries = max(0, min(int(max_retries), 1))
+    attempt_timeout = GEMINI_TIMEOUT_SECONDS if retries == 0 else max(1.0, (GEMINI_TIMEOUT_SECONDS - 1.0) / (retries + 1))
+    async with httpx.AsyncClient() as client:
+        for attempt in range(retries + 1):
+            try:
+                response = await client.post(url, headers=headers, json=payload, timeout=attempt_timeout)
+                if response.status_code in transient_statuses and attempt < retries:
+                    retry_after = response.headers.get("Retry-After", "")
+                    try:
+                        delay = max(1.0, min(float(retry_after), 1.0))
+                    except ValueError:
+                        delay = 1.0
+                    set_timing("gemini_retry_count", attempt + 1)
+                    await asyncio.sleep(delay)
+                    continue
+                response.raise_for_status()
+                res_json = response.json()
+                if 'candidates' in res_json and len(res_json['candidates']) > 0:
+                    return res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                return f"[AI 罷工原因]: {json.dumps(res_json, ensure_ascii=False)}"
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code if e.response is not None else "unknown"
+                return f"[Gemini HTTP error]: status={status_code}, model={model}"
+            except httpx.RequestError as e:
+                if attempt < retries:
+                    set_timing("gemini_retry_count", attempt + 1)
+                    await asyncio.sleep(1.0)
+                    continue
+                return f"[Gemini request error]: {e.__class__.__name__}, model={model}"
+            except Exception as e:
+                return f"[Gemini error]: {e.__class__.__name__}, model={model}"
+    return f"[Gemini error]: retry_exhausted, model={model}"
 
 
 def normalize_assistant_name(value: Optional[str]) -> str:
@@ -103,7 +133,7 @@ def _general_chat_fallback(message: str, assistant_name: str) -> str:
         return f"不客氣，我是{assistant_name}。有需要再告訴我。"
     if any(token in message.lower() for token in ["嗨", "你好", "hello", "hi"]):
         return f"嗨，我是{assistant_name}，很高興見到你。今天想聊什麼？"
-    return f"我是{assistant_name}。我有收到你的訊息，但現在暫時無法產生完整回覆，請稍後再試。"
+    return f"我是{assistant_name}。AI 暫時忙不過來，請稍後再試；查天氣、查行程仍可以直接問我。"
 
 
 def _prevent_false_action_confirmation(reply: str, assistant_name: str) -> str:
@@ -178,9 +208,80 @@ def parse_json_object(text: str) -> Dict[str, Any]:
         return {}
 
 
-async def call_gemini_json(prompt: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
-    text = await call_gemini_raw(prompt)
+def _schema_from_value(value: Any) -> Dict[str, Any]:
+    if isinstance(value, bool):
+        return {"type": "BOOLEAN"}
+    if isinstance(value, int):
+        return {"type": "INTEGER"}
+    if isinstance(value, float):
+        return {"type": "NUMBER"}
+    if isinstance(value, dict):
+        properties = {str(key): _schema_from_value(item) for key, item in value.items()}
+        schema: Dict[str, Any] = {"type": "OBJECT", "properties": properties}
+        if properties:
+            schema["required"] = list(properties.keys())
+        return schema
+    if isinstance(value, list):
+        item_schema = _schema_from_value(value[0]) if value else {"type": "STRING"}
+        return {"type": "ARRAY", "items": item_schema}
+    if value is None:
+        return {"type": "STRING", "nullable": True}
+    return {"type": "STRING"}
+
+
+def _json_shape_errors(value: Any, template: Any, path: str = "response") -> List[str]:
+    if template is None:
+        return []
+    if isinstance(template, dict):
+        if not isinstance(value, dict):
+            return [f"{path} must be an object"]
+        errors = []
+        for key, expected in template.items():
+            if key not in value:
+                errors.append(f"{path}.{key} is required")
+            else:
+                errors.extend(_json_shape_errors(value[key], expected, f"{path}.{key}"))
+        return errors
+    if isinstance(template, list):
+        if not isinstance(value, list):
+            return [f"{path} must be an array"]
+        return []
+    if isinstance(template, bool) and not isinstance(value, bool):
+        return [f"{path} must be a boolean"]
+    if isinstance(template, (int, float)) and not isinstance(template, bool) and not isinstance(value, (int, float)):
+        return [f"{path} must be a number"]
+    if isinstance(template, str) and not isinstance(value, str):
+        return [f"{path} must be a string"]
+    return []
+
+
+async def _call_gemini_json_validated(prompt: str, fallback: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    schema = _schema_from_value(fallback)
+    text = await call_gemini_raw(prompt, temperature=0.1, response_schema=schema)
     parsed = parse_json_object(text)
+    errors = _json_shape_errors(parsed, fallback) if parsed else ["response is not valid JSON"]
+    if not errors:
+        return parsed, text
+
+    add_timing("gemini_call_count", 1)
+    retry_prompt = (
+        f"{prompt}\n\n上一次輸出不符合契約：{json.dumps(errors[:12], ensure_ascii=False)}。"
+        "請重新輸出符合 schema 的單一 JSON object，不要加入說明文字。"
+    )
+    retry_text = await call_gemini_raw(
+        retry_prompt,
+        temperature=0.1,
+        response_schema=schema,
+        max_retries=0,
+    )
+    retry_parsed = parse_json_object(retry_text)
+    if retry_parsed and not _json_shape_errors(retry_parsed, fallback):
+        return retry_parsed, retry_text
+    return {}, retry_text or text
+
+
+async def call_gemini_json(prompt: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    parsed, _ = await _call_gemini_json_validated(prompt, fallback)
     return parsed or fallback
 
 
@@ -197,7 +298,7 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
             cached = supabase.table("ai_suggestion_cache").select("response").eq("cache_key", cache_key).limit(1).execute()
         if cached.data:
             response = cached.data[0].get("response") or {}
-            if isinstance(response, dict):
+            if isinstance(response, dict) and not _json_shape_errors(response, fallback):
                 response["cache_hit"] = True
                 response.setdefault("gemini_configured", gemini_configured)
                 response.setdefault("gemini_attempted", False)
@@ -220,8 +321,7 @@ async def call_gemini_json_cached(prompt: str, fallback: Dict[str, Any], prompt_
 
     add_timing("gemini_call_count", 1)
     with timed("gemini_ms"):
-        text = await call_gemini_raw(prompt)
-    parsed = parse_json_object(text)
+        parsed, text = await _call_gemini_json_validated(prompt, fallback)
     if not parsed:
         error = "empty_response" if not text else "invalid_json_or_api_error"
         if isinstance(text, str) and text.startswith("["):

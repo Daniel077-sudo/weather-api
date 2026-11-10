@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
-from chat_contract_v2 import build_chat_v2_response
+from chat_contract_v2 import build_chat_v2_response, validate_chat_v2_response
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +22,16 @@ def partial_diff(expected, actual, path=""):
             missing = [item for item in wanted if item not in (actual.get("missing_fields") or [])]
             if missing:
                 errors.append(f"missing_fields lacks {missing}")
+            continue
+        if key == "intent_in":
+            if actual.get("intent") not in wanted:
+                errors.append(f"intent {actual.get('intent')!r} not in {wanted!r}")
+            continue
+        if key == "draft_event_absent":
+            draft = actual.get("draft_event") or {}
+            filled = {field: draft.get(field) for field in wanted if draft.get(field) not in (None, "")}
+            if filled:
+                errors.append(f"draft_event unexpectedly filled {filled}")
             continue
         got = actual.get(key)
         here = f"{path}.{key}" if path else key
@@ -304,6 +314,24 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertNotEqual(second_result["draft_event"]["title"], "分")
         self.assertIn("start_time", second_result["missing_fields"])
         self.assertIn("上午還是下午", second_result["reply"])
+
+    def test_contract_validator_blocks_invalid_mobile_payload(self):
+        invalid = {
+            "status": "success",
+            "contract_version": 2,
+            "intent": "NOT_A_REAL_INTENT",
+            "reply": "",
+            "missing_fields": ["unknown"],
+            "draft_event": {"date": "2026-99-99", "start_time": "35:88", "city": "不存在市"},
+        }
+        result = validate_chat_v2_response(invalid, "小藍")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["intent"], "GENERAL_CHAT")
+        self.assertFalse(result["needs_clarification"])
+        self.assertTrue(result["reply"])
+        self.assertTrue(result["_skip_gemini"])
+        self.assertIn("invalid_intent", result["validation_errors"])
 
 
 if __name__ == "__main__":

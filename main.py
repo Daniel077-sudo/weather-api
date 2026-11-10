@@ -24,7 +24,7 @@ from event_service import build_event_risk, create_memory_event, delete_memory_e
 from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, generate_general_chat_reply, normalize_assistant_name, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatDraftActionRequest, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
-from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response
+from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response, validate_chat_v2_response
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from timing_service import get_timing, reset_timing, set_timing, start_timing
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
@@ -223,8 +223,11 @@ async def _process_chat_command(
         if payload.contract_version == 2:
             if not payload.client_now:
                 raise ValueError("client_now is required for contract_version 2")
-            result = build_chat_v2_response(payload.model_dump())
-            if result.get("intent") == "GENERAL_CHAT" and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
+            result = validate_chat_v2_response(
+                build_chat_v2_response(payload.model_dump()),
+                normalize_assistant_name(payload.assistant_name),
+            )
+            if result.get("intent") == "GENERAL_CHAT" and not result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []
                 result["reply"] = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
@@ -251,8 +254,11 @@ async def _process_chat_command(
             draft_payload = payload.model_dump()
             draft_payload["contract_version"] = 2
             draft_payload["client_now"] = payload.client_now or taipei_now().isoformat()
-            draft_result = build_chat_v2_response(draft_payload)
-            if draft_result.get("intent") == "GENERAL_CHAT" and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
+            draft_result = validate_chat_v2_response(
+                build_chat_v2_response(draft_payload),
+                normalize_assistant_name(payload.assistant_name),
+            )
+            if draft_result.get("intent") == "GENERAL_CHAT" and not draft_result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []
                 draft_result["reply"] = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
