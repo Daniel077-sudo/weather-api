@@ -41,6 +41,7 @@ class ChatCommandResponse(BaseModel):
     reply: str = ""
     assistant_name: str = "小藍"
     gemini_status: str = "not_called"
+    ai_failed: bool = False
     channel: Literal["app", "line"] = "app"
     has_alert: bool = False
     alert_title: str = ""

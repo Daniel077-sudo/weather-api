@@ -208,6 +208,13 @@ async def ask_assistant(query: UserQuery):
         return {"status": "error", "message": f"解析失敗: {str(e)}"}
 
 
+def apply_general_chat_result(result: Dict[str, Any], reply: str, gemini_status: str) -> Dict[str, Any]:
+    result["gemini_status"] = gemini_status or "error"
+    result["ai_failed"] = result["gemini_status"] != "ok"
+    result["reply"] = "" if result["ai_failed"] else str(reply or "")
+    return result
+
+
 async def _process_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -230,10 +237,11 @@ async def _process_chat_command(
             if result.get("intent") == "GENERAL_CHAT" and not result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []
-                result["reply"] = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
-                result["gemini_status"] = get_timing().get("gemini_status", "error")
+                generated_reply = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
+                apply_general_chat_result(result, generated_reply, get_timing().get("gemini_status", "error"))
             result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
             result.setdefault("gemini_status", "not_called")
+            result.setdefault("ai_failed", False)
             result["channel"] = result_channel
             result.update({
                 "event_id": None,
@@ -261,11 +269,12 @@ async def _process_chat_command(
             if draft_result.get("intent") == "GENERAL_CHAT" and not draft_result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []
-                draft_result["reply"] = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
-                draft_result["gemini_status"] = get_timing().get("gemini_status", "error")
+                generated_reply = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
+                apply_general_chat_result(draft_result, generated_reply, get_timing().get("gemini_status", "error"))
             result = draft_to_legacy_response(draft_result)
             result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
             result["gemini_status"] = draft_result.get("gemini_status", "not_called")
+            result["ai_failed"] = bool(draft_result.get("ai_failed"))
             result["channel"] = result_channel
             if result.get("action_type") in {"DELETE_EVENT", "UPDATE_EVENT"}:
                 event_filter = draft_result.get("event_filter") or {}
@@ -293,6 +302,7 @@ async def _process_chat_command(
                 "reply": "此版本的聊天契約已停用，請更新 App 並使用 contract_version: 2。",
                 "assistant_name": normalize_assistant_name(payload.assistant_name),
                 "gemini_status": "not_called",
+                "ai_failed": False,
                 "channel": result_channel,
                 "action_type": "NONE",
                 "event_id": None,
@@ -330,6 +340,7 @@ async def _process_chat_command(
                 "reply": "我暫時無法處理這則訊息，請稍後再試。",
                 "assistant_name": normalize_assistant_name(payload.assistant_name),
                 "gemini_status": get_timing().get("gemini_status", "error"),
+                "ai_failed": True,
                 "channel": "line" if channel == "line" else "app",
                 "draft_id": payload.draft_id,
                 "draft_event": None,
@@ -344,6 +355,7 @@ async def _process_chat_command(
             "reply": f"{normalize_assistant_name(payload.assistant_name)}暫時無法完成這次操作，請稍後再試。",
             "assistant_name": normalize_assistant_name(payload.assistant_name),
             "gemini_status": get_timing().get("gemini_status", "error"),
+            "ai_failed": True,
             "channel": "line" if channel == "line" else "app",
             "action_type": "NONE",
             "timing": get_timing(),
@@ -710,6 +722,7 @@ async def weather_suggestion(payload: WeatherSuggestionRequest, auth: AuthContex
             f"使用者問題:{payload.message or payload.activity or '天氣建議'}\n"
             f"天氣:{json.dumps(current_weather, ensure_ascii=False)}\n"
             f"風險:{json.dumps(risk_payload, ensure_ascii=False)}\n"
+            "規則：降雨機率 30% 以上才可說可能下雨或建議帶傘；低於 30% 不可做降雨提醒。\n"
             "JSON 欄位: suggestion(60字內自然建議), risk_summary, recommended_action, confidence。"
         )
         ai_raw = await call_gemini_json_cached(

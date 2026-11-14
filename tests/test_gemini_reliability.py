@@ -36,6 +36,8 @@ class GeminiReliabilityTests(unittest.TestCase):
         self.assertEqual(result, "完成")
         self.assertEqual(client.post.await_count, 2)
         sleep.assert_awaited_once()
+        self.assertIn("gemini-3.5-flash:generateContent", client.post.await_args_list[0].args[0])
+        self.assertIn("gemini-3.5-flash-lite:generateContent", client.post.await_args_list[1].args[0])
         payload = client.post.await_args_list[0].kwargs["json"]
         self.assertEqual(payload["generationConfig"]["temperature"], 0.2)
 

@@ -544,7 +544,7 @@ def analyze_weather_risk(weather: Dict[str, Any]) -> Dict[str, Any]:
     high_tags = {"heavy_rain", "torrential_rain", "strong_wind", "low_visibility", "very_poor_air_quality", "extreme_heat"}
     if high_tags.intersection(tags):
         level = "high"
-    elif tags or pop >= 40:
+    elif tags or pop >= 30:
         level = "medium"
     else:
         level = "low"
@@ -568,8 +568,10 @@ def build_weather_suggestion(city: str, district: str, message: str, weather: Di
         return f"{location}可能有強風，外出請避開招牌、路樹與施工圍籬。"
     if "high_uvi" in tags:
         return f"{location}紫外線偏高，請補水並做好防曬。"
-    if pop >= 40:
+    if pop >= 30:
         return f"{location}有降雨機會，行程「{message}」建議預留交通緩衝。"
+    if pop < 30 and any(keyword in str(description) for keyword in ["雨", "雷"]):
+        description = "天氣風險低"
     return f"{location}目前{description}，行程「{message}」可照常，仍請留意最新天氣。"
 
 

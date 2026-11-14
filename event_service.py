@@ -310,6 +310,7 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
         f"交通:{payload.transport_type or ''}\n"
         f"天氣:{weather_text}\n"
         f"警報:{alert_text}\n"
+        "規則：降雨機率 30% 以上才可說可能下雨或建議帶傘；低於 30% 不可做降雨提醒。\n"
         "JSON 欄位: intent, risk_summary, recommended_action, alternative_location, confidence。"
     )
     ai_raw = await call_gemini_json_cached(

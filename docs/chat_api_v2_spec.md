@@ -15,12 +15,13 @@ Allowed values are `CREATE_EVENT`, `UPDATE_EVENT`, `DELETE_EVENT`, `QUERY_EVENT`
 - Resolve relative dates from `client_now` in Asia/Taipei.
 - No date means the `client_now` calendar date.
 - No time means an all-day draft: `all_day: true`, `start_time: null`, and `end_time: null`.
-- A vague period such as `明天晚上`, or a clock time without AM/PM such as `3 點`, requires clarification.
+- A vague period such as `明天晚上` requires clarification. A numeric clock without AM/PM follows the App/LINE convention: today uses the next occurrence; on another date, 1-6 means PM and 7-11 means AM; two-digit colon time is 24-hour time.
 - Do not synthesize `end_time`. Fill it only when the user states a time range.
 - In a stated range, inherit a period across both ends: `下午三點到五點` is `15:00` to `17:00`; `兩點到晚上十點半` is `14:00` to `22:30`.
 - Merge follow-ups into `draft_event`; fields not mentioned in the new message remain unchanged.
 - Do not copy `current_location` into `city`.
-- Do not guess the city for generic or chain locations such as `學校` or `全聯`.
+- Location is optional. Do not add `city`, `district`, or `location` to `missing_fields`.
+- Do not guess the city for generic or chain locations such as `學校` or `全聯`; retain the supplied place text in `location` when useful.
 - A clearly named venue may be retained in `location` without inventing `city` or `district`.
 
 ## Response invariants
@@ -28,9 +29,11 @@ Allowed values are `CREATE_EVENT`, `UPDATE_EVENT`, `DELETE_EVENT`, `QUERY_EVENT`
 - `needs_clarification` equals `len(missing_fields) > 0`.
 - `date` uses `YYYY-MM-DD`; clock fields use `HH:MM`.
 - `city`, when present, must be one of the configured Taiwan cities/counties and uses `臺`.
-- `reply` is always a non-empty string.
+- `QUERY_EVENT`, `QUERY_WEATHER`, and `EVENT_WEATHER` may return an empty `reply`; App and LINE answer from `entities`. Other intents return a non-empty reply unless `ai_failed` is true.
 - `/api/chat` only prepares a draft. It does not write events before explicit confirmation.
-- Gemini failures return a normal JSON response with `gemini_status: timeout` or `error`; they must not produce an HTTP 500 or a false claim that an action was completed.
+- Gemini failures return `ai_failed: true`, `gemini_status: timeout|error`, and an empty `reply`; they must not produce an HTTP 500 or a false claim that an action was completed.
+
+Text generation uses `GEMINI_TEXT_MODEL` (default `gemini-3.5-flash`). A transient 429/5xx or request timeout retries once with `GEMINI_TEXT_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`).
 
 ## Examples
 

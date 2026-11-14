@@ -53,10 +53,7 @@
       "input": "我要去游泳",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "city"
-        ],
+        "needs_clarification": false,
         "draft_event": {
           "title": "游泳",
           "date": "2026-09-23",
@@ -69,10 +66,7 @@
       "input": "明天想去游泳",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "city"
-        ],
+        "needs_clarification": false,
         "draft_event": {
           "title": "游泳",
           "date": "2026-09-24",
@@ -83,13 +77,10 @@
     {
       "id": "create-06-no-city",
       "input": "明天早上九點開會",
-      "_備註": "沒講地點：不可自動填 current_location（高雄市），要列入 missing_fields",
+      "_備註": "沒講地點：不可自動填 current_location（高雄市），地點選填並保留空值",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "city"
-        ],
+        "needs_clarification": false,
         "draft_event": {
           "title": "開會",
           "date": "2026-09-24",
@@ -433,10 +424,7 @@
       "input": "今天下午一點半要上班",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "city"
-        ],
+        "needs_clarification": false,
         "draft_event": {
           "title": "上班",
           "date": "2026-09-23",
@@ -450,9 +438,6 @@
       "input": "明天早上九點看牙醫",
       "expect": {
         "intent": "CREATE_EVENT",
-        "missing_fields_include": [
-          "city"
-        ],
         "draft_event": {
           "title": "看牙醫",
           "date": "2026-09-24",
@@ -466,9 +451,6 @@
       "input": "明天晚上七點吃飯",
       "expect": {
         "intent": "CREATE_EVENT",
-        "missing_fields_include": [
-          "city"
-        ],
         "draft_event": {
           "title": "吃飯",
           "date": "2026-09-24",
@@ -482,9 +464,6 @@
       "input": "明天下午三點去成大",
       "expect": {
         "intent": "CREATE_EVENT",
-        "missing_fields_include": [
-          "city"
-        ],
         "draft_event": {
           "date": "2026-09-24",
           "start_time": "15:00",
@@ -498,9 +477,6 @@
       "input": "明天下午一點半在小西門上班",
       "expect": {
         "intent": "CREATE_EVENT",
-        "missing_fields_include": [
-          "city"
-        ],
         "draft_event": {
           "title": "上班",
           "start_time": "13:30",
@@ -528,9 +504,6 @@
       "input": "跟小明吃飯",
       "expect": {
         "intent": "CREATE_EVENT",
-        "missing_fields_include": [
-          "city"
-        ],
         "draft_event": {
           "title": "跟小明吃飯",
           "date": "2026-09-23",
@@ -569,10 +542,7 @@
           "date": "2026-09-24",
           "start_time": "15:00",
           "end_time": "17:00"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -620,10 +590,7 @@
       "input": "明天下午三點去全聯",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "city"
-        ],
+        "needs_clarification": false,
         "draft_event_absent": [
           "city"
         ],
@@ -635,10 +602,7 @@
       "input": "明天下午三點去學校",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "city"
-        ],
+        "needs_clarification": false,
         "draft_event_absent": [
           "city"
         ]
@@ -816,11 +780,103 @@
       "input": "明天3點開會",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
-        "missing_fields_include": [
-          "start_time"
-        ],
-        "_說明": "待決定：iOS 沒講上下午就問；Android 會猜。定案前這題可能不過"
+        "needs_clarification": false,
+        "draft_event": {
+          "start_time": "15:00"
+        },
+        "_說明": "依 App／LINE 定案：非當天的 1 至 6 點視為下午"
+      }
+    },
+    {
+      "id": "v1114-weather-alias-01",
+      "input": "阿里山現在氣溫多少",
+      "expect": {
+        "intent": "QUERY_WEATHER",
+        "entities": {
+          "start_date": "2026-09-23",
+          "city": "嘉義縣",
+          "district": "阿里山鄉"
+        }
+      }
+    },
+    {
+      "id": "v1114-weather-week-01",
+      "input": "未來一週天氣",
+      "expect": {
+        "intent": "QUERY_WEATHER",
+        "entities": {
+          "start_date": "2026-09-23",
+          "end_date": "2026-09-29"
+        }
+      }
+    },
+    {
+      "id": "v1114-weather-trend-01",
+      "input": "下次變冷是什麼時候",
+      "expect": {
+        "intent": "QUERY_WEATHER",
+        "entities": {
+          "start_date": "2026-09-23",
+          "end_date": "2026-09-29"
+        }
+      }
+    },
+    {
+      "id": "v1114-location-optional-01",
+      "input": "今天晚上八點要倒垃圾",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "needs_clarification": false,
+        "draft_event": {
+          "title": "倒垃圾",
+          "date": "2026-09-23",
+          "start_time": "20:00",
+          "city": null
+        }
+      }
+    },
+    {
+      "id": "v1114-draft-topic-switch-01",
+      "input": "我今天心情不錯",
+      "intent_hint": "CREATE_EVENT",
+      "draft_event": {
+        "title": "開會",
+        "date": "2026-09-24",
+        "start_time": "15:00"
+      },
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "draft_event": null
+      }
+    },
+    {
+      "id": "v1114-location-followup-01",
+      "input": "地點在臺南大學",
+      "intent_hint": "CREATE_EVENT",
+      "draft_event": {
+        "title": "開會",
+        "date": "2026-09-24",
+        "start_time": "15:00"
+      },
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "開會",
+          "location": "臺南大學"
+        }
+      }
+    },
+    {
+      "id": "v1114-duration-location-01",
+      "input": "週六下午兩點開會兩小時＠信義區",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "開會",
+          "start_time": "14:00",
+          "end_time": "16:00",
+          "location": "信義區"
+        }
       }
     }
   ]

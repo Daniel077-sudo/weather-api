@@ -133,7 +133,7 @@ def run_case(suite, case):
     except Exception as e:  # noqa: BLE001
         return "no_reply", [f"呼叫失敗：{e}"], None, time.time() - start
     secs = time.time() - start
-    if not res.get("reply"):
+    if not res.get("reply") and res.get("intent") not in {"QUERY_EVENT", "QUERY_WEATHER", "EVENT_WEATHER"}:
         return "no_reply", ["reply 為空（必填）"], res, secs
     if res.get("gemini_status") in ("timeout", "error"):
         return "no_reply", [f"AI 失敗（gemini_status={res.get('gemini_status')}）"], res, secs

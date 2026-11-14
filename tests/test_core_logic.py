@@ -19,7 +19,7 @@ from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_r
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
-from weather_service import CWA_SSL_ERROR_MARKERS, compare_weather_snapshots, parse_weather_periods, resolve_event_location_parts
+from weather_service import CWA_SSL_ERROR_MARKERS, analyze_weather_risk, build_weather_suggestion, compare_weather_snapshots, parse_weather_periods, resolve_event_location_parts
 
 
 def make_test_jwt(user_id: str, secret: str = "test-secret", lifetime_seconds: int = 3600) -> str:
@@ -458,6 +458,33 @@ class CoreLogicTests(unittest.TestCase):
         )
         self.assertEqual(empty["message"], "")
         self.assertEqual(dedupe_chat_history([empty]), [])
+
+    def test_chat_history_expands_xiaolan_user_text(self):
+        row = {
+            "id": 99,
+            "user_id": "user-id",
+            "role": "assistant",
+            "content": "小藍的回答",
+            "action_type": None,
+            "response_payload": {"action_type": "XIAOLAN_CHAT", "user_text": "使用者原句"},
+            "channel": "line",
+        }
+        rows = expand_chat_history_row(row, "user-id")
+        self.assertEqual([item["sender"] for item in rows], ["user", "assistant"])
+        self.assertEqual([item["message"] for item in rows], ["使用者原句", "小藍的回答"])
+        self.assertEqual([item["channel"] for item in rows], ["line", "line"])
+
+    def test_rain_suggestion_threshold_is_thirty_percent(self):
+        low_risk = analyze_weather_risk({"description": "短暫雨", "pop": 20})
+        self.assertEqual(low_risk["risk_level"], "low")
+        low_text = build_weather_suggestion("臺南市", "東區", "散步", {"description": "短暫雨", "pop": 20}, low_risk)
+        self.assertNotIn("降雨機會", low_text)
+        self.assertNotIn("帶雨", low_text)
+
+        medium_risk = analyze_weather_risk({"description": "多雲", "pop": 30})
+        self.assertEqual(medium_risk["risk_level"], "medium")
+        medium_text = build_weather_suggestion("臺南市", "東區", "散步", {"description": "多雲", "pop": 30}, medium_risk)
+        self.assertIn("降雨機會", medium_text)
 
     def test_draft_event_conversion_uses_taipei_time_and_idempotency_fields(self):
         event = main.draft_event_to_event_create(
