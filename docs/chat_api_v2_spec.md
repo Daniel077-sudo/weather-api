@@ -29,8 +29,8 @@ Allowed values are `CREATE_EVENT`, `UPDATE_EVENT`, `DELETE_EVENT`, `QUERY_EVENT`
 - `needs_clarification` equals `len(missing_fields) > 0`.
 - `date` uses `YYYY-MM-DD`; clock fields use `HH:MM`.
 - `city`, when present, must be one of the configured Taiwan cities/counties and uses `臺`.
-- `QUERY_EVENT` returns an empty `reply` and App/LINE answer from `entities`. `QUERY_WEATHER` and `EVENT_WEATHER` also return `entities`; when `weather_cache_own`/`weather_daily_own` has matching data, the backend additionally returns a factual `reply` and `weather_summary`, otherwise `reply` stays empty. Other intents return a non-empty reply unless `ai_failed` is true.
-- Weather summaries preserve `weather_data.obs` and `weather_data.astro`; daily items expose `rh`, `app_min`, and `app_max` when present.
+- `QUERY_EVENT` returns an empty `reply` and App/LINE answer from `entities`. `QUERY_WEATHER` and `EVENT_WEATHER` also return `entities`; the backend answers from `weather_cache_own`/`weather_daily_own`. Missing data produces an explicit `目前讀不到…` reply and never falls through to Gemini. Other intents return a non-empty reply unless `ai_failed` is true.
+- Weather summaries preserve fresh `weather_data.obs`, `weather_data.astro`, and `hourly_3h`; stale observations older than 90 minutes are excluded. `current` normalizes `hum/rh`, pressure, rainfall, wind, gust, high/low, visibility, sunshine, station, dew point, and comfort. Daily items are expanded from `weather_daily_own.daily[]` and expose `rh`, `app_min`, and `app_max` when present.
 - `/api/chat` only prepares a draft. It does not write events before explicit confirmation.
 - Gemini failures return `ai_failed: true`, `gemini_status: timeout|error`, and an empty `reply`; they must not produce an HTTP 500 or a false claim that an action was completed.
 

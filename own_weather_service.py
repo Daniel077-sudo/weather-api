@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
 from config import supabase
@@ -116,11 +117,11 @@ def _date_text(row: Dict[str, Any]) -> str:
     return str(value or "")[:10]
 
 
-def _daily_payload(row: Dict[str, Any]) -> Dict[str, Any]:
-    nested = _dict(row.get("weather_data"))
-    objects = (row, nested)
+def _daily_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    nested = _dict(item.get("weather_data"))
+    objects = (item, nested)
     return {
-        "date": _date_text(row),
+        "date": _date_text(item),
         "description": _value(objects, ("description", "wx", "weather", "weather_text")),
         "temp_min": _value(objects, ("temp_min", "min_temp", "min_t", "t_min")),
         "temp_max": _value(objects, ("temp_max", "max_temp", "max_t", "t_max")),
@@ -129,6 +130,130 @@ def _daily_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         "app_max": _value(objects, ("app_max", "apparent_max", "apparent_temp_max", "apparent_temperature_max")),
         "pop": _value(objects, ("pop", "rain_probability", "probability_of_precipitation")),
     }
+
+
+def _daily_payloads(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        weather_data = _dict(row.get("weather_data"))
+        nested_daily = row.get("daily")
+        if not isinstance(nested_daily, list):
+            nested_daily = weather_data.get("daily")
+        if isinstance(nested_daily, list):
+            items.extend(item for item in nested_daily if isinstance(item, dict))
+        else:
+            items.append(row)
+    return [_daily_payload(item) for item in items]
+
+
+def _parse_observed_time(value: Any) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=taipei_now().tzinfo)
+        return parsed.astimezone(taipei_now().tzinfo)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fresh_observation(weather_data: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+    obs = _dict(weather_data.get("obs"))
+    if not obs:
+        return {}, "missing"
+    observed_at = _parse_observed_time(obs.get("time"))
+    if not observed_at:
+        return {}, "unknown_time"
+    if observed_at and taipei_now() - observed_at > timedelta(minutes=90):
+        return {}, "stale"
+    invalid_sentinels = {-99, -999, -9999, "-99", "-99.0", "-999", "-999.0", "-9999"}
+    cleaned = {
+        key: value
+        for key, value in obs.items()
+        if value not in invalid_sentinels and value not in (None, "")
+    }
+    return cleaned, "fresh"
+
+
+def _clock(value: Any) -> str:
+    text = str(value or "").strip()
+    if "T" in text:
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%H:%M")
+        except ValueError:
+            pass
+    return text[:5] if len(text) >= 5 else text
+
+
+def _humidity_level(value: Any) -> str:
+    try:
+        humidity = float(_percent_text(value))
+    except ValueError:
+        return ""
+    if humidity >= 90:
+        return "非常潮濕"
+    if humidity >= 80:
+        return "潮濕"
+    if humidity <= 40:
+        return "乾燥"
+    if humidity <= 55:
+        return "偏乾"
+    return "舒適"
+
+
+def _detail_type(message: str) -> str:
+    checks = [
+        ("detail", ("詳細天氣", "天氣資料", "氣象資料", "觀測", "測站", "日照")),
+        ("feels_like", ("體感",)),
+        ("dew", ("露點",)),
+        ("humidity", ("濕度", "溼度", "潮濕", "很濕", "乾燥", "悶熱", "好悶")),
+        ("sun", ("日出", "日落", "天亮", "天黑", "太陽下山")),
+        ("moon", ("月出", "月落", "月亮")),
+        ("pressure", ("氣壓",)),
+        ("rainfall", ("雨量", "下了多少雨")),
+        ("visibility", ("能見度", "視線", "起霧", "大霧")),
+        ("wind", ("風速", "風向", "陣風", "風大")),
+    ]
+    for detail_type, keywords in checks:
+        if any(keyword in message for keyword in keywords):
+            return detail_type
+    return "general"
+
+
+def _hourly_values(hourly: List[Dict[str, Any]], keys: Iterable[str]) -> List[float]:
+    values: List[float] = []
+    for item in hourly:
+        value = _value((item,), keys)
+        try:
+            values.append(float(str(value).replace("%", "").strip()))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _range_text(values: List[float], suffix: str = "") -> str:
+    if not values:
+        return ""
+    low, high = min(values), max(values)
+    low_text = f"{low:g}"
+    high_text = f"{high:g}"
+    return f"{low_text}{suffix}" if low == high else f"{low_text}–{high_text}{suffix}"
+
+
+def _no_data_reply(location: str, detail_type: str) -> str:
+    labels = {
+        "humidity": "濕度",
+        "feels_like": "體感溫度",
+        "dew": "露點",
+        "sun": "日出日落",
+        "moon": "月出月落",
+        "pressure": "氣壓",
+        "rainfall": "累積雨量",
+        "visibility": "能見度",
+        "wind": "風速風向",
+        "detail": "詳細天氣",
+        "general": "天氣",
+    }
+    return f"目前讀不到{location}的{labels.get(detail_type, '天氣')}資料。"
 
 
 def build_own_weather_answer(
@@ -140,39 +265,175 @@ def build_own_weather_answer(
     cache_rows: List[Dict[str, Any]],
     daily_rows: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    if not cache_rows and not daily_rows:
-        return None
-
+    location = f"{city}{district}" or "查詢地點"
+    detail_type = _detail_type(message)
     cache_row = cache_rows[0] if cache_rows else {}
     weather_data = _dict(cache_row.get("weather_data"))
     current = _dict(weather_data.get("current"))
-    obs = _dict(weather_data.get("obs"))
+    obs, observation_status = _fresh_observation(weather_data)
     astro = _dict(weather_data.get("astro"))
+    tomorrow_astro = _dict(astro.get("tomorrow"))
+    hourly = weather_data.get("hourly_3h")
+    if not isinstance(hourly, list):
+        hourly = []
+    hourly = [item for item in hourly if isinstance(item, dict)]
     objects = (obs, current, weather_data, cache_row)
-    daily = [_daily_payload(row) for row in daily_rows]
+    daily = _daily_payloads(daily_rows)
     daily = [item for item in daily if not start_date or not item["date"] or start_date <= item["date"] <= (end_date or start_date)]
+    daily.sort(key=lambda item: item.get("date") or "9999-12-31")
 
     temp = _value(objects, ("temp", "temperature", "air_temperature", "observed_temp"))
     humidity = _value(objects, ("rh", "humidity", "relative_humidity", "relativeHumidity", "observed_humidity", "hum"))
+    humidity_source = "observation" if _value((obs,), ("hum", "humidity", "rh", "relative_humidity")) not in (None, "") else "forecast"
     app_temp = _value(objects, ("app_temp", "apparent_temperature", "apparentTemperature", "apparent_temp"))
-    description = _value(objects, ("description", "wx", "weather", "weather_text"))
+    description = _value(objects, ("weather", "description", "wx", "weather_text"))
     pop = _value(objects, ("pop", "rain_probability", "probability_of_precipitation"))
-    sunrise = _value((astro,), ("sunrise", "sunrise_time", "sunriseTime"))
-    sunset = _value((astro,), ("sunset", "sunset_time", "sunsetTime"))
+    dew = _value((current,), ("dew", "dew_point", "dewPoint"))
+    comfort_desc = _value((current,), ("comfort_desc", "comfort", "comfort_description"))
 
     first_daily = daily[0] if daily else {}
     if humidity in (None, ""):
         humidity = first_daily.get("rh")
-    location = f"{city}{district}" or "查詢地點"
-    lower_message = message.lower()
+        if humidity not in (None, ""):
+            humidity_source = "daily"
 
-    if any(word in message for word in ["濕度", "潮濕"]):
-        reply = f"{location}目前相對濕度約 {_percent_text(humidity)}%。" if humidity not in (None, "") else ""
-    elif any(word in lower_message for word in ["日出", "sunrise"]):
-        reply = f"{location}日出時間為 {sunrise}。" if sunrise else ""
-    elif any(word in lower_message for word in ["日落", "sunset"]):
-        reply = f"{location}日落時間為 {sunset}。" if sunset else ""
-    elif first_daily and start_date and first_daily.get("date") == start_date and start_date != taipei_now().date().isoformat():
+    today = taipei_now().date().isoformat()
+    tomorrow = (taipei_now().date() + timedelta(days=1)).isoformat()
+    requested_astro = astro
+    if start_date == tomorrow:
+        requested_astro = tomorrow_astro
+    elif start_date and start_date not in {today, str(astro.get("date") or "")[:10]}:
+        requested_astro = {}
+    sunrise = _value((requested_astro,), ("sunrise", "sunrise_time", "sunriseTime"))
+    sunset = _value((requested_astro,), ("sunset", "sunset_time", "sunsetTime"))
+    dawn = _value((requested_astro,), ("dawn",))
+    dusk = _value((requested_astro,), ("dusk",))
+    moonrise = _value((requested_astro,), ("moonrise", "moonrise_time"))
+    moonset = _value((requested_astro,), ("moonset", "moonset_time"))
+    station = str(obs.get("station") or "").strip()
+    observed_clock = _clock(obs.get("time"))
+    station_note = ""
+    if station or observed_clock:
+        station_note = f"（{'、'.join(part for part in [station + '測站' if station else '', observed_clock + ' 觀測' if observed_clock else ''] if part)}）"
+    observation_label = f"{station}測站" if station else f"{location}測站"
+    time_note = f"（{observed_clock} 觀測）" if observed_clock else ""
+
+    hourly_humidity = _hourly_values(hourly, ("humidity", "hum", "rh"))
+    hourly_app = _hourly_values(hourly, ("app_temp", "apparent_temperature"))
+    hourly_dew = _hourly_values(hourly, ("dew_point", "dew"))
+
+    if detail_type == "humidity":
+        parts = []
+        if humidity not in (None, ""):
+            source_note = station_note if humidity_source == "observation" else "（預報）"
+            parts.append(f"{location}現在相對濕度 {_percent_text(humidity)}%{source_note}")
+            level = _humidity_level(humidity)
+            if level:
+                advice = "衣服不容易乾，室內可以開除濕機" if level in {"非常潮濕", "潮濕"} else ""
+                parts.append(f"{level}{'，' + advice if advice else ''}")
+        if hourly_humidity:
+            parts.append(f"今天接下來預報 {_range_text(hourly_humidity, '%')}")
+        reply = "。".join(parts) + ("。" if parts else "")
+    elif detail_type == "feels_like":
+        parts = []
+        if app_temp not in (None, ""):
+            parts.append(f"{location}現在體感 {app_temp}°C" + (f"（氣溫 {temp}°C）" if temp not in (None, "") else ""))
+        if hourly_app:
+            parts.append(f"今天接下來體感 {_range_text(hourly_app, '°C')}")
+        reply = "。".join(parts) + ("。" if parts else "")
+    elif detail_type == "dew":
+        if dew not in (None, ""):
+            note = "露點越接近氣溫，空氣越潮濕"
+            reply = f"{location}現在露點 {dew}°C（預報）" + (f"，氣溫 {temp}°C" if temp not in (None, "") else "") + f"。{note}。"
+        elif hourly_dew:
+            reply = f"{location}今天接下來露點 {_range_text(hourly_dew, '°C')}（預報）。"
+        else:
+            reply = ""
+    elif detail_type == "sun":
+        if not requested_astro:
+            reply = f"目前只有{city}今天和明天的日出日落資料，查不到更後面的日期。"
+        elif ("日出" in message and "日落" in message) or ("天亮" in message and "天黑" in message):
+            parts = []
+            if sunrise:
+                parts.append(f"日出 {sunrise}" + (f"（天亮 {dawn}）" if dawn else ""))
+            if sunset:
+                parts.append(f"日落 {sunset}" + (f"（天黑 {dusk}）" if dusk else ""))
+            reply = f"{city}{start_date or today}" + "、".join(parts) + "。" if parts else ""
+        elif any(word in message for word in ["日出", "天亮"]):
+            reply = f"{city}{start_date or today}日出 {sunrise}" + (f"（天亮 {dawn}）" if dawn else "") + "。" if sunrise else ""
+        elif any(word in message for word in ["日落", "天黑", "太陽下山"]):
+            reply = f"{city}{start_date or today}日落 {sunset}" + (f"（天黑 {dusk}）" if dusk else "") + "。" if sunset else ""
+        else:
+            reply = ""
+    elif detail_type == "moon":
+        if not requested_astro:
+            reply = f"目前只有{city}今天和明天的月出月落資料，查不到更後面的日期。"
+        else:
+            moon_parts = []
+            if moonrise:
+                moon_parts.append(f"月出 {moonrise}")
+            if moonset:
+                moon_parts.append(f"月落 {moonset}")
+            reply = f"{city}{start_date or today}" + "、".join(moon_parts) + "。" if moon_parts else f"{city}{start_date or today}沒有可用的月出月落時刻。"
+    elif detail_type == "pressure":
+        pressure = obs.get("pressure")
+        reply = f"{observation_label}氣壓 {pressure} hPa{time_note}。" if pressure not in (None, "") else ""
+    elif detail_type == "rainfall":
+        rain_today = obs.get("rain_today")
+        reply = f"{observation_label}今天（0 點起）累積雨量 {rain_today} mm{time_note}。" if rain_today not in (None, "") else ""
+    elif detail_type == "visibility":
+        visibility = obs.get("visibility")
+        vis_station = str(obs.get("vis_station") or station or location)
+        reply = f"{vis_station}測站能見度 {visibility} 公里{time_note}。" if visibility not in (None, "") else ""
+    elif detail_type == "wind":
+        wind_ms = obs.get("wind_ms")
+        gust_ms = obs.get("gust_ms")
+        wind_dir = obs.get("wind_dir")
+        parts = []
+        if wind_ms not in (None, ""):
+            parts.append(f"{wind_dir or '風速'} {wind_ms} m/s")
+        elif wind_dir:
+            parts.append(str(wind_dir))
+        if gust_ms not in (None, ""):
+            parts.append(f"陣風 {gust_ms} m/s")
+        reply = f"{observation_label}" + "、".join(parts) + time_note + "。" if parts else ""
+    elif detail_type == "detail":
+        observed_parts = []
+        for label, key, unit in [
+            ("氣溫", "temp", "°C"), ("濕度", "hum", "%"), ("氣壓", "pressure", " hPa"),
+            ("今天雨量", "rain_today", " mm"), ("風速", "wind_ms", " m/s"), ("陣風", "gust_ms", " m/s"),
+            ("能見度", "visibility", " 公里"), ("日照", "sunshine", " 小時"),
+        ]:
+            value = obs.get(key)
+            if value not in (None, ""):
+                observed_parts.append(f"{label} {value}{unit}")
+        if obs.get("wind_dir"):
+            observed_parts.append(str(obs["wind_dir"]))
+        if obs.get("high") not in (None, "") or obs.get("low") not in (None, ""):
+            high_low = []
+            if obs.get("high") not in (None, ""):
+                high_low.append(f"最高 {obs['high']}°C" + (f"（{_clock(obs.get('high_time'))}）" if obs.get("high_time") else ""))
+            if obs.get("low") not in (None, ""):
+                high_low.append(f"最低 {obs['low']}°C" + (f"（{_clock(obs.get('low_time'))}）" if obs.get("low_time") else ""))
+            observed_parts.append("今日" + "、".join(high_low))
+        forecast_parts = []
+        for label, value, unit in [
+            ("天氣", description, ""), ("溫度", _value((current,), ("temp", "temperature")), "°C"),
+            ("體感", app_temp, "°C"), ("濕度", _value((current,), ("humidity", "hum", "rh")), "%"),
+            ("露點", dew, "°C"), ("降雨機率", pop, "%"), ("舒適度", comfort_desc, ""),
+        ]:
+            if value not in (None, ""):
+                forecast_parts.append(f"{label} {value}{unit}")
+        sections = []
+        if observed_parts:
+            sections.append(f"測站觀測{station_note}：" + "、".join(observed_parts))
+        if forecast_parts:
+            sections.append("未來 3 小時預報：" + "、".join(forecast_parts))
+        astro_parts = [part for part in [f"日出 {astro.get('sunrise')}" if astro.get("sunrise") else "", f"日落 {astro.get('sunset')}" if astro.get("sunset") else "", f"月出 {astro.get('moonrise')}" if astro.get("moonrise") else "", f"月落 {astro.get('moonset')}" if astro.get("moonset") else ""] if part]
+        if astro_parts:
+            sections.append("、".join(astro_parts))
+        reply = "；".join(sections) + ("。" if sections else "")
+    elif first_daily and start_date and first_daily.get("date") == start_date and start_date != today:
         parts = [f"{location}{start_date}預報"]
         if first_daily.get("description"):
             parts.append(str(first_daily["description"]))
@@ -196,6 +457,41 @@ def build_own_weather_answer(
         if pop not in (None, ""):
             parts.append(f"降雨機率 {_percent_text(pop)}%")
         reply = "，".join(parts) + "。" if len(parts) > 1 else ""
+        if astro.get("sunrise") and astro.get("sunset"):
+            reply += f"日出 {astro['sunrise']}、日落 {astro['sunset']}。"
+        if astro.get("sunset") and tomorrow_astro.get("sunrise") and _clock(taipei_now().isoformat()) > _clock(astro.get("sunset")):
+            reply += f"明天日出 {tomorrow_astro['sunrise']}。"
+
+    if not reply:
+        reply = _no_data_reply(location if detail_type not in {"sun", "moon"} else city, detail_type)
+
+    normalized_current = {
+        "description": description,
+        "temp": temp,
+        "app_temp": app_temp,
+        "hum": humidity,
+        "rh": humidity,
+        "humidity_source": humidity_source if humidity not in (None, "") else None,
+        "pop": pop,
+        "dew": dew,
+        "comfort_desc": comfort_desc,
+        "pressure": obs.get("pressure"),
+        "rain_today": obs.get("rain_today"),
+        "wind_ms": obs.get("wind_ms"),
+        "wind_dir": obs.get("wind_dir"),
+        "gust_ms": obs.get("gust_ms"),
+        "high": obs.get("high"),
+        "high_time": obs.get("high_time"),
+        "low": obs.get("low"),
+        "low_time": obs.get("low_time"),
+        "visibility": obs.get("visibility"),
+        "vis_station": obs.get("vis_station"),
+        "sunshine": obs.get("sunshine"),
+        "station": obs.get("station"),
+        "observed_at": obs.get("time"),
+        "station_distance_km": obs.get("dist_km"),
+    }
+    normalized_current = {key: value for key, value in normalized_current.items() if value not in (None, "")}
 
     return {
         "reply": reply,
@@ -205,15 +501,11 @@ def build_own_weather_answer(
             "district": district or None,
             "start_date": start_date or None,
             "end_date": end_date or None,
-            "current": {
-                "description": description,
-                "temp": temp,
-                "app_temp": app_temp,
-                "rh": humidity,
-                "pop": pop,
-            },
+            "observation_status": observation_status,
+            "current": normalized_current,
             "obs": obs,
             "astro": astro,
+            "hourly_3h": hourly,
             "daily": daily,
         },
     }

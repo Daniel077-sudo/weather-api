@@ -230,6 +230,9 @@ async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatReques
             entities = {**entities, "city": city, "district": district or None}
             result["entities"] = entities
     if not city:
+        result["reply"] = "請告訴我要查詢的縣市，或開啟定位後再試。"
+        result["weather_summary"] = {"status": "location_required"}
+        set_timing("weather_own_status", "location_required")
         return result
     try:
         answer = await asyncio.wait_for(
@@ -243,14 +246,22 @@ async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatReques
             ),
             timeout=3.0,
         )
+    except asyncio.TimeoutError:
+        answer = None
+        set_timing("weather_own_status", "timeout")
     except Exception:
         answer = None
+        set_timing("weather_own_status", "error")
     if answer:
         result["reply"] = str(answer.get("reply") or result.get("reply") or "")
         result["weather_summary"] = answer.get("weather_summary") or {}
         set_timing("weather_own_status", "ok")
     else:
-        set_timing("weather_own_status", "not_found")
+        status = str(get_timing().get("weather_own_status") or "not_found")
+        result["reply"] = f"目前暫時讀不到{city}{district}的天氣資料，請稍後再試。"
+        result["weather_summary"] = {"status": status, "city": city, "district": district or None}
+        if status not in {"timeout", "error"}:
+            set_timing("weather_own_status", "not_found")
     return result
 
 

@@ -902,6 +902,46 @@
           "district": "阿里山鄉"
         }
       }
+    },
+    {
+      "id": "v1116-weather-humidity-02",
+      "input": "現在是不是很潮濕",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-feels-01",
+      "input": "現在體感幾度",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-dew-01",
+      "input": "露點多少",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-moon-01",
+      "input": "今天月出幾點",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-pressure-01",
+      "input": "現在氣壓多少",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-rainfall-01",
+      "input": "今天下了多少雨",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-visibility-01",
+      "input": "現在能見度如何",
+      "expect": { "intent": "QUERY_WEATHER" }
+    },
+    {
+      "id": "v1116-weather-detail-01",
+      "input": "給我詳細天氣資料",
+      "expect": { "intent": "QUERY_WEATHER" }
     }
   ]
 }
