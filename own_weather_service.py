@@ -123,8 +123,8 @@ def _daily_payload(item: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "date": _date_text(item),
         "description": _value(objects, ("description", "wx", "weather", "weather_text")),
-        "temp_min": _value(objects, ("temp_min", "min_temp", "min_t", "t_min")),
-        "temp_max": _value(objects, ("temp_max", "max_temp", "max_t", "t_max")),
+        "temp_min": _value(objects, ("min_t", "temp_min", "min_temp", "t_min")),
+        "temp_max": _value(objects, ("max_t", "temp_max", "max_temp", "t_max")),
         "rh": _value(objects, ("rh", "humidity", "relative_humidity", "relativeHumidity")),
         "app_min": _value(objects, ("app_min", "apparent_min", "apparent_temp_min", "apparent_temperature_min")),
         "app_max": _value(objects, ("app_max", "apparent_max", "apparent_temp_max", "apparent_temperature_max")),
@@ -475,6 +475,7 @@ def build_own_weather_answer(
         "pop": pop,
         "dew": dew,
         "comfort_desc": comfort_desc,
+        "forecast_at": current.get("time"),
         "pressure": obs.get("pressure"),
         "rain_today": obs.get("rain_today"),
         "wind_ms": obs.get("wind_ms"),

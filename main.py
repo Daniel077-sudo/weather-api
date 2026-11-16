@@ -16,7 +16,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
+from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_event_query_answer, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
 from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -265,6 +265,30 @@ async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatReques
     return result
 
 
+async def enrich_chat_event_query_result(result: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    if result.get("intent") != "QUERY_EVENT":
+        return result
+    entities = result.get("entities") or {}
+    try:
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(get_event_query_answer, user_id, entities),
+            timeout=3.0,
+        )
+    except asyncio.TimeoutError:
+        answer = {"reply": "行程查詢逾時，請稍後再試。", "events": [], "status": "timeout"}
+    except Exception:
+        answer = {"reply": "目前暫時無法讀取行程，請稍後再試。", "events": [], "status": "error"}
+    result["reply"] = str(answer.get("reply") or "")
+    result["entities"] = {
+        **entities,
+        "matched_events": answer.get("events") or [],
+        "query_status": answer.get("status") or "success",
+        "query_source": answer.get("source") or "events",
+    }
+    set_timing("event_query_status", answer.get("status") or "success")
+    return result
+
+
 async def _process_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -285,6 +309,7 @@ async def _process_chat_command(
                 normalize_assistant_name(payload.assistant_name),
             )
             result = await enrich_chat_weather_result(result, payload)
+            result = await enrich_chat_event_query_result(result, user_id)
             if result.get("intent") == "GENERAL_CHAT" and not result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []

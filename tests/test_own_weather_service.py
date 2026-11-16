@@ -14,7 +14,7 @@ class OwnWeatherServiceTests(unittest.TestCase):
         today = taipei_now().date().isoformat()
         cache_rows = [{
             "weather_data": {
-                "current": {"description": "多雲", "pop": 20},
+                "current": {"description": "多雲", "pop": "20", "hum": "88", "time": "2026-11-16T02:00:00Z"},
                 "obs": {
                     "station": "中西", "time": taipei_now().isoformat(), "temp": 27.4, "hum": 83,
                     "pressure": 1015.8, "rain_today": 0.5, "wind_ms": 1.2, "wind_dir": "東北風",
@@ -34,6 +34,7 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertEqual(result["weather_summary"]["current"]["hum"], 83)
         self.assertEqual(result["weather_summary"]["current"]["humidity_source"], "observation")
         self.assertEqual(result["weather_summary"]["current"]["visibility"], ">30")
+        self.assertEqual(result["weather_summary"]["current"]["forecast_at"], "2026-11-16T02:00:00Z")
         self.assertEqual(result["weather_summary"]["obs"]["temp"], 27.4)
         self.assertEqual(result["weather_summary"]["astro"]["sunset"], "17:18")
 
@@ -66,8 +67,8 @@ class OwnWeatherServiceTests(unittest.TestCase):
         daily_rows = [{
             "forecast_date": tomorrow,
             "description": "晴時多雲",
-            "temp_min": 22,
-            "temp_max": 29,
+            "min_t": 22,
+            "max_t": 29,
             "rh": 76,
             "app_min": 23,
             "app_max": 32,

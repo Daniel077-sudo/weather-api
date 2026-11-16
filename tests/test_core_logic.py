@@ -15,7 +15,7 @@ import auth
 import disaster_service
 import event_service
 import main
-from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, dedupe_chat_history, expand_chat_history_row, normalize_chat_history_row, normalize_chat_response, prepare_chat_response, sanitize_event_title
+from chat_service import CHAT_LOGS_TABLE, LOCAL_PENDING_EVENTS, build_chat_log_rows, build_clarify_response, build_local_fallback, build_memory_summary, create_event_from_chat, dedupe_chat_history, expand_chat_history_row, get_event_query_answer, normalize_chat_history_row, normalize_chat_response, prepare_chat_response, sanitize_event_title
 import gemini_service
 from gemini_service import parse_json_object
 from transport_service import build_tdx_status
@@ -473,6 +473,48 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual([item["sender"] for item in rows], ["user", "assistant"])
         self.assertEqual([item["message"] for item in rows], ["使用者原句", "小藍的回答"])
         self.assertEqual([item["channel"] for item in rows], ["line", "line"])
+
+    def test_chat_history_dedupe_preserves_message_newlines(self):
+        message = "第一段\n第二段\n- 項目一"
+        rows = [
+            {"user_id": "user-id", "sender": "assistant", "message": message, "channel": "line", "action_type": ""},
+            {"user_id": "user-id", "sender": "assistant", "message": message, "channel": "line", "action_type": "XIAOLAN_CHAT"},
+        ]
+        deduped = dedupe_chat_history(rows)
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["message"], message)
+        self.assertEqual(deduped[0]["action_type"], "XIAOLAN_CHAT")
+
+    def test_event_query_answer_returns_real_events(self):
+        class Query:
+            def select(self, *_args): return self
+            def eq(self, *_args): return self
+            def gte(self, *_args): return self
+            def lte(self, *_args): return self
+            def order(self, *_args, **_kwargs): return self
+            def limit(self, *_args): return self
+            def execute(self):
+                return type("Result", (), {"data": [{
+                    "id": 7,
+                    "user_id": "user-id",
+                    "title": "開會",
+                    "start_time": "2026-11-16T15:00:00+08:00",
+                    "end_time": "2026-11-16T16:00:00+08:00",
+                    "location": "公司",
+                }]})()
+
+        class Client:
+            def table(self, _name): return Query()
+
+        with patch("chat_service.supabase", Client()), patch("chat_service.list_memory_events", return_value=[]):
+            answer = get_event_query_answer(
+                "user-id",
+                {"start_date": "2026-11-16", "end_date": "2026-11-16", "activity": None},
+            )
+        self.assertEqual(answer["status"], "success")
+        self.assertEqual(len(answer["events"]), 1)
+        self.assertIn("開會", answer["reply"])
+        self.assertIn("15:00", answer["reply"])
 
     def test_rain_suggestion_threshold_is_thirty_percent(self):
         low_risk = analyze_weather_risk({"description": "短暫雨", "pop": 20})

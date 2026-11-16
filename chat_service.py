@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from config import supabase
 from data import GAME_QUESTIONS, TAIWAN_LOCATIONS
 from disaster_service import get_active_disaster_alerts
-from event_service import create_memory_event, enrich_event_payload_with_risk, normalize_event, persist_event_risk_fields
+from event_service import create_memory_event, enrich_event_payload_with_risk, list_memory_events, normalize_event, persist_event_risk_fields
 from gemini_service import call_gemini_json_cached
 from timing_service import timed
 from utils import parse_datetime, safe_response, taipei_now
@@ -446,11 +446,92 @@ def dedupe_chat_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             existing_payload = existing.get("response_payload") or {}
             existing_action = existing.get("action_type") or existing_payload.get("action_type") or ""
             if sender == "assistant" and not existing_action and action_type:
-                deduped[existing_index] = {**row, "message": message}
+                deduped[existing_index] = row
             continue
         seen[key] = len(deduped)
-        deduped.append({**row, "message": message})
+        # normalize_text is only for comparison. Keep the original message so
+        # LINE/App paragraphs and bullet-list newlines survive history loading.
+        deduped.append(row)
     return deduped
+
+
+def get_event_query_answer(user_id: str, entities: Dict[str, Any]) -> Dict[str, Any]:
+    """Query the user's calendar and return a factual chat answer."""
+    start_date = str(entities.get("start_date") or taipei_now().date().isoformat())[:10]
+    end_date = str(entities.get("end_date") or start_date)[:10]
+    activity = str(entities.get("activity") or "").strip()
+    if not user_id:
+        return {"reply": "請先登入後再查詢行程。", "events": [], "status": "auth_required"}
+
+    from_time = f"{start_date}T00:00:00+08:00"
+    to_time = f"{end_date}T23:59:59+08:00"
+    rows: List[Dict[str, Any]] = []
+    source = "events"
+    try:
+        query = (
+            supabase.table("events")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("start_time", from_time)
+            .lte("start_time", to_time)
+            .order("start_time", desc=False)
+            .limit(20)
+        )
+        rows = [row for row in (query.execute().data or []) if isinstance(row, dict)]
+    except Exception:
+        source = "memory_fallback"
+
+    rows.extend(list_memory_events(user_id, from_time, to_time, 20))
+    normalized: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for row in rows:
+        event = normalize_event(row)
+        event_id = str(event.get("id") or "")
+        if event_id and event_id in seen_ids:
+            continue
+        if event_id:
+            seen_ids.add(event_id)
+        if activity and activity not in str(event.get("title") or ""):
+            continue
+        normalized.append(event)
+    normalized.sort(key=lambda event: str(event.get("start_time") or ""))
+
+    today = taipei_now().date().isoformat()
+    tomorrow = (taipei_now().date() + timedelta(days=1)).isoformat()
+    if start_date == end_date == today:
+        date_label = "今天"
+    elif start_date == end_date == tomorrow:
+        date_label = "明天"
+    elif start_date == end_date:
+        date_label = start_date
+    else:
+        date_label = f"{start_date} 到 {end_date}"
+
+    if not normalized:
+        qualifier = f"與「{activity}」相關的" if activity else ""
+        return {"reply": f"{date_label}沒有{qualifier}行程。", "events": [], "status": "success", "source": source}
+
+    items = []
+    for event in normalized[:8]:
+        start = parse_datetime(event.get("start_time"))
+        end = parse_datetime(event.get("end_time"))
+        is_all_day = bool(
+            start and end and start.hour == 0 and start.minute == 0
+            and end.hour == 23 and end.minute == 59
+        )
+        time_text = "全天" if is_all_day else (start.astimezone(TAIPEI_TZ).strftime("%m/%d %H:%M") if start else "時間未定")
+        location = str(event.get("location") or "").strip()
+        item = f"{time_text}「{event.get('title') or '未命名行程'}」"
+        if location:
+            item += f"（{location}）"
+        items.append(item)
+    suffix = "；另外還有其他行程。" if len(normalized) > len(items) else "。"
+    return {
+        "reply": f"{date_label}有 {len(normalized)} 筆行程：" + "；".join(items) + suffix,
+        "events": normalized,
+        "status": "success",
+        "source": source,
+    }
 
 
 def get_user_memory_response(user_id: str) -> Dict[str, Any]:
