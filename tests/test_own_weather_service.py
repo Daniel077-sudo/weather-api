@@ -2,13 +2,21 @@ import unittest
 from datetime import timedelta
 from types import SimpleNamespace
 
-from own_weather_service import TABLE_COLUMNS, build_own_weather_answer, load_own_weather_rows
+from data import TAIWAN_LOCATIONS
+from own_weather_service import CITY_WEATHER_DEFAULT_DISTRICTS, TABLE_COLUMNS, build_own_weather_answer, load_own_weather_rows, weather_default_district
 from utils import taipei_now
 
 
 class OwnWeatherServiceTests(unittest.TestCase):
     def tearDown(self):
         TABLE_COLUMNS.clear()
+
+    def test_all_city_weather_default_districts_are_valid(self):
+        self.assertEqual(len(CITY_WEATHER_DEFAULT_DISTRICTS), 22)
+        for city, district in CITY_WEATHER_DEFAULT_DISTRICTS.items():
+            with self.subTest(city=city):
+                self.assertIn(city, TAIWAN_LOCATIONS)
+                self.assertIn(district, TAIWAN_LOCATIONS[city])
 
     def test_current_answer_uses_observation_humidity_and_astro(self):
         today = taipei_now().date().isoformat()
@@ -126,6 +134,18 @@ class OwnWeatherServiceTests(unittest.TestCase):
 
         later_result = build_own_weather_answer("臺南市", "", "後天日出幾點", later, later, cache, [])
         self.assertIn("只有臺南市今天和明天", later_result["reply"])
+
+        empty_moonset_cache = [{"weather_data": {"astro": {
+            "date": today,
+            "moonrise": "12:16",
+            "moonset": "23:48",
+            "tomorrow": {"date": tomorrow, "moonrise": "12:49", "moonset": ""},
+        }}}]
+        moonset_result = build_own_weather_answer(
+            "臺南市", "", "明天月落幾點", tomorrow, tomorrow, empty_moonset_cache, [],
+        )
+        self.assertIn("沒有月落", moonset_result["reply"])
+        self.assertNotIn("月出 12:49", moonset_result["reply"])
 
     def test_stale_observation_is_not_used(self):
         stale_time = (taipei_now() - timedelta(minutes=91)).isoformat()
@@ -253,6 +273,10 @@ class OwnWeatherServiceTests(unittest.TestCase):
                     "city_name": "臺南市東區",
                     "updated_at": "2026-11-16T10:00:00+08:00",
                     "weather_data": {"obs": {"rh": 80}},
+                }, {
+                    "city_name": "臺南市安平區",
+                    "updated_at": "2026-11-16T10:00:00+08:00",
+                    "weather_data": {"current": {"hum": "87"}},
                 }],
                 "weather_daily_own": [{
                     "city_name": "臺南市東區",
@@ -260,6 +284,12 @@ class OwnWeatherServiceTests(unittest.TestCase):
                     "rh": 75,
                     "app_min": 24,
                     "app_max": 31,
+                }, {
+                    "city_name": "臺南市安平區",
+                    "forecast_date": "2026-11-17",
+                    "rh": 87,
+                    "app_min": 23,
+                    "app_max": 30,
                 }],
             }
 
@@ -269,6 +299,11 @@ class OwnWeatherServiceTests(unittest.TestCase):
         cache, daily = load_own_weather_rows("臺南市", "東區", Client())
         self.assertEqual(cache[0]["weather_data"]["obs"]["rh"], 80)
         self.assertEqual(daily[0]["app_max"], 31)
+
+        default_cache, default_daily = load_own_weather_rows("臺南市", "", Client())
+        self.assertEqual(weather_default_district("臺南市"), "安平區")
+        self.assertEqual(default_cache[0]["city_name"], "臺南市安平區")
+        self.assertEqual(default_daily[0]["rh"], 87)
 
 
 if __name__ == "__main__":

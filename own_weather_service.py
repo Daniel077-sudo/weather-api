@@ -11,6 +11,18 @@ TABLE_COLUMNS: Dict[str, set[str]] = {}
 CITY_COLUMNS = ("city", "city_name", "county", "county_name")
 DISTRICT_COLUMNS = ("district", "district_name", "town", "town_name")
 DATE_COLUMNS = ("date", "forecast_date", "weather_date", "start_date", "target_date")
+CITY_WEATHER_DEFAULT_DISTRICTS = {
+    "臺北市": "中正區", "新北市": "板橋區", "基隆市": "仁愛區", "宜蘭縣": "宜蘭市",
+    "桃園市": "桃園區", "新竹縣": "竹北市", "新竹市": "東區", "苗栗縣": "苗栗市",
+    "臺中市": "西屯區", "彰化縣": "彰化市", "南投縣": "南投市", "雲林縣": "斗六市",
+    "嘉義縣": "太保市", "嘉義市": "東區", "臺南市": "安平區", "高雄市": "苓雅區",
+    "屏東縣": "屏東市", "花蓮縣": "花蓮市", "臺東縣": "臺東市", "澎湖縣": "馬公市",
+    "金門縣": "金城鎮", "連江縣": "南竿鄉",
+}
+
+
+def weather_default_district(city: str, district: str = "") -> str:
+    return district or CITY_WEATHER_DEFAULT_DISTRICTS.get(city.replace("台", "臺"), "")
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -115,8 +127,9 @@ def load_own_weather_rows(
     district: str = "",
     client: Any = supabase,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    cache_rows = _load_rows("weather_cache_own", city, district, 3, client)
-    daily_rows = _load_rows("weather_daily_own", city, district, 14, client)
+    effective_district = weather_default_district(city, district)
+    cache_rows = _load_rows("weather_cache_own", city, effective_district, 3, client)
+    daily_rows = _load_rows("weather_daily_own", city, effective_district, 14, client)
     return cache_rows, daily_rows
 
 
@@ -409,12 +422,18 @@ def build_own_weather_answer(
         if not requested_astro:
             reply = f"目前只有{city}今天和明天的月出月落資料，查不到更後面的日期。"
         else:
-            moon_parts = []
-            if moonrise:
-                moon_parts.append(f"月出 {moonrise}")
-            if moonset:
-                moon_parts.append(f"月落 {moonset}")
-            reply = f"{city}{start_date or today}" + "、".join(moon_parts) + "。" if moon_parts else f"{city}{start_date or today}沒有可用的月出月落時刻。"
+            date_label = f"{city}{start_date or today}"
+            asks_moonrise = "月出" in message and "月落" not in message
+            asks_moonset = "月落" in message and "月出" not in message
+            if asks_moonrise:
+                reply = f"{date_label}月出 {moonrise}。" if moonrise else f"{date_label}沒有月出。"
+            elif asks_moonset:
+                reply = f"{date_label}月落 {moonset}。" if moonset else f"{date_label}沒有月落。"
+            else:
+                moon_parts = []
+                moon_parts.append(f"月出 {moonrise}" if moonrise else "沒有月出")
+                moon_parts.append(f"月落 {moonset}" if moonset else "沒有月落")
+                reply = date_label + "、".join(moon_parts) + "。"
     elif detail_type == "pressure":
         pressure = obs.get("pressure")
         reply = f"{observation_label}氣壓 {pressure} hPa{time_note}。" if pressure not in (None, "") else ""
@@ -564,4 +583,7 @@ def build_own_weather_answer(
 
 def get_own_weather_answer(city: str, district: str, message: str, start_date: str, end_date: str) -> Optional[Dict[str, Any]]:
     cache_rows, daily_rows = load_own_weather_rows(city, district)
-    return build_own_weather_answer(city, district, message, start_date, end_date, cache_rows, daily_rows)
+    result = build_own_weather_answer(city, district, message, start_date, end_date, cache_rows, daily_rows)
+    if result:
+        result["weather_summary"]["data_district"] = weather_default_district(city, district) or None
+    return result
