@@ -348,11 +348,15 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertIsNone(city_only["entities"]["district"])
 
     def test_weather_question_variants_do_not_fall_into_general_chat(self):
-        for message in ["什麼時候會回溫", "下次變冷是什麼時候", "適合曬衣服嗎", "空氣品質好嗎"]:
+        for message in [
+            "什麼時候會回溫", "下次變冷是什麼時候", "適合曬衣服嗎", "空氣品質好嗎",
+            "現在濕度多少", "明天日出幾點", "今天日落時間",
+        ]:
             with self.subTest(message=message):
                 result = build_chat_v2_response(self.payload_for({"input": message}))
                 self.assertEqual(result["intent"], "QUERY_WEATHER")
-                self.assertEqual(result["entities"]["start_date"], "2026-09-23")
+                expected_start = "2026-09-24" if "明天" in message else "2026-09-23"
+                self.assertEqual(result["entities"]["start_date"], expected_start)
                 if "什麼時候" in message or "下次" in message:
                     self.assertEqual(result["entities"]["end_date"], "2026-09-29")
 

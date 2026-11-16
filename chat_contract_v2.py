@@ -20,7 +20,7 @@ ACTIVITIES = [
 ]
 WEATHER_WORDS = [
     "天氣", "下雨", "降雨", "帶傘", "氣溫", "回溫", "變暖", "變冷", "降溫", "寒流",
-    "外套", "短袖", "紫外線", "防曬", "空氣品質", "口罩", "風大", "曬衣服", "洗車",
+    "外套", "短袖", "濕度", "潮濕", "日出", "日落", "紫外線", "防曬", "空氣品質", "口罩", "風大", "曬衣服", "洗車",
     "雨什麼時候", "雨會下到", "雨要下多久", "什麼時候會下雨", "熱不熱", "冷不冷", "會不會下雨",
 ]
 TIME_PERIODS = ["早上", "上午", "中午", "下午", "晚上", "凌晨"]
@@ -313,6 +313,10 @@ def _location(message: str, preferred_city: Optional[str] = None) -> Dict[str, O
     if city:
         location = (raw_city or city) + (raw_district or "")
     return {"city": city, "district": district, "location": location}
+
+
+def extract_location_entities(message: str, preferred_city: Optional[str] = None) -> Dict[str, Optional[str]]:
+    return _location(_text(message), preferred_city)
 
 
 def _explicit_location_name(message: str) -> Optional[str]:

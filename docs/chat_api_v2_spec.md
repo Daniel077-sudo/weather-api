@@ -29,7 +29,8 @@ Allowed values are `CREATE_EVENT`, `UPDATE_EVENT`, `DELETE_EVENT`, `QUERY_EVENT`
 - `needs_clarification` equals `len(missing_fields) > 0`.
 - `date` uses `YYYY-MM-DD`; clock fields use `HH:MM`.
 - `city`, when present, must be one of the configured Taiwan cities/counties and uses `臺`.
-- `QUERY_EVENT`, `QUERY_WEATHER`, and `EVENT_WEATHER` may return an empty `reply`; App and LINE answer from `entities`. Other intents return a non-empty reply unless `ai_failed` is true.
+- `QUERY_EVENT` returns an empty `reply` and App/LINE answer from `entities`. `QUERY_WEATHER` and `EVENT_WEATHER` also return `entities`; when `weather_cache_own`/`weather_daily_own` has matching data, the backend additionally returns a factual `reply` and `weather_summary`, otherwise `reply` stays empty. Other intents return a non-empty reply unless `ai_failed` is true.
+- Weather summaries preserve `weather_data.obs` and `weather_data.astro`; daily items expose `rh`, `app_min`, and `app_max` when present.
 - `/api/chat` only prepares a draft. It does not write events before explicit confirmation.
 - Gemini failures return `ai_failed: true`, `gemini_status: timeout|error`, and an empty `reply`; they must not produce an HTTP 500 or a false claim that an action was completed.
 

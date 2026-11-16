@@ -24,7 +24,8 @@ from event_service import build_event_risk, create_memory_event, delete_memory_e
 from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, generate_general_chat_reply, normalize_assistant_name, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatDraftActionRequest, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
-from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response, validate_chat_v2_response
+from chat_contract_v2 import build_chat_v2_response, draft_to_legacy_response, extract_location_entities, validate_chat_v2_response
+from own_weather_service import get_own_weather_answer
 from transport_service import build_traffic_risk_async, build_transport_links, determine_transport_type
 from timing_service import get_timing, reset_timing, set_timing, start_timing
 from utils import analyze_text_risk, build_recommended_action, geocode_fallback, maps_url, normalize_disaster_code, normalize_shelter, parse_datetime, require_cron_secret, safe_int, safe_response, taipei_now
@@ -215,6 +216,44 @@ def apply_general_chat_result(result: Dict[str, Any], reply: str, gemini_status:
     return result
 
 
+async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatRequest) -> Dict[str, Any]:
+    if result.get("intent") not in {"QUERY_WEATHER", "EVENT_WEATHER"}:
+        return result
+    entities = result.get("entities") or {}
+    city = str(entities.get("city") or "")
+    district = str(entities.get("district") or "")
+    if not city and payload.current_location:
+        current_location = extract_location_entities(payload.current_location)
+        city = str(current_location.get("city") or "")
+        district = str(current_location.get("district") or "")
+        if city:
+            entities = {**entities, "city": city, "district": district or None}
+            result["entities"] = entities
+    if not city:
+        return result
+    try:
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(
+                get_own_weather_answer,
+                city,
+                district,
+                payload.message,
+                str(entities.get("start_date") or ""),
+                str(entities.get("end_date") or ""),
+            ),
+            timeout=3.0,
+        )
+    except Exception:
+        answer = None
+    if answer:
+        result["reply"] = str(answer.get("reply") or result.get("reply") or "")
+        result["weather_summary"] = answer.get("weather_summary") or {}
+        set_timing("weather_own_status", "ok")
+    else:
+        set_timing("weather_own_status", "not_found")
+    return result
+
+
 async def _process_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -234,6 +273,7 @@ async def _process_chat_command(
                 build_chat_v2_response(payload.model_dump()),
                 normalize_assistant_name(payload.assistant_name),
             )
+            result = await enrich_chat_weather_result(result, payload)
             if result.get("intent") == "GENERAL_CHAT" and not result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []
