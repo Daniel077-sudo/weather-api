@@ -222,12 +222,18 @@ async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatReques
     entities = result.get("entities") or {}
     city = str(entities.get("city") or "")
     district = str(entities.get("district") or "")
-    if not city and payload.current_location:
+    if payload.current_location:
         current_location = extract_location_entities(payload.current_location)
-        city = str(current_location.get("city") or "")
-        district = str(current_location.get("district") or "")
-        if city:
+        current_city = str(current_location.get("city") or "")
+        current_district = str(current_location.get("district") or "")
+        if not city and current_city:
+            city = current_city
+            district = current_district
             entities = {**entities, "city": city, "district": district or None}
+            result["entities"] = entities
+        elif city == current_city and not district and current_district:
+            district = current_district
+            entities = {**entities, "district": district}
             result["entities"] = entities
     if not city:
         result["reply"] = "請告訴我要查詢的縣市，或開啟定位後再試。"

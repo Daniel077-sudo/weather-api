@@ -13,6 +13,11 @@ class OwnWeatherServiceTests(unittest.TestCase):
     def test_current_answer_uses_observation_humidity_and_astro(self):
         today = taipei_now().date().isoformat()
         cache_rows = [{
+            "updated_at": "2026-11-16T14:05:02.437Z",
+            "valid_until": (taipei_now() + timedelta(minutes=30)).isoformat(),
+            "uvi": "0",
+            "aqi": "58",
+            "aqi_status": "普通",
             "weather_data": {
                 "current": {"description": "多雲", "pop": "20", "hum": "88", "time": "2026-11-16T02:00:00Z"},
                 "obs": {
@@ -34,7 +39,10 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertEqual(result["weather_summary"]["current"]["hum"], 83)
         self.assertEqual(result["weather_summary"]["current"]["humidity_source"], "observation")
         self.assertEqual(result["weather_summary"]["current"]["visibility"], ">30")
-        self.assertEqual(result["weather_summary"]["current"]["forecast_at"], "2026-11-16T02:00:00Z")
+        self.assertEqual(result["weather_summary"]["current"]["fetched_at"], "2026-11-16T14:05:02.437Z")
+        self.assertNotIn("forecast_at", result["weather_summary"]["current"])
+        self.assertEqual(result["weather_summary"]["current"]["uvi"], "0")
+        self.assertEqual(result["weather_summary"]["current"]["aqi"], "58")
         self.assertEqual(result["weather_summary"]["obs"]["temp"], 27.4)
         self.assertEqual(result["weather_summary"]["astro"]["sunset"], "17:18")
 
@@ -127,6 +135,24 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertEqual(result["weather_summary"]["observation_status"], "stale")
         self.assertEqual(result["weather_summary"]["obs"], {})
 
+    def test_expired_cache_and_daily_rows_are_not_presented_as_current(self):
+        old = (taipei_now() - timedelta(hours=8)).isoformat()
+        expired = (taipei_now() - timedelta(minutes=1)).isoformat()
+        cache = [{
+            "updated_at": old,
+            "valid_until": expired,
+            "weather_data": {"current": {"temp": 35, "hum": "99"}},
+        }]
+        daily = [{
+            "updated_at": old,
+            "daily": [{"date": taipei_now().date().isoformat(), "min_t": 20, "max_t": 30}],
+        }]
+        result = build_own_weather_answer("臺南市", "中西區", "現在天氣", "", "", cache, daily)
+        self.assertEqual(result["weather_summary"]["cache_status"], "stale")
+        self.assertEqual(result["weather_summary"]["daily_status"], "stale")
+        self.assertNotIn("35", result["reply"])
+        self.assertEqual(result["weather_summary"]["daily"], [])
+
     def test_unknown_time_and_missing_value_sentinels_are_not_used(self):
         unknown_time = [{"weather_data": {"obs": {"station": "舊站", "hum": 99}}}]
         result = build_own_weather_answer("臺南市", "東區", "現在濕度", "", "", unknown_time, [])
@@ -141,19 +167,21 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertNotIn("visibility", result["weather_summary"]["current"])
 
     def test_hourly_detail_answers(self):
+        active_start = (taipei_now() - timedelta(hours=1)).isoformat()
         cache = [{"weather_data": {
             "current": {"temp": 23, "app_temp": 25, "dew": 22, "comfort_desc": "舒適", "pop": 10},
             "hourly_3h": [
-                {"humidity": 70, "app_temp": 24, "dew_point": 20},
+                {"time": active_start, "temp": 24, "humidity": 70, "app_temp": 26, "dew_point": 20},
                 {"humidity": 96, "app_temp": 29, "dew_point": 23},
             ],
         }}]
         humidity = build_own_weather_answer("臺南市", "東區", "現在濕度", "", "", cache, [])
         self.assertIn("70–96%", humidity["reply"])
         feels = build_own_weather_answer("臺南市", "東區", "現在體感", "", "", cache, [])
-        self.assertIn("24–29°C", feels["reply"])
+        self.assertIn("26–29°C", feels["reply"])
         dew = build_own_weather_answer("臺南市", "東區", "露點多少", "", "", cache, [])
-        self.assertIn("露點 22°C", dew["reply"])
+        self.assertIn("露點 20°C", dew["reply"])
+        self.assertEqual(dew["weather_summary"]["current_hourly"]["temp"], 24)
 
     def test_observation_specific_answers_preserve_visibility_text(self):
         cache = [{"weather_data": {"obs": {
@@ -196,6 +224,10 @@ class OwnWeatherServiceTests(unittest.TestCase):
                 self.filters.append((key, value))
                 return self
 
+            def ilike(self, key, value):
+                self.filters.append((key, value.rstrip("%")))
+                return self
+
             def order(self, *_args, **_kwargs):
                 return self
 
@@ -204,20 +236,26 @@ class OwnWeatherServiceTests(unittest.TestCase):
                 return self
 
             def execute(self):
-                rows = [row for row in self.rows if all(row.get(key) == value for key, value in self.filters)]
+                rows = [
+                    row for row in self.rows
+                    if all(
+                        str(row.get(key) or "").startswith(value)
+                        if key == "city_name" and value.endswith(("市", "縣"))
+                        else row.get(key) == value
+                        for key, value in self.filters
+                    )
+                ]
                 return SimpleNamespace(data=rows[:self.row_limit])
 
         class Client:
             tables = {
                 "weather_cache_own": [{
-                    "city_name": "臺南市",
-                    "district_name": "東區",
+                    "city_name": "臺南市東區",
                     "updated_at": "2026-11-16T10:00:00+08:00",
                     "weather_data": {"obs": {"rh": 80}},
                 }],
                 "weather_daily_own": [{
-                    "city": "臺南市",
-                    "district": "東區",
+                    "city_name": "臺南市東區",
                     "forecast_date": "2026-11-17",
                     "rh": 75,
                     "app_min": 24,

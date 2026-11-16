@@ -68,7 +68,15 @@ def _load_rows(table: str, city: str, district: str, limit: int, client: Any) ->
     def execute(city_value: str, include_district: bool) -> List[Dict[str, Any]]:
         query = client.table(table).select("*")
         if city_column:
-            query = query.eq(city_column, city_value)
+            if city_column == "city_name" and not district_column:
+                combined_name = city_value + district if include_district and district else ""
+                query = (
+                    query.eq(city_column, combined_name)
+                    if combined_name
+                    else query.ilike(city_column, f"{city_value}%")
+                )
+            else:
+                query = query.eq(city_column, city_value)
         if include_district and district and district_column:
             query = query.eq(district_column, district)
         if order_column:
@@ -156,6 +164,20 @@ def _parse_observed_time(value: Any) -> Optional[datetime]:
         return None
 
 
+def _row_freshness(row: Dict[str, Any], max_age: timedelta, valid_until_key: str = "") -> str:
+    if not row:
+        return "missing"
+    now = taipei_now()
+    if valid_until_key:
+        valid_until = _parse_observed_time(row.get(valid_until_key))
+        if valid_until:
+            return "fresh" if now <= valid_until else "stale"
+    updated_at = _parse_observed_time(row.get("updated_at"))
+    if not updated_at:
+        return "unknown_time"
+    return "fresh" if now - updated_at <= max_age else "stale"
+
+
 def _fresh_observation(weather_data: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
     obs = _dict(weather_data.get("obs"))
     if not obs:
@@ -230,6 +252,15 @@ def _hourly_values(hourly: List[Dict[str, Any]], keys: Iterable[str]) -> List[fl
     return values
 
 
+def _active_hourly_period(hourly: List[Dict[str, Any]]) -> Dict[str, Any]:
+    now = taipei_now()
+    for item in hourly:
+        starts_at = _parse_observed_time(item.get("time"))
+        if starts_at and starts_at <= now < starts_at + timedelta(hours=3):
+            return item
+    return {}
+
+
 def _range_text(values: List[float], suffix: str = "") -> str:
     if not values:
         return ""
@@ -268,7 +299,11 @@ def build_own_weather_answer(
     location = f"{city}{district}" or "查詢地點"
     detail_type = _detail_type(message)
     cache_row = cache_rows[0] if cache_rows else {}
+    cache_status = _row_freshness(cache_row, timedelta(minutes=130), "valid_until")
+    daily_status = _row_freshness(daily_rows[0] if daily_rows else {}, timedelta(hours=7))
     weather_data = _dict(cache_row.get("weather_data"))
+    if cache_status == "stale":
+        weather_data = {}
     current = _dict(weather_data.get("current"))
     obs, observation_status = _fresh_observation(weather_data)
     astro = _dict(weather_data.get("astro"))
@@ -277,8 +312,12 @@ def build_own_weather_answer(
     if not isinstance(hourly, list):
         hourly = []
     hourly = [item for item in hourly if isinstance(item, dict)]
-    objects = (obs, current, weather_data, cache_row)
+    usable_cache_row = cache_row if cache_status != "stale" else {}
+    current_hourly = _active_hourly_period(hourly)
+    objects = (obs, current_hourly, current, weather_data, usable_cache_row)
     daily = _daily_payloads(daily_rows)
+    if daily_status == "stale":
+        daily = []
     daily = [item for item in daily if not start_date or not item["date"] or start_date <= item["date"] <= (end_date or start_date)]
     daily.sort(key=lambda item: item.get("date") or "9999-12-31")
 
@@ -288,8 +327,9 @@ def build_own_weather_answer(
     app_temp = _value(objects, ("app_temp", "apparent_temperature", "apparentTemperature", "apparent_temp"))
     description = _value(objects, ("weather", "description", "wx", "weather_text"))
     pop = _value(objects, ("pop", "rain_probability", "probability_of_precipitation"))
-    dew = _value((current,), ("dew", "dew_point", "dewPoint"))
-    comfort_desc = _value((current,), ("comfort_desc", "comfort", "comfort_description"))
+    dew = _value((current_hourly, current), ("dew", "dew_point", "dewPoint"))
+    comfort_desc = _value((current_hourly, current), ("comfort_desc", "comfort", "comfort_description"))
+    fetched_at = cache_row.get("updated_at") or current.get("time")
 
     first_daily = daily[0] if daily else {}
     if humidity in (None, ""):
@@ -475,7 +515,10 @@ def build_own_weather_answer(
         "pop": pop,
         "dew": dew,
         "comfort_desc": comfort_desc,
-        "forecast_at": current.get("time"),
+        "fetched_at": fetched_at,
+        "uvi": _value((current, usable_cache_row), ("uvi",)),
+        "aqi": _value((current, usable_cache_row), ("aqi",)),
+        "aqi_status": _value((current, usable_cache_row), ("aqi_status",)),
         "pressure": obs.get("pressure"),
         "rain_today": obs.get("rain_today"),
         "wind_ms": obs.get("wind_ms"),
@@ -503,10 +546,17 @@ def build_own_weather_answer(
             "start_date": start_date or None,
             "end_date": end_date or None,
             "observation_status": observation_status,
+            "cache_status": cache_status,
+            "daily_status": daily_status,
+            "updated_at": cache_row.get("updated_at"),
+            "valid_until": cache_row.get("valid_until"),
+            "data_sources": cache_row.get("data_sources") or weather_data.get("data_sources") or {},
+            "source_errors": cache_row.get("source_errors") or weather_data.get("source_errors") or [],
             "current": normalized_current,
             "obs": obs,
             "astro": astro,
             "hourly_3h": hourly,
+            "current_hourly": current_hourly,
             "daily": daily,
         },
     }
