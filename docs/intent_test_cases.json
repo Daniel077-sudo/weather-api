@@ -1325,6 +1325,87 @@
           "city"
         ]
       }
+    },
+    {
+      "id": "station-01",
+      "input": "明天下午3點臺南火車站開會",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "臺南火車站",
+          "city": "臺南市"
+        }
+      }
+    },
+    {
+      "id": "station-02",
+      "input": "明天09:05到高鐵臺中站搭車",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "高鐵臺中站",
+          "city": "臺中市"
+        }
+      }
+    },
+    {
+      "id": "station-03",
+      "input": "後天晚上七點在捷運西門站集合",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "捷運西門站"
+        }
+      }
+    },
+    {
+      "id": "station-04",
+      "input": "12/15下午三點板橋站搭車",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "板橋站"
+        }
+      }
+    },
+    {
+      "id": "station-05",
+      "input": "明天在臺北車站開會",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "臺北車站",
+          "city": "臺北市"
+        }
+      }
+    },
+    {
+      "id": "station-06",
+      "input": "明天到新左營站搭車",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "新左營站"
+        }
+      }
+    },
+    {
+      "id": "station-07",
+      "input": "明天到臺北101/世貿站集合",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "臺北101/世貿站",
+          "city": "臺北市"
+        }
+      }
     }
   ]
 }

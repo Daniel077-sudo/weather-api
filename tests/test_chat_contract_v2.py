@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
-from chat_contract_v2 import AMBIGUOUS_DRAFT_TIMES, build_chat_v2_response, validate_chat_v2_response
+from chat_contract_v2 import AMBIGUOUS_DRAFT_TIMES, build_chat_v2_response, extract_location_entities, validate_chat_v2_response
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -315,6 +315,21 @@ class ChatContractV2Tests(unittest.TestCase):
         })
         self.assertEqual(result["draft_event"]["date"], "2026-11-24")
         self.assertEqual(result["draft_event"]["start_time"], "19:00")
+
+    def test_complete_station_names_are_preserved(self):
+        cases = {
+            "明天下午3點臺南火車站開會": "臺南火車站",
+            "明天09:05到高鐵臺中站搭車": "高鐵臺中站",
+            "後天晚上七點在捷運西門站集合": "捷運西門站",
+            "12/15下午三點板橋站搭車": "板橋站",
+            "明天在臺北車站開會": "臺北車站",
+            "明天到新左營站搭車": "新左營站",
+            "明天到臺北101/世貿站集合": "臺北101/世貿站",
+        }
+        for message, station in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(extract_location_entities(message)["location"], station)
+        self.assertIsNone(extract_location_entities("明天在網站開會")["location"])
 
     def test_period_without_clock_time_still_requires_clarification(self):
         payload = self.payload_for({"input": "明天晚上去台南辦護照"})

@@ -306,16 +306,49 @@ def _add_minutes(clock: str, minutes: int) -> str:
     return parsed.strftime("%H:%M")
 
 
+def _station_phrase(message: str) -> Optional[str]:
+    cleaned = message
+    spans = [span for span, _ in _date_mentions(message, datetime.now(TAIPEI_TZ))]
+    spans.extend(span for span, _ in _time_mentions(message))
+    for start, end in sorted(spans, reverse=True):
+        cleaned = cleaned[:start] + " " + cleaned[end:]
+    cleaned = re.sub(
+        r"記得提醒我|幫我提醒|提醒我|提醒一下|叫我|記得|幫我|我要|我想|新增|加入|安排|建立|排行程",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"^(?:\s|我|我們|要|會|去|到|在|前往)+", "", cleaned)
+
+    patterns = [
+        r"((?:高鐵|臺鐵|台鐵|捷運|輕軌)[^\s，。！？!?]{1,20}?站)",
+        r"([^\s，。！？!?]{1,20}?(?:火車站|高鐵站|捷運站|轉運站|車站))",
+        r"([^\s，。！？!?]{1,16}?站)(?=$|[\s，。！？!?]|集合|搭車|開會|上車|下車|轉車)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned)
+        if not match:
+            continue
+        candidate = _text(match.group(1)).strip(" \t\r\n，。！？!?：:")
+        if candidate not in {"網站", "本站", "起點站", "終點站"}:
+            return candidate[:120] or None
+    return None
+
+
 def _location_phrase(message: str) -> Optional[str]:
     explicit = re.search(r"(?:地點\s*(?:在|是|為|：|:)|位於|改在|[@＠])\s*([^，。！？!?]+)", message)
     if explicit:
-        return _text(explicit.group(1)).strip(" \t\r\n，。！？!?：:")[:120] or None
+        explicit_value = _text(explicit.group(1)).strip(" \t\r\n，。！？!?：:")
+        return _station_phrase(explicit_value) or explicit_value[:120] or None
 
     for alias in sorted(PLACE_ALIASES, key=len, reverse=True):
         if alias in message:
             return alias
 
-    suffix = r"火車站|高鐵站|捷運站|轉運站|文化中心|車站|機場|大學|學院|高中|國中|國小|醫院|公園|老街|夜市|商場|百貨|廣場|體育館|圖書館"
+    station = _station_phrase(message)
+    if station:
+        return station
+
+    suffix = r"文化中心|機場|大學|學院|高中|國中|國小|醫院|公園|老街|夜市|商場|百貨|廣場|體育館|圖書館"
     match = re.search(rf"(?:^|[\s，,]|去|到|在)([^\s，。！？!?]{{1,24}}(?:{suffix}))", message)
     if match:
         return _text(match.group(1))[:120] or None

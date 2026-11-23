@@ -25,7 +25,7 @@ When signals overlap, classify by the user's requested action in this order: `DE
 - Do not copy `current_location` into `city`.
 - Location is optional only for activities that clearly do not need one, such as washing clothes, submitting an assignment, paying a bill, or taking medicine. Other event drafts without a city include `city` in `missing_fields`.
 - Do not guess the city for private, generic, or chain locations such as `我家`, `學校`, `新光三越`, or `全聯`; retain the supplied place text in `location` and ask for the city. A city without a district may include optional `district` clarification, but must never invent a default district.
-- Preserve complete named landmarks such as `臺南火車站`; do not shorten them to a city or category name.
+- Preserve complete station and landmark names such as `臺南火車站`, `臺北車站`, `高鐵臺中站`, `捷運西門站`, `板橋站`, and `臺北101/世貿站`; do not shorten them to a city or generic `火車站`/`車站` category.
 - Dates and weekdays are resolved only from `client_now`. A plain weekday is the nearest occurrence including today, `下週五` belongs to the following Monday-Sunday week, and a weekend begins on Saturday.
 
 ## Response invariants
