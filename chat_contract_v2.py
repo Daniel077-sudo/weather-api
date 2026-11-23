@@ -730,7 +730,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         times = _time_mentions(message)
         time_needs_clarification = _time_requires_clarification(message)
         period_only = _normalize_period(message.strip(), 1) if message.strip() in TIME_PERIODS else ""
-        remembered_times = AMBIGUOUS_DRAFT_TIMES.get(str(draft_id or ""), [])
+        remembered_times = list(payload.get("_ambiguous_times") or AMBIGUOUS_DRAFT_TIMES.get(str(draft_id or ""), []))
         if existing and period_only and remembered_times:
             resolved_times = [_clock_with_period(value, period_only) for value in remembered_times]
             times = [((0, len(message)), value) for value in resolved_times if value]
@@ -738,6 +738,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             AMBIGUOUS_DRAFT_TIMES.pop(str(draft_id), None)
         elif time_needs_clarification and times:
             _remember_ambiguous_times(draft_id, times)
+            response["_ambiguous_times"] = [value for _, value in times]
         if dates:
             draft_date = dates[0][1]
         elif existing.get("date"):

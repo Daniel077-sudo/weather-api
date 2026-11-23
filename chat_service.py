@@ -312,6 +312,30 @@ def persist_chat_turn(user_id: str, message: str, response: Dict[str, Any], chan
         pass
 
 
+def get_ambiguous_draft_times(user_id: str, draft_id: str) -> List[str]:
+    if not user_id or not draft_id:
+        return []
+    try:
+        result = (
+            supabase.table(CHAT_LOGS_TABLE)
+            .select("response_payload")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+        )
+        for row in result.data or []:
+            payload = row.get("response_payload") or {}
+            if not isinstance(payload, dict) or payload.get("draft_id") != draft_id:
+                continue
+            remembered = payload.get("_ambiguous_times")
+            if isinstance(remembered, list):
+                return [str(value) for value in remembered if value]
+    except Exception:
+        pass
+    return []
+
+
 def get_chat_history(user_id: str, limit: int = 30) -> Dict[str, Any]:
     try:
         rows = []
@@ -416,6 +440,8 @@ def normalize_chat_history_row(row: Dict[str, Any], requested_user_id: str = "")
     sender = "assistant" if is_ai else "user"
     normalized_user_id = row.get("user_id") or requested_user_id or legacy_user_id
 
+    response_payload = dict(row.get("response_payload") or {})
+    response_payload.pop("_ambiguous_times", None)
     return {
         "id": str(row.get("id") or ""),
         "user_id": str(normalized_user_id or ""),
@@ -424,7 +450,7 @@ def normalize_chat_history_row(row: Dict[str, Any], requested_user_id: str = "")
         "is_ai": is_ai,
         "created_at": row.get("created_at"),
         "action_type": row.get("action_type") or "",
-        "response_payload": row.get("response_payload") or {},
+        "response_payload": response_payload,
         "channel": normalize_chat_channel(row.get("channel")),
     }
 

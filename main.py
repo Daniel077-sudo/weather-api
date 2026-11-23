@@ -16,7 +16,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, get_required_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_event_query_answer, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
+from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_ambiguous_draft_times, get_chat_history, get_event_query_answer, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
 from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -216,6 +216,26 @@ def apply_general_chat_result(result: Dict[str, Any], reply: str, gemini_status:
     return result
 
 
+async def restore_ambiguous_draft_times(payload_data: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    """Recover a clock such as `三點` when the next turn only supplies `下午`."""
+    period_only = str(payload_data.get("message") or "").strip()
+    if not user_id or not payload_data.get("draft_id") or period_only not in {
+        "凌晨", "早上", "上午", "中午", "下午", "傍晚", "晚上", "今晚", "明晚", "今早", "明早", "半夜", "深夜", "晚",
+    }:
+        return payload_data
+    try:
+        remembered = await asyncio.to_thread(
+            get_ambiguous_draft_times,
+            user_id,
+            str(payload_data.get("draft_id") or ""),
+        )
+        if remembered:
+            payload_data["_ambiguous_times"] = remembered
+    except Exception:
+        pass
+    return payload_data
+
+
 async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatRequest) -> Dict[str, Any]:
     if result.get("intent") not in {"QUERY_WEATHER", "EVENT_WEATHER"}:
         return result
@@ -310,8 +330,9 @@ async def _process_chat_command(
         if payload.contract_version == 2:
             if not payload.client_now:
                 raise ValueError("client_now is required for contract_version 2")
+            payload_data = await restore_ambiguous_draft_times(payload.model_dump(), user_id)
             result = validate_chat_v2_response(
-                build_chat_v2_response(payload.model_dump()),
+                build_chat_v2_response(payload_data),
                 normalize_assistant_name(payload.assistant_name),
             )
             result = await enrich_chat_weather_result(result, payload)

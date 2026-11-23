@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
-from chat_contract_v2 import build_chat_v2_response, validate_chat_v2_response
+from chat_contract_v2 import AMBIGUOUS_DRAFT_TIMES, build_chat_v2_response, validate_chat_v2_response
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -298,6 +298,15 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(second["draft_event"]["title"], "開會")
         self.assertEqual(second["draft_event"]["start_time"], "15:00")
         self.assertNotIn("start_time", second["missing_fields"])
+
+        AMBIGUOUS_DRAFT_TIMES.clear()
+        restored = build_chat_v2_response({
+            "message": "下午", "contract_version": 2,
+            "client_now": "2026-11-23T10:02:00+08:00",
+            "intent_hint": "CREATE_EVENT", "draft_id": first["draft_id"],
+            "draft_event": first["draft_event"], "_ambiguous_times": ["03:00"],
+        })
+        self.assertEqual(restored["draft_event"]["start_time"], "15:00")
 
     def test_compound_day_period_words_set_both_date_and_clock_period(self):
         result = build_chat_v2_response({

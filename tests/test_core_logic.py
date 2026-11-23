@@ -432,6 +432,14 @@ class CoreLogicTests(unittest.TestCase):
         normalized = normalize_chat_history_row(rows[0], "user-id")
         self.assertEqual(normalized["channel"], "line")
 
+        internal_payload = normalize_chat_history_row({
+            "user_id": "user-id",
+            "role": "assistant",
+            "content": "請問上午還是下午？",
+            "response_payload": {"draft_id": "draft-1", "_ambiguous_times": ["03:00"]},
+        }, "user-id")
+        self.assertNotIn("_ambiguous_times", internal_payload["response_payload"])
+
         duplicated_text = [
             {"user_id": "user-id", "sender": "user", "message": "同一句", "channel": "app"},
             {"user_id": "user-id", "sender": "user", "message": "同一句", "channel": "line"},
