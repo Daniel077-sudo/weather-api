@@ -1555,6 +1555,116 @@
         "intent": "DISASTER_INFO"
       },
       "client_now": "2026-11-23T10:00:00+08:00"
+    },
+    {
+      "id": "operation-help-01",
+      "input": "小藍有什麼功能？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-02",
+      "input": "怎麼查天氣？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-03",
+      "input": "怎麼問防災問題？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-04",
+      "input": "怎麼確認草稿？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-05",
+      "input": "怎麼取消草稿？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-06",
+      "input": "如何修改行程時間？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-07",
+      "input": "如何修改行程地點？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-08",
+      "input": "如何清除行程地點？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-09",
+      "input": "怎麼改助理名稱？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-10",
+      "input": "怎麼設定提醒？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "operation-help-11",
+      "input": "如何新增全天行程？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
     }
   ]
 }

@@ -502,10 +502,42 @@ def _has_date_wording(message: str) -> bool:
 
 
 def _is_usage_help(message: str) -> bool:
+    if any(word in message for word in ["你會做什麼", "可以做什麼", "有哪些功能", "有什麼功能", "怎麼使用小藍", "小藍怎麼用", "怎麼用小藍"]):
+        return True
     has_how = any(word in message for word in ["怎麼", "如何", "怎樣", "怎麼用", "怎麼說"])
-    has_feature = any(word in message for word in ["行程", "提醒", "草稿"])
-    has_operation = any(word in message for word in ["新增", "建立", "加入", "加行程", "安排", "修改", "更改", "刪除", "取消", "查詢", "怎麼查", "查看"])
+    has_feature = any(word in message for word in ["行程", "提醒", "草稿", "天氣", "地點", "時間", "防災", "警報", "小藍", "助理", "名稱"])
+    has_operation = any(word in message for word in [
+        "新增", "建立", "加入", "加行程", "安排", "修改", "更改", "編輯", "刪除", "取消", "查詢", "查", "查看",
+        "確認", "儲存", "使用", "設定", "清除", "略過", "改名", "改", "問",
+    ])
     return has_how and has_feature and has_operation
+
+
+def _usage_help_reply(message: str) -> str:
+    if any(word in message for word in ["你會做什麼", "可以做什麼", "有哪些功能", "有什麼功能", "怎麼使用小藍", "小藍怎麼用", "怎麼用小藍"]):
+        return "小藍可以幫你建立、查詢、修改與刪除行程，查天氣和行程風險，也能回答防災問題。直接用一句話描述需求即可，所有行程變更都會先讓你確認。"
+    if any(word in message for word in ["改名", "名稱"]):
+        return "助理名稱請在 App 的助理設定中修改；之後小藍會使用你設定的名稱自稱。"
+    if "天氣" in message:
+        return "你可以直接問「明天臺南會下雨嗎？」、「週五高雄幾度？」或「明天去爬山適合嗎？」。小藍會依日期、地點與活動查詢天氣。"
+    if any(word in message for word in ["防災", "警報"]):
+        return "你可以直接問「地震時怎麼辦？」、「颱風警報怎麼分？」或「淹水時要往哪裡避難？」。小藍會提供防災指引；即時警報仍以政府官方資訊為準。"
+    if "草稿" in message or "確認" in message:
+        return "小藍整理完行程後會顯示確認卡；按下確認才會寫入行事曆。若不需要，可以按取消或直接說「不用了」。"
+    if any(word in message for word in ["清除", "略過"]) and "地點" in message:
+        return "建立行程時可以略過行政區；要清除既有地點，請在行程編輯頁清除後儲存。小藍不會自行猜測或補上預設地點。"
+    if any(word in message for word in ["修改", "更改", "編輯"]) and any(word in message for word in ["地點", "時間"]):
+        return "你可以直接說「把明天下午三點的開會改到四點」或「把週五聚餐換到臺北車站」。小藍會先顯示修改內容，確認後才更新。"
+    if any(word in message for word in ["刪除", "取消"]):
+        return "你可以直接說「刪除明天下午三點的開會」。小藍會先找出符合的行程，等你確認後才刪除。"
+    if any(word in message for word in ["修改", "更改", "編輯"]):
+        return "你可以直接說「把明天下午三點的開會改到四點」。小藍會整理修改草稿，等你確認後才更新。"
+    if any(word in message for word in ["查詢", "怎麼查", "查看", "查"]):
+        return "你可以直接問「我明天有什麼行程？」或「後天下午有行程嗎？」。"
+    return (
+        "你可以直接說「明天下午三點在臺南火車站開會」。"
+        "小藍會先整理成草稿，缺少資料時再追問，等你確認後才加入行事曆；沒說時間時會建立全天草稿。"
+    )
 
 
 def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_draft: bool = False) -> str:
@@ -946,17 +978,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         return response
 
     if _is_usage_help(message):
-        if any(word in message for word in ["刪除", "取消"]):
-            response["reply"] = "你可以直接說「刪除明天下午三點的開會」。小藍會先找出符合的行程，等你確認後才刪除。"
-        elif any(word in message for word in ["修改", "更改"]):
-            response["reply"] = "你可以直接說「把明天下午三點的開會改到四點」。小藍會整理修改草稿，等你確認後才更新。"
-        elif any(word in message for word in ["查詢", "怎麼查", "查看"]):
-            response["reply"] = "你可以直接問「我明天有什麼行程？」或「後天下午有行程嗎？」。"
-        else:
-            response["reply"] = (
-                "你可以直接說「明天下午三點在臺南火車站開會」。"
-                "小藍會先整理成草稿，缺少資料時再追問，等你確認後才加入行事曆；沒說時間時會建立全天草稿。"
-            )
+        response["reply"] = _usage_help_reply(message)
         response["_skip_gemini"] = True
     else:
         response["reply"] = (
