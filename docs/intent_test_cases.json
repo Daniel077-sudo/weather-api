@@ -1450,6 +1450,66 @@
           "location": "西門捷運站"
         }
       }
+    },
+    {
+      "id": "usage-help-01",
+      "input": "怎麼新增行程",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "usage-help-02",
+      "input": "如何建立行程？",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "usage-help-03",
+      "input": "新增行程要怎麼說",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "usage-help-04",
+      "input": "怎麼修改行程",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "usage-help-05",
+      "input": "怎麼刪除行程",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
+    },
+    {
+      "id": "usage-help-06",
+      "input": "怎麼查行程",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT",
+        "needs_clarification": false,
+        "draft_event": null
+      }
     }
   ]
 }

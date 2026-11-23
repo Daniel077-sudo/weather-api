@@ -335,6 +335,29 @@ class ChatContractV2Tests(unittest.TestCase):
                 self.assertEqual(extract_location_entities(message)["location"], station)
         self.assertIsNone(extract_location_entities("明天在網站開會")["location"])
 
+    def test_event_operation_questions_return_help_without_creating_drafts(self):
+        cases = {
+            "怎麼新增行程": ["整理成草稿", "確認後才加入"],
+            "如何建立行程？": ["臺南火車站", "全天草稿"],
+            "新增行程要怎麼說": ["明天下午三點", "確認後才加入"],
+            "怎麼修改行程": ["修改草稿", "確認後才更新"],
+            "怎麼刪除行程": ["找出符合的行程", "確認後才刪除"],
+            "怎麼查行程": ["明天有什麼行程", "後天下午"],
+        }
+        for message, fragments in cases.items():
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-23T10:00:00+08:00",
+                })
+                self.assertEqual(result["intent"], "GENERAL_CHAT")
+                self.assertIsNone(result["draft_event"])
+                self.assertEqual(result["missing_fields"], [])
+                self.assertTrue(result.get("_skip_gemini"))
+                for fragment in fragments:
+                    self.assertIn(fragment, result["reply"])
+
     def test_period_without_clock_time_still_requires_clarification(self):
         payload = self.payload_for({"input": "明天晚上去台南辦護照"})
         result = build_chat_v2_response(payload)

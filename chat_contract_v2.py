@@ -501,8 +501,17 @@ def _has_date_wording(message: str) -> bool:
     return bool(re.search(r"今天|明天|後天|大後天|週末|周末|星期|禮拜|週|周|\d{1,2}\s*(?:/|月)\s*\d{1,2}|\d{1,2}\s*(?:日|號|号)", message))
 
 
+def _is_usage_help(message: str) -> bool:
+    has_how = any(word in message for word in ["怎麼", "如何", "怎樣", "怎麼用", "怎麼說"])
+    has_feature = any(word in message for word in ["行程", "提醒", "草稿"])
+    has_operation = any(word in message for word in ["新增", "建立", "加入", "加行程", "安排", "修改", "更改", "刪除", "取消", "查詢", "怎麼查", "查看"])
+    return has_how and has_feature and has_operation
+
+
 def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_draft: bool = False) -> str:
     if message in {"不用了", "算了", "取消", "取消好了", "先不用"}:
+        return "GENERAL_CHAT"
+    if _is_usage_help(message):
         return "GENERAL_CHAT"
     if _is_event_query(message):
         return "QUERY_EVENT"
@@ -930,11 +939,25 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             response["reply"] = "請先確認官方警報，避開危險區域並準備飲水、藥品、證件與行動電源。"
         return response
 
-    response["reply"] = (
-        "好的，這次不建立草稿。"
-        if "不用了" in message or message in {"算了", "取消", "先不用"}
-        else "我沒聽懂，可以換個說法嗎？例如：明天下午三點在臺南火車站開會"
-    )
+    if _is_usage_help(message):
+        if any(word in message for word in ["刪除", "取消"]):
+            response["reply"] = "你可以直接說「刪除明天下午三點的開會」。小藍會先找出符合的行程，等你確認後才刪除。"
+        elif any(word in message for word in ["修改", "更改"]):
+            response["reply"] = "你可以直接說「把明天下午三點的開會改到四點」。小藍會整理修改草稿，等你確認後才更新。"
+        elif any(word in message for word in ["查詢", "怎麼查", "查看"]):
+            response["reply"] = "你可以直接問「我明天有什麼行程？」或「後天下午有行程嗎？」。"
+        else:
+            response["reply"] = (
+                "你可以直接說「明天下午三點在臺南火車站開會」。"
+                "小藍會先整理成草稿，缺少資料時再追問，等你確認後才加入行事曆；沒說時間時會建立全天草稿。"
+            )
+        response["_skip_gemini"] = True
+    else:
+        response["reply"] = (
+            "好的，這次不建立草稿。"
+            if "不用了" in message or message in {"算了", "取消", "先不用"}
+            else "我沒聽懂，可以換個說法嗎？例如：明天下午三點在臺南火車站開會"
+        )
     return response
 
 
