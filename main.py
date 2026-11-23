@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
-from auth import AuthContext, get_auth_context, resolve_user_id
+from auth import AuthContext, get_auth_context, get_required_auth_context, resolve_user_id
 from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_event_query_answer, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
 from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
@@ -212,7 +212,7 @@ async def ask_assistant(query: UserQuery):
 def apply_general_chat_result(result: Dict[str, Any], reply: str, gemini_status: str) -> Dict[str, Any]:
     result["gemini_status"] = gemini_status or "error"
     result["ai_failed"] = result["gemini_status"] != "ok"
-    result["reply"] = "" if result["ai_failed"] else str(reply or "")
+    result["reply"] = "AI 暫時忙不過來，請稍後再試。" if result["ai_failed"] else str(reply or "")
     return result
 
 
@@ -446,12 +446,12 @@ async def _process_chat_command(
         reset_timing(timing_token)
 
 
-@app.post("/api/chat", response_model=ChatCommandResponse)
+@app.post("/api/chat", response_model=ChatCommandResponse, response_model_exclude={"event_id", "event_id_to_delete"})
 async def chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
     response: Response,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     payload.channel = "app"
     return await _process_chat_command(payload, background_tasks, response, auth, "app")
@@ -464,7 +464,7 @@ def require_internal_key(value: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail={"status": "error", "code": "invalid_internal_key"})
 
 
-@app.post("/api/chat/internal", response_model=ChatCommandResponse)
+@app.post("/api/chat/internal", response_model=ChatCommandResponse, response_model_exclude={"event_id", "event_id_to_delete"})
 async def internal_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -679,11 +679,20 @@ async def get_auth_contract():
     return safe_response(
         "success",
         {
-            "mode": "optional_bearer_until_AUTH_REQUIRED_true",
+            "mode": "phase_2_bearer_with_core_writes_fail_closed",
             "header": "Authorization: Bearer <supabase_access_token>",
             "user_id_source": "If bearer token is valid, user_id is taken from JWT sub and request body/query user_id is ignored.",
-            "phase_1": "AUTH_REQUIRED=false keeps demo compatibility: endpoints may still accept body/query user_id when no bearer token is provided.",
-            "phase_2": "Set AUTH_REQUIRED=true and SUPABASE_JWT_SECRET on Render to require valid bearer tokens.",
+            "phase_1": "AUTH_REQUIRED=false only keeps compatibility for non-core endpoints. Core chat and event mutation routes still require a bearer token.",
+            "phase_2": "Set AUTH_REQUIRED=true and SUPABASE_URL on Render. ES256 tokens use Supabase JWKS; SUPABASE_JWT_SECRET is only the HS256 fallback.",
+            "always_protected": [
+                "POST /api/chat",
+                "POST /api/chat/memory/reset",
+                "POST /api/events",
+                "PATCH /api/events/{event_id}",
+                "PUT /api/events/{event_id}",
+                "DELETE /api/events/{event_id}",
+                "PATCH /api/events/weather-alerts/{alert_id}/read",
+            ],
             "protected_when_auth_required": [
                 "POST /api/chat",
                 "GET /api/chat/history",
@@ -772,7 +781,7 @@ async def get_chat_memory_endpoint(
 @app.post("/api/chat/memory/reset")
 async def reset_chat_memory_endpoint(
     user_id: Optional[str] = Query(None),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     return reset_user_memory_response(resolve_user_id(auth, user_id))
 
@@ -1682,7 +1691,7 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
 async def create_api_event(
     event: EventCreate,
     background_tasks: BackgroundTasks,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     event.user_id = resolve_user_id(auth, event.user_id) or event.user_id
     return await create_event(event, background_tasks)
@@ -1822,7 +1831,7 @@ async def patch_event(
     event_id: str,
     payload: EventUpdate,
     background_tasks: BackgroundTasks,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     return await update_event_by_id(event_id, payload, auth, background_tasks)
 
@@ -1832,7 +1841,7 @@ async def put_event(
     event_id: str,
     payload: EventUpdate,
     background_tasks: BackgroundTasks,
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     return await update_event_by_id(event_id, payload, auth, background_tasks)
 
@@ -1841,7 +1850,7 @@ async def put_event(
 async def delete_event(
     event_id: str,
     user_id: Optional[str] = Query(None),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     user_id = resolve_user_id(auth, user_id) or user_id
     try:
@@ -2043,7 +2052,7 @@ async def get_assistant_alerts(
 async def mark_event_weather_alert_read(
     alert_id: int,
     user_id: Optional[str] = Query(None),
-    auth: AuthContext = Depends(get_auth_context),
+    auth: AuthContext = Depends(get_required_auth_context),
 ):
     user_id = resolve_user_id(auth, user_id) or user_id
     try:

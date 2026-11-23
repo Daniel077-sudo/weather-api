@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.primitives import hashes
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import auth
@@ -1163,6 +1164,8 @@ class CoreLogicTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["status"], "success")
         self.assertEqual(body["data"]["unauthorized_response"]["http_status"], 401)
+        self.assertIn("POST /api/chat", body["data"]["always_protected"])
+        self.assertIn("POST /api/events", body["data"]["always_protected"])
         self.assertIn("POST /api/chat", body["data"]["protected_when_auth_required"])
         self.assertIn("POST /api/chat/memory/reset", body["data"]["protected_when_auth_required"])
         self.assertIn("PATCH /api/events/{event_id}", body["data"]["protected_when_auth_required"])
@@ -1202,6 +1205,36 @@ class CoreLogicTests(unittest.TestCase):
             body = response.json()
             self.assertEqual(body["detail"]["status"], "error")
             self.assertEqual(body["detail"]["errors"][0]["code"], "missing_token")
+        finally:
+            auth.AUTH_REQUIRED = original_required
+
+    def test_core_write_routes_require_auth_even_when_global_flag_is_off(self):
+        original_required = auth.AUTH_REQUIRED
+        try:
+            auth.AUTH_REQUIRED = False
+            required_auth = auth.get_required_auth_context(None)
+            with self.assertRaises(HTTPException) as raised:
+                required_auth.send(None)
+            required_auth.close()
+            self.assertEqual(raised.exception.status_code, 401)
+            self.assertEqual(raised.exception.detail["errors"][0]["code"], "missing_token")
+
+            protected = {
+                ("/api/chat", "POST"),
+                ("/api/chat/memory/reset", "POST"),
+                ("/api/events", "POST"),
+                ("/api/events/{event_id}", "PATCH"),
+                ("/api/events/{event_id}", "PUT"),
+                ("/api/events/{event_id}", "DELETE"),
+                ("/api/events/weather-alerts/{alert_id}/read", "PATCH"),
+            }
+            for path, method in protected:
+                route = next(
+                    item for item in main.app.routes
+                    if getattr(item, "path", None) == path and method in getattr(item, "methods", set())
+                )
+                dependencies = {dependency.call for dependency in route.dependant.dependencies}
+                self.assertIn(main.get_required_auth_context, dependencies, f"{method} {path}")
         finally:
             auth.AUTH_REQUIRED = original_required
 

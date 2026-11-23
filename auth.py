@@ -180,6 +180,13 @@ async def get_auth_context(authorization: Optional[str] = Header(None)) -> AuthC
     return AuthContext(user_id=str(claims.get("sub") or ""), claims=claims, authenticated=True)
 
 
+async def get_required_auth_context(authorization: Optional[str] = Header(None)) -> AuthContext:
+    context = await get_auth_context(authorization)
+    if not context.authenticated:
+        raise auth_error("missing_token", "Authorization bearer token is required.")
+    return context
+
+
 def resolve_user_id(auth: AuthContext, provided_user_id: Optional[str] = None) -> str:
     if auth.authenticated:
         return auth.user_id

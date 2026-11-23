@@ -49,12 +49,22 @@ def partial_diff(expected, actual, path=""):
 
 
 class ChatContractV2Tests(unittest.TestCase):
+    def setUp(self):
+        main.app.dependency_overrides[main.get_required_auth_context] = lambda: main.AuthContext(
+            user_id="test-user",
+            claims={"sub": "test-user"},
+            authenticated=True,
+        )
+
+    def tearDown(self):
+        main.app.dependency_overrides.pop(main.get_required_auth_context, None)
+
     def payload_for(self, case):
         return {
             "user_id": "test-user",
             "contract_version": 2,
             "message": case["input"],
-            "client_now": SUITE["client_now"],
+            "client_now": case.get("client_now", SUITE["client_now"]),
             "current_location": SUITE["current_location"],
             "intent_hint": case.get("intent_hint"),
             "draft_id": "draft-test",
@@ -81,7 +91,7 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["intent"], "CREATE_EVENT")
-        self.assertIsNone(body["event_id"])
+        self.assertNotIn("event_id", body)
         self.assertIsNone(body["event_created"])
 
     def test_p0_draft_mode_does_not_call_legacy_create_flow(self):
@@ -208,7 +218,7 @@ class ChatContractV2Tests(unittest.TestCase):
         )
         self.assertEqual(body["gemini_status"], "timeout")
         self.assertTrue(body["ai_failed"])
-        self.assertEqual(body["reply"], "")
+        self.assertEqual(body["reply"], "AI 暫時忙不過來，請稍後再試。")
 
     def test_cancel_general_chat_stays_deterministic_without_gemini(self):
         client = TestClient(main.app)
@@ -262,13 +272,40 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertIsNone(result["draft_event"]["start_time"])
         self.assertIsNone(result["draft_event"]["end_time"])
 
-    def test_ambiguous_clock_time_uses_app_line_convention(self):
+    def test_ambiguous_clock_time_requires_period(self):
         payload = self.payload_for({"input": "明天三點去台南辦護照"})
         result = build_chat_v2_response(payload)
 
-        self.assertFalse(result["needs_clarification"])
-        self.assertEqual(result["draft_event"]["start_time"], "15:00")
+        self.assertTrue(result["needs_clarification"])
+        self.assertIn("start_time", result["missing_fields"])
+        self.assertIsNone(result["draft_event"]["start_time"])
         self.assertFalse(result["draft_event"]["all_day"])
+        self.assertEqual(result["reply"], "是上午還是下午？")
+
+    def test_period_only_follow_up_resolves_remembered_ambiguous_clock(self):
+        first = build_chat_v2_response({
+            "message": "明天三點開會", "contract_version": 2,
+            "client_now": "2026-11-23T10:00:00+08:00",
+        })
+        second = build_chat_v2_response({
+            "message": "下午", "contract_version": 2,
+            "client_now": "2026-11-23T10:01:00+08:00",
+            "intent_hint": "CREATE_EVENT", "draft_id": first["draft_id"],
+            "draft_event": first["draft_event"],
+        })
+
+        self.assertEqual(second["intent"], "CREATE_EVENT")
+        self.assertEqual(second["draft_event"]["title"], "開會")
+        self.assertEqual(second["draft_event"]["start_time"], "15:00")
+        self.assertNotIn("start_time", second["missing_fields"])
+
+    def test_compound_day_period_words_set_both_date_and_clock_period(self):
+        result = build_chat_v2_response({
+            "message": "明晚七點開會", "contract_version": 2,
+            "client_now": "2026-11-23T10:00:00+08:00",
+        })
+        self.assertEqual(result["draft_event"]["date"], "2026-11-24")
+        self.assertEqual(result["draft_event"]["start_time"], "19:00")
 
     def test_period_without_clock_time_still_requires_clarification(self):
         payload = self.payload_for({"input": "明天晚上去台南辦護照"})
@@ -289,13 +326,13 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertTrue(result["draft_event"]["is_reminder"])
         self.assertIsNone(result["draft_event"]["location"])
 
-    def test_named_landmark_satisfies_location_without_city(self):
+    def test_chain_landmark_keeps_location_and_requires_city(self):
         payload = self.payload_for({"input": "明天下午三點開會，地點在新光三越"})
         result = build_chat_v2_response(payload)
 
         self.assertEqual(result["intent"], "CREATE_EVENT")
-        self.assertNotIn("city", result["missing_fields"])
-        self.assertFalse(result["needs_clarification"])
+        self.assertIn("city", result["missing_fields"])
+        self.assertTrue(result["needs_clarification"])
         self.assertEqual(result["draft_event"]["location"], "新光三越")
 
     def test_passport_phrase_without_hint_creates_all_day_draft(self):
@@ -304,17 +341,18 @@ class ChatContractV2Tests(unittest.TestCase):
         result = build_chat_v2_response(payload)
 
         self.assertEqual(result["intent"], "CREATE_EVENT")
-        self.assertFalse(result["needs_clarification"])
+        self.assertTrue(result["needs_clarification"])
+        self.assertIn("city", result["missing_fields"])
         self.assertEqual(result["draft_event"]["title"], "辦護照")
         self.assertTrue(result["draft_event"]["all_day"])
         self.assertIsNone(result["draft_event"]["start_time"])
 
-    def test_time_only_follow_up_preserves_title_and_resolves_period(self):
+    def test_time_only_follow_up_preserves_title_and_still_asks_period(self):
         first = self.payload_for({"input": "等一下2點45分提醒我去國防期中考"})
         first_result = build_chat_v2_response(first)
         self.assertEqual(first_result["intent"], "CREATE_EVENT")
         self.assertEqual(first_result["draft_event"]["title"], "國防期中考")
-        self.assertNotIn("start_time", first_result["missing_fields"])
+        self.assertIn("start_time", first_result["missing_fields"])
 
         follow_up = self.payload_for({"input": "2點45分"})
         follow_up.update({
@@ -325,8 +363,9 @@ class ChatContractV2Tests(unittest.TestCase):
         second_result = build_chat_v2_response(follow_up)
         self.assertEqual(second_result["draft_event"]["title"], "國防期中考")
         self.assertNotEqual(second_result["draft_event"]["title"], "分")
-        self.assertNotIn("start_time", second_result["missing_fields"])
-        self.assertEqual(second_result["draft_event"]["start_time"], "14:45")
+        self.assertIn("start_time", second_result["missing_fields"])
+        self.assertIsNone(second_result["draft_event"]["start_time"])
+        self.assertEqual(second_result["reply"], "是上午還是下午？")
 
     def test_weather_queries_extract_alias_and_week_range(self):
         alias = self.payload_for({"input": "阿里山現在氣溫多少"})
@@ -335,7 +374,7 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(alias_result["entities"]["city"], "嘉義縣")
         self.assertEqual(alias_result["entities"]["district"], "阿里山鄉")
         self.assertEqual(alias_result["entities"]["start_date"], "2026-09-23")
-        self.assertEqual(alias_result["reply"], "")
+        self.assertTrue(alias_result["reply"])
 
         week = self.payload_for({"input": "未來一週天氣"})
         week_result = build_chat_v2_response(week)
@@ -360,15 +399,17 @@ class ChatContractV2Tests(unittest.TestCase):
                 if "什麼時候" in message or "下次" in message:
                     self.assertEqual(result["entities"]["end_date"], "2026-09-29")
 
-    def test_event_location_is_optional_and_current_location_is_not_copied(self):
+    def test_current_location_is_not_copied_and_only_chore_locations_are_optional(self):
         for message in ["今天晚上八點要倒垃圾", "明天早上九點去銀行", "明天下午三點開會"]:
             with self.subTest(message=message):
                 result = build_chat_v2_response(self.payload_for({"input": message}))
                 self.assertEqual(result["intent"], "CREATE_EVENT")
-                self.assertNotIn("city", result["missing_fields"])
                 self.assertIsNone(result["draft_event"]["city"])
                 if "倒垃圾" in message:
+                    self.assertNotIn("city", result["missing_fields"])
                     self.assertEqual(result["draft_event"]["title"], "倒垃圾")
+                else:
+                    self.assertIn("city", result["missing_fields"])
 
     def test_unrelated_message_does_not_continue_existing_draft(self):
         payload = self.payload_for({"input": "我今天心情不錯"})
@@ -398,6 +439,68 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(result["draft_event"]["start_time"], "14:00")
         self.assertEqual(result["draft_event"]["end_time"], "16:00")
         self.assertEqual(result["draft_event"]["location"], "信義區")
+
+    def test_20261123_acceptance_examples(self):
+        now = "2026-11-23T10:00:00+08:00"
+        cases = [
+            ("12/15下午三點到三點十五拍🎓學士團體照", "CREATE_EVENT", {"date": "2026-12-15", "start_time": "15:00", "end_time": "15:15"}, ["city"]),
+            ("明天下午三點到五點去成大開會", "CREATE_EVENT", {"title": "開會", "date": "2026-11-24", "start_time": "15:00", "end_time": "17:00", "city": "臺南市", "location": "成大"}, []),
+            ("2點到晚上10點半上班", "CREATE_EVENT", {"title": "上班", "start_time": "14:00", "end_time": "22:30"}, ["city"]),
+            ("上午十一點到下午一點吃飯", "CREATE_EVENT", {"title": "吃飯", "start_time": "11:00", "end_time": "13:00"}, ["city"]),
+            ("晚上十一點到凌晨一點值班", "CREATE_EVENT", {"title": "值班", "start_time": "23:00", "end_time": "01:00"}, ["city"]),
+            ("明天三點開會", "CREATE_EVENT", {"title": "開會", "date": "2026-11-24", "start_time": None}, ["start_time", "city"]),
+            ("下午三點十五看牙醫", "CREATE_EVENT", {"title": "看牙醫", "start_time": "15:15"}, ["city"]),
+            ("明天早上九點零五分交報告", "CREATE_EVENT", {"title": "交報告", "date": "2026-11-24", "start_time": "09:05"}, []),
+            ("提醒我繳電費", "CREATE_EVENT", {"title": "繳電費", "date": "2026-11-23", "all_day": True, "is_reminder": True}, []),
+            ("明天下午開會", "CREATE_EVENT", {"title": "開會", "date": "2026-11-24", "start_time": None}, ["start_time", "city"]),
+            ("明天下午3點 臺南火車站 開會", "CREATE_EVENT", {"title": "開會", "city": "臺南市", "location": "臺南火車站"}, []),
+            ("週五晚上去全聯", "CREATE_EVENT", {"title": "去全聯", "date": "2026-11-27", "location": "全聯"}, ["start_time", "city"]),
+            ("下週五早上八點去我公司", "CREATE_EVENT", {"title": "去公司", "date": "2026-12-04", "start_time": "08:00", "location": "我公司"}, ["city"]),
+        ]
+        for message, intent, expected_draft, expected_missing in cases:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({"message": message, "contract_version": 2, "client_now": now})
+                self.assertEqual(result["intent"], intent)
+                for key, value in expected_draft.items():
+                    self.assertEqual(result["draft_event"].get(key), value, key)
+                self.assertEqual(result["missing_fields"], expected_missing)
+
+        query_event = build_chat_v2_response({"message": "後天有行程嗎", "contract_version": 2, "client_now": now})
+        self.assertEqual(query_event["intent"], "QUERY_EVENT")
+        self.assertEqual(query_event["entities"]["start_date"], "2026-11-25")
+        query_weather = build_chat_v2_response({"message": "明天台南會下雨嗎", "contract_version": 2, "client_now": now})
+        self.assertEqual(query_weather["intent"], "QUERY_WEATHER")
+        self.assertEqual(query_weather["entities"]["city"], "臺南市")
+        event_weather = build_chat_v2_response({"message": "明天去台南開會會下雨嗎", "contract_version": 2, "client_now": now})
+        self.assertEqual(event_weather["intent"], "EVENT_WEATHER")
+        self.assertEqual(event_weather["entities"]["activity"], "開會")
+        self.assertEqual(build_chat_v2_response({"message": "我昨天去看牙醫了", "client_now": now})["intent"], "GENERAL_CHAT")
+
+        titled_delete = build_chat_v2_response({"message": "新增【測試】請刪除 明天下午三點", "client_now": now})
+        self.assertEqual(titled_delete["intent"], "CREATE_EVENT")
+        self.assertEqual(titled_delete["draft_event"]["title"], "【測試】請刪除")
+        update = build_chat_v2_response({"message": "把明天開會改到下午四點", "client_now": now})
+        self.assertEqual(update["intent"], "UPDATE_EVENT")
+        self.assertEqual(update["changes"]["start_time"], "16:00")
+        delete = build_chat_v2_response({"message": "把那個取消", "client_now": now})
+        self.assertEqual(delete["intent"], "DELETE_EVENT")
+        self.assertEqual(delete["missing_fields"], ["target"])
+
+        follow = build_chat_v2_response({
+            "message": "小西門", "client_now": now, "intent_hint": "CREATE_EVENT", "draft_id": "draft-1",
+            "draft_event": {"title": "上班", "date": "2026-11-24", "start_time": "14:00", "all_day": False},
+        })
+        self.assertEqual(follow["draft_event"]["title"], "上班")
+        self.assertEqual(follow["draft_event"]["location"], "小西門")
+        date_follow = build_chat_v2_response({
+            "message": "12/15", "client_now": now, "intent_hint": "CREATE_EVENT", "draft_id": "draft-2",
+            "draft_event": {"title": "上班", "date": None, "start_time": "14:00", "city": "臺南市", "location": "成大"},
+        })
+        self.assertEqual(date_follow["draft_event"]["date"], "2026-12-15")
+        self.assertEqual(date_follow["draft_event"]["title"], "上班")
+        weekend = build_chat_v2_response({"message": "這週末去爬山", "client_now": now})
+        self.assertEqual(weekend["intent"], "CREATE_EVENT")
+        self.assertEqual(weekend["draft_event"]["date"], "2026-11-28")
 
     def test_contract_validator_blocks_invalid_mobile_payload(self):
         invalid = {

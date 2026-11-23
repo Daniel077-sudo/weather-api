@@ -119,7 +119,7 @@ def run_case(suite, case):
         "user_id": USER_ID,
         "contract_version": 2,
         "message": case["input"],
-        "client_now": suite["client_now"],
+        "client_now": case.get("client_now", suite["client_now"]),
         "current_location": suite["current_location"],
         "intent_hint": case.get("intent_hint"),
         "draft_id": None,

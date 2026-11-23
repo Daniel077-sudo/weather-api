@@ -1,5 +1,5 @@
 {
-  "_說明": "expect 只比對有列出的欄位（部分比對）；city 比對前會把「台」統一成「臺」；missing_fields_include 代表回應的 missing_fields 至少要包含這些值。全部以 client_now（星期三）為基準。 recheck-＊是 2026-11-01 實測發現的誤判句，後端修好前預期不會全過；recheck-07 待「跟小明吃飯」決定點定案。 v1110-＊是 2026-11-10 依 iOS 新規則補的（時段範圍、沒講結束不補、地點不猜、補欄位要保留、短句與英文、防指令注入）；decide-＊等組員決定規則後才算數。intent_in＝intent 是其中之一即可；draft_event_absent＝draft_event 裡這些欄位必須是 null。",
+  "_說明": "每個案例可用自己的 client_now；v1123-* 依 2026-11-23 iOS 完整契約新增。沒說上下午不猜，地點依活動需求追問，所有查詢與草稿回覆都不得為空。",
   "client_now": "2026-09-23T19:30:00+08:00",
   "current_location": "高雄市左營區",
   "cases": [
@@ -53,12 +53,15 @@
       "input": "我要去游泳",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event": {
           "title": "游泳",
           "date": "2026-09-23",
           "all_day": true
-        }
+        },
+        "missing_fields_include": [
+          "city"
+        ]
       }
     },
     {
@@ -66,12 +69,15 @@
       "input": "明天想去游泳",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event": {
           "title": "游泳",
           "date": "2026-09-24",
           "all_day": true
-        }
+        },
+        "missing_fields_include": [
+          "city"
+        ]
       }
     },
     {
@@ -80,13 +86,16 @@
       "_備註": "沒講地點：不可自動填 current_location（高雄市），地點選填並保留空值",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event": {
           "title": "開會",
           "date": "2026-09-24",
           "start_time": "09:00",
           "city": null
-        }
+        },
+        "missing_fields_include": [
+          "city"
+        ]
       }
     },
     {
@@ -424,13 +433,16 @@
       "input": "今天下午一點半要上班",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event": {
           "title": "上班",
           "date": "2026-09-23",
           "start_time": "13:30",
           "city": null
-        }
+        },
+        "missing_fields_include": [
+          "city"
+        ]
       }
     },
     {
@@ -467,7 +479,7 @@
         "draft_event": {
           "date": "2026-09-24",
           "start_time": "15:00",
-          "city": null,
+          "city": "臺南市",
           "location": "成大"
         }
       }
@@ -490,13 +502,16 @@
       "input": "明天下午三點開會，地點在新光三越",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event": {
           "title": "開會",
           "start_time": "15:00",
           "city": null,
           "location": "新光三越"
-        }
+        },
+        "missing_fields_include": [
+          "city"
+        ]
       }
     },
     {
@@ -590,11 +605,14 @@
       "input": "明天下午三點去全聯",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event_absent": [
           "city"
         ],
-        "_說明": "連鎖店不知道哪一家：不猜、不用目前位置"
+        "_說明": "連鎖店不知道哪一家：不猜、不用目前位置",
+        "missing_fields_include": [
+          "city"
+        ]
       }
     },
     {
@@ -602,8 +620,11 @@
       "input": "明天下午三點去學校",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event_absent": [
+          "city"
+        ],
+        "missing_fields_include": [
           "city"
         ]
       }
@@ -780,11 +801,14 @@
       "input": "明天3點開會",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": false,
+        "needs_clarification": true,
         "draft_event": {
-          "start_time": "15:00"
+          "start_time": null
         },
-        "_說明": "依 App／LINE 定案：非當天的 1 至 6 點視為下午"
+        "_說明": "依 App／LINE 定案：非當天的 1 至 6 點視為下午",
+        "missing_fields_include": [
+          "start_time"
+        ]
       }
     },
     {
@@ -906,42 +930,401 @@
     {
       "id": "v1116-weather-humidity-02",
       "input": "現在是不是很潮濕",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-feels-01",
       "input": "現在體感幾度",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-dew-01",
       "input": "露點多少",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-moon-01",
       "input": "今天月出幾點",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-pressure-01",
       "input": "現在氣壓多少",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-rainfall-01",
       "input": "今天下了多少雨",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-visibility-01",
       "input": "現在能見度如何",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
     },
     {
       "id": "v1116-weather-detail-01",
       "input": "給我詳細天氣資料",
-      "expect": { "intent": "QUERY_WEATHER" }
+      "expect": {
+        "intent": "QUERY_WEATHER"
+      }
+    },
+    {
+      "id": "v1123-01",
+      "input": "12/15下午三點到三點十五拍🎓學士團體照",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "date": "2026-12-15",
+          "start_time": "15:00",
+          "end_time": "15:15"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-02",
+      "input": "明天下午三點到五點去成大開會",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "needs_clarification": false,
+        "draft_event": {
+          "title": "開會",
+          "date": "2026-11-24",
+          "start_time": "15:00",
+          "end_time": "17:00",
+          "city": "臺南市",
+          "location": "成大"
+        }
+      }
+    },
+    {
+      "id": "v1123-03",
+      "input": "2點到晚上10點半上班",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "上班",
+          "start_time": "14:00",
+          "end_time": "22:30"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-04",
+      "input": "上午十一點到下午一點吃飯",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "吃飯",
+          "start_time": "11:00",
+          "end_time": "13:00"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-05",
+      "input": "晚上十一點到凌晨一點值班",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "值班",
+          "start_time": "23:00",
+          "end_time": "01:00"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-06",
+      "input": "明天三點開會",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "date": "2026-11-24",
+          "start_time": null
+        },
+        "missing_fields_include": [
+          "start_time"
+        ]
+      }
+    },
+    {
+      "id": "v1123-07",
+      "input": "下午三點十五看牙醫",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "看牙醫",
+          "start_time": "15:15"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-08",
+      "input": "明天早上九點零五分交報告",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "needs_clarification": false,
+        "draft_event": {
+          "title": "交報告",
+          "date": "2026-11-24",
+          "start_time": "09:05"
+        }
+      }
+    },
+    {
+      "id": "v1123-09",
+      "input": "提醒我繳電費",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "needs_clarification": false,
+        "draft_event": {
+          "title": "繳電費",
+          "date": "2026-11-23",
+          "all_day": true,
+          "is_reminder": true
+        }
+      }
+    },
+    {
+      "id": "v1123-10",
+      "input": "明天下午開會",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "start_time": null
+        },
+        "missing_fields_include": [
+          "start_time"
+        ]
+      }
+    },
+    {
+      "id": "v1123-11",
+      "input": "明天下午3點 臺南火車站 開會",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "needs_clarification": false,
+        "draft_event": {
+          "title": "開會",
+          "city": "臺南市",
+          "location": "臺南火車站"
+        }
+      }
+    },
+    {
+      "id": "v1123-12",
+      "input": "週五晚上去全聯",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "去全聯",
+          "date": "2026-11-27",
+          "location": "全聯"
+        },
+        "missing_fields_include": [
+          "start_time",
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-13",
+      "input": "下週五早上八點去我公司",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "去公司",
+          "date": "2026-12-04",
+          "start_time": "08:00",
+          "location": "我公司"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-14",
+      "input": "後天有行程嗎",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "QUERY_EVENT",
+        "entities": {
+          "start_date": "2026-11-25",
+          "end_date": "2026-11-25"
+        }
+      }
+    },
+    {
+      "id": "v1123-15",
+      "input": "明天台南會下雨嗎",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "QUERY_WEATHER",
+        "entities": {
+          "city": "臺南市",
+          "start_date": "2026-11-24"
+        }
+      }
+    },
+    {
+      "id": "v1123-16",
+      "input": "明天去台南開會會下雨嗎",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "EVENT_WEATHER",
+        "entities": {
+          "activity": "開會",
+          "city": "臺南市"
+        }
+      }
+    },
+    {
+      "id": "v1123-17",
+      "input": "我昨天去看牙醫了",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "GENERAL_CHAT"
+      }
+    },
+    {
+      "id": "v1123-18",
+      "input": "新增【測試】請刪除 明天下午三點",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "【測試】請刪除"
+        }
+      }
+    },
+    {
+      "id": "v1123-19",
+      "input": "把明天開會改到下午四點",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "UPDATE_EVENT",
+        "event_filter": {
+          "date": "2026-11-24",
+          "title_keyword": "開會"
+        },
+        "changes": {
+          "start_time": "16:00"
+        }
+      }
+    },
+    {
+      "id": "v1123-20",
+      "input": "把那個取消",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "DELETE_EVENT",
+        "missing_fields_include": [
+          "target"
+        ]
+      }
+    },
+    {
+      "id": "v1123-21",
+      "input": "小西門",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "intent_hint": "CREATE_EVENT",
+      "draft_event": {
+        "title": "上班",
+        "date": "2026-11-24",
+        "start_time": "14:00",
+        "all_day": false
+      },
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "上班",
+          "location": "小西門"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
+    },
+    {
+      "id": "v1123-22",
+      "input": "12/15",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "intent_hint": "CREATE_EVENT",
+      "draft_event": {
+        "title": "上班",
+        "date": null,
+        "start_time": "14:00",
+        "city": "臺南市",
+        "location": "成大"
+      },
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "上班",
+          "date": "2026-12-15",
+          "start_time": "14:00",
+          "city": "臺南市",
+          "location": "成大"
+        }
+      }
+    },
+    {
+      "id": "v1123-23",
+      "input": "這週末去爬山",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "爬山",
+          "date": "2026-11-28"
+        },
+        "missing_fields_include": [
+          "city"
+        ]
+      }
     }
   ]
 }
