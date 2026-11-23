@@ -1406,6 +1406,50 @@
           "city": "臺北市"
         }
       }
+    },
+    {
+      "id": "station-08",
+      "input": "明天到高鐵左營站搭車",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "高鐵左營站"
+        }
+      }
+    },
+    {
+      "id": "station-09",
+      "input": "明天到左營高鐵站搭車",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "左營高鐵站"
+        }
+      }
+    },
+    {
+      "id": "station-10",
+      "input": "明天在捷運西門站集合",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "捷運西門站"
+        }
+      }
+    },
+    {
+      "id": "station-11",
+      "input": "明天在西門捷運站集合",
+      "client_now": "2026-11-23T10:00:00+08:00",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "location": "西門捷運站"
+        }
+      }
     }
   ]
 }

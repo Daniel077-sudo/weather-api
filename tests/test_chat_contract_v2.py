@@ -325,6 +325,10 @@ class ChatContractV2Tests(unittest.TestCase):
             "明天在臺北車站開會": "臺北車站",
             "明天到新左營站搭車": "新左營站",
             "明天到臺北101/世貿站集合": "臺北101/世貿站",
+            "明天到高鐵左營站搭車": "高鐵左營站",
+            "明天到左營高鐵站搭車": "左營高鐵站",
+            "明天在捷運西門站集合": "捷運西門站",
+            "明天在西門捷運站集合": "西門捷運站",
         }
         for message, station in cases.items():
             with self.subTest(message=message):
