@@ -525,7 +525,10 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
     ))
     if explicit_create_prefix:
         return "CREATE_EVENT"
-    if any(word in message for word in ["刪掉", "取消行程", "移除行程", "不去了"]) or re.search(r"^(?:請)?刪除|^把.+(?:刪除|刪掉|取消)", message):
+    cancel_with_target = message.startswith("取消") and bool(
+        _date_mentions(message, now) or _activity(message) or any(word in message for word in ["行程", "活動", "提醒"])
+    )
+    if cancel_with_target or any(word in message for word in ["刪掉", "取消行程", "移除行程", "不去了"]) or re.search(r"^(?:請)?刪除|^把.+(?:刪除|刪掉|取消)", message):
         return "DELETE_EVENT"
     if any(word in message for word in ["改成", "改到", "改為", "修改", "更新行程", "延到", "提早", "換到"]):
         return "UPDATE_EVENT"
@@ -597,7 +600,7 @@ def _draft_title(message: str) -> Optional[str]:
     text = re.sub(r"(?:早上|上午|中午|下午|晚上|凌晨|傍晚|半夜|深夜)?\s*(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時|:|：)\s*(?:半|[零〇一二兩三四五六七八九十]{1,3}|\d{1,2})?\s*(?:分)?", " ", text)
     text = re.sub(r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", " ", text, flags=re.IGNORECASE)
     location = _location(message)
-    for value in [location.get("city"), location.get("district"), location.get("location")]:
+    for value in [location.get("location"), location.get("district"), location.get("city")]:
         if value:
             text = text.replace(value, " ").replace(value.replace("臺", "台"), " ")
             if value.endswith(("市", "縣")):
@@ -929,12 +932,15 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         if "地震" in message:
             response["reply"] = "地震時先趴下、掩護、穩住，遠離玻璃與高櫃；搖晃停止後再依官方指示疏散。"
         elif "颱風" in message or "台風" in message:
-            response["reply"] = (
-                "中央氣象署的颱風警報分為海上與陸上兩種：預測颱風七級風暴風範圍可能在 24 小時內侵襲"
-                "臺灣本島、澎湖、金門或馬祖 100 公里內海域時，發布海上颱風警報並列出警戒海域；"
-                "預測可能在 18 小時內侵襲上述地區陸地時，發布陸上颱風警報並列出警戒縣市。"
-                "警報發布後仍要持續查看氣象署更新、地方政府停班停課與疏散通知。"
-            )
+            if any(word in message for word in ["海邊", "看浪", "觀浪", "戲水"]):
+                response["reply"] = "颱風期間不要前往海邊、港口、堤防或河口看浪、戲水。長浪與突發大浪可能把人捲入海中，請留在安全室內並遵守海岸封閉與地方政府警戒。"
+            else:
+                response["reply"] = (
+                    "中央氣象署的颱風警報分為海上與陸上兩種：預測颱風七級風暴風範圍可能在 24 小時內侵襲"
+                    "臺灣本島、澎湖、金門或馬祖 100 公里內海域時，發布海上颱風警報並列出警戒海域；"
+                    "預測可能在 18 小時內侵襲上述地區陸地時，發布陸上颱風警報並列出警戒縣市。"
+                    "警報發布後仍要持續查看氣象署更新、地方政府停班停課與疏散通知。"
+                )
         else:
             response["reply"] = "請先確認官方警報，避開危險區域並準備飲水、藥品、證件與行動電源。"
         return response

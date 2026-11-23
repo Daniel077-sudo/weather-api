@@ -1510,6 +1510,51 @@
         "needs_clarification": false,
         "draft_event": null
       }
+    },
+    {
+      "id": "dialog-regression-01",
+      "input": "取消明天的開會",
+      "expect": {
+        "intent": "DELETE_EVENT"
+      },
+      "client_now": "2026-11-23T10:00:00+08:00"
+    },
+    {
+      "id": "dialog-regression-02",
+      "input": "取消明天的行程",
+      "expect": {
+        "intent": "DELETE_EVENT"
+      },
+      "client_now": "2026-11-23T10:00:00+08:00"
+    },
+    {
+      "id": "dialog-regression-03",
+      "input": "取消明天的提醒",
+      "expect": {
+        "intent": "DELETE_EVENT"
+      },
+      "client_now": "2026-11-23T10:00:00+08:00"
+    },
+    {
+      "id": "dialog-regression-04",
+      "input": "明天下午三點在臺北車站跟朋友見面",
+      "expect": {
+        "intent": "CREATE_EVENT",
+        "draft_event": {
+          "title": "跟朋友見面",
+          "location": "臺北車站",
+          "city": "臺北市"
+        }
+      },
+      "client_now": "2026-11-23T10:00:00+08:00"
+    },
+    {
+      "id": "dialog-regression-05",
+      "input": "颱風天可以去海邊看浪嗎？",
+      "expect": {
+        "intent": "DISASTER_INFO"
+      },
+      "client_now": "2026-11-23T10:00:00+08:00"
     }
   ]
 }

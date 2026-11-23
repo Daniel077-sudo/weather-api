@@ -358,6 +358,31 @@ class ChatContractV2Tests(unittest.TestCase):
                 for fragment in fragments:
                     self.assertIn(fragment, result["reply"])
 
+    def test_cancel_prefix_station_title_and_typhoon_safety_regressions(self):
+        now = "2026-11-23T10:00:00+08:00"
+        for message in ["取消明天的開會", "取消明天的行程", "取消明天的提醒"]:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({"message": message, "contract_version": 2, "client_now": now})
+                self.assertEqual(result["intent"], "DELETE_EVENT")
+
+        meeting = build_chat_v2_response({
+            "message": "明天下午三點在臺北車站跟朋友見面",
+            "contract_version": 2,
+            "client_now": now,
+        })
+        self.assertEqual(meeting["intent"], "CREATE_EVENT")
+        self.assertEqual(meeting["draft_event"]["location"], "臺北車站")
+        self.assertEqual(meeting["draft_event"]["title"], "跟朋友見面")
+
+        typhoon = build_chat_v2_response({
+            "message": "颱風天可以去海邊看浪嗎？",
+            "contract_version": 2,
+            "client_now": now,
+        })
+        self.assertEqual(typhoon["intent"], "DISASTER_INFO")
+        self.assertIn("不要前往海邊", typhoon["reply"])
+        self.assertIn("長浪", typhoon["reply"])
+
     def test_period_without_clock_time_still_requires_clarification(self):
         payload = self.payload_for({"input": "明天晚上去台南辦護照"})
         result = build_chat_v2_response(payload)
