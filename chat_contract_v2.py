@@ -18,6 +18,7 @@ ACTIVITIES = [
     "看牙醫", "看醫生", "看電影", "看展", "倒垃圾", "上班", "上課", "吃飯", "晨跑",
     "看診", "考試", "辦護照", "聚餐", "旅遊", "出遊", "買菜", "通勤", "吃冰", "玩",
     "交報告", "繳電費", "繳費", "洗衣服", "吃藥", "值班", "面試", "報到", "回家",
+    "跨年",
 ]
 WEATHER_WORDS = [
     "天氣", "下雨", "降雨", "帶傘", "氣溫", "回溫", "變暖", "變冷", "降溫", "寒流",
@@ -90,6 +91,12 @@ def _date_mentions(message: str, now: datetime) -> List[Tuple[Tuple[int, int], s
         occupied.append(span)
         found.append((span, day.strftime("%Y-%m-%d")))
 
+    for match in re.finditer(r"明後天", message):
+        span = match.span()
+        occupied.append(span)
+        found.append((span, (now + timedelta(days=1)).strftime("%Y-%m-%d")))
+        found.append((span, (now + timedelta(days=2)).strftime("%Y-%m-%d")))
+
     for match in re.finditer(r"大後天|後天|明天|明早|明晚|今天|今早|今晚|tomorrow", message, re.IGNORECASE):
         token = match.group(0).lower()
         offset = {"今天": 0, "今早": 0, "今晚": 0, "明天": 1, "明早": 1, "明晚": 1, "後天": 2, "大後天": 3, "tomorrow": 1}[token]
@@ -111,10 +118,17 @@ def _date_mentions(message: str, now: datetime) -> List[Tuple[Tuple[int, int], s
     for match in re.finditer(r"(?<!\d)(\d{1,2})\s*(?:/|月)\s*(\d{1,2})\s*(?:日|號|号)?", message):
         month, day = int(match.group(1)), int(match.group(2))
         try:
-            candidate = now.replace(month=month, day=day)
-            if candidate.date() < now.date():
+            has_next_year = message[max(0, match.start() - 2):match.start()] == "明年"
+            candidate = now.replace(year=now.year + (1 if has_next_year else 0), month=month, day=day)
+            if not has_next_year and candidate.date() < now.date():
                 candidate = candidate.replace(year=candidate.year + 1)
             add(match, candidate)
+        except ValueError:
+            continue
+
+    for match in re.finditer(r"這個月\s*(\d{1,2})\s*(?:日|號|号)", message):
+        try:
+            add(match, now.replace(day=int(match.group(1))))
         except ValueError:
             continue
 
@@ -208,6 +222,69 @@ def _remember_ambiguous_times(draft_id: Optional[str], times: List[Tuple[Tuple[i
         AMBIGUOUS_DRAFT_TIMES.pop(next(iter(AMBIGUOUS_DRAFT_TIMES)))
 
 
+def _resolve_clock_for_date(clock: str, now: datetime, target_date: str) -> Optional[str]:
+    hour, minute = (int(part) for part in clock.split(":", 1))
+    if hour == 0 or hour >= 13:
+        resolved_hour = hour
+    else:
+        try:
+            target = datetime.strptime(target_date, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            target = now.date()
+        if target != now.date():
+            resolved_hour = hour + 12 if 1 <= hour <= 6 else hour
+        else:
+            candidates = [hour]
+            if 1 <= hour <= 11:
+                candidates.append(hour + 12)
+            resolved_hour = next(
+                (
+                    candidate for candidate in candidates
+                    if now.replace(hour=candidate, minute=minute, second=0, microsecond=0) > now
+                ),
+                -1,
+            )
+            if resolved_hour < 0:
+                return None
+    return f"{resolved_hour:02d}:{minute:02d}"
+
+
+def _resolve_ambiguous_times(
+    message: str,
+    times: List[Tuple[Tuple[int, int], str]],
+    now: datetime,
+    target_date: str,
+) -> Tuple[List[Tuple[Tuple[int, int], str]], bool, bool]:
+    """Apply the LINE/App clock convention; return values, needs clarification, and past-time flag."""
+    if not times:
+        return times, _time_requires_clarification(message), False
+
+    ambiguous = _time_requires_clarification(message)
+    resolved = list(times)
+    if ambiguous:
+        converted = [_resolve_clock_for_date(value, now, target_date) for _, value in times]
+        if any(value is None for value in converted):
+            return times, True, True
+        if len(converted) > 1:
+            start_hour = int(str(converted[0]).split(":", 1)[0])
+            end_hour = int(str(converted[1]).split(":", 1)[0])
+            if end_hour < start_hour and start_hour >= 12:
+                raw_end_hour = int(times[1][1].split(":", 1)[0])
+                converted[1] = f"{raw_end_hour + 12:02d}:{times[1][1].split(':', 1)[1]}"
+        resolved = [(times[index][0], str(value)) for index, value in enumerate(converted)]
+
+    try:
+        target = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        target = now.date()
+    if target == now.date() and resolved:
+        hour, minute = (int(part) for part in resolved[0][1].split(":", 1))
+        start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if start <= now:
+            return resolved, True, True
+    return resolved, False, False
+
+
 def _time_range_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
     hour = r"十一|十二|十|[一二兩三四五六七八九]|\d{1,2}"
     period = r"凌晨|早上|上午|中午|下午|傍晚|晚上|今晚|明晚|今早|明早|半夜|深夜|晚"
@@ -222,6 +299,15 @@ def _time_range_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
         return []
     first_period = match.group(1) or match.group(4) or ""
     second_period = match.group(4) or match.group(1) or ""
+    end_hour = _parse_hour(match.group(5))
+    if (
+        match.group(1) in {"晚上", "今晚", "明晚", "深夜", "晚"}
+        and not match.group(4)
+        and end_hour is not None
+        and 1 <= end_hour <= 6
+    ):
+        # 「晚上十一點到一點」表示跨午夜，不是隔天下午一點。
+        second_period = "凌晨"
     start = _clock_value(match.group(2), match.group(3), first_period)
     end = _clock_value(match.group(5), match.group(6), second_period)
     if not start or not end:
@@ -498,11 +584,21 @@ def _is_location_optional(title: Optional[str]) -> bool:
 
 
 def _has_date_wording(message: str) -> bool:
-    return bool(re.search(r"今天|明天|後天|大後天|週末|周末|星期|禮拜|週|周|\d{1,2}\s*(?:/|月)\s*\d{1,2}|\d{1,2}\s*(?:日|號|号)", message))
+    return bool(re.search(r"明年|今天|明天|後天|大後天|週末|周末|星期|禮拜|週|周|\d{1,2}\s*(?:/|月)\s*\d{1,2}|\d{1,2}\s*(?:日|號|号)", message))
+
+
+def _is_recurring_request(message: str) -> bool:
+    return bool(re.search(r"每天|每日|每週|每周|每星期|每禮拜|每個月|每月", message))
+
+
+def _has_multiple_event_actions(message: str) -> bool:
+    if not any(separator in message for separator in ["然後", "接著", "再去", "之後"]):
+        return False
+    return len({item for item in ACTIVITIES if item in message}) >= 2
 
 
 def _is_usage_help(message: str) -> bool:
-    if any(word in message for word in ["你會做什麼", "可以做什麼", "有哪些功能", "有什麼功能", "怎麼使用小藍", "小藍怎麼用", "怎麼用小藍"]):
+    if any(word in message for word in ["你會做什麼", "可以做什麼", "有哪些功能", "有什麼功能", "怎麼使用小藍", "小藍怎麼用", "怎麼用小藍", "可以幫我排行程嗎", "行程可以分享"]):
         return True
     has_how = any(word in message for word in ["怎麼", "如何", "怎樣", "怎麼用", "怎麼說"])
     has_feature = any(word in message for word in ["行程", "提醒", "草稿", "天氣", "地點", "時間", "防災", "警報", "小藍", "助理", "名稱"])
@@ -514,6 +610,10 @@ def _is_usage_help(message: str) -> bool:
 
 
 def _usage_help_reply(message: str) -> str:
+    if "行程可以分享" in message:
+        return "可以，請先在 App 建立行程，再從行程詳情使用分享功能邀請家人；只有檢視權限的共享行程仍要由原建立者修改。"
+    if "可以幫我排行程嗎" in message:
+        return "可以。你可以直接說「明天下午三點在高雄開會」，小藍會整理成確認卡，等你確認後才加入行事曆。"
     if any(word in message for word in ["你會做什麼", "可以做什麼", "有哪些功能", "有什麼功能", "怎麼使用小藍", "小藍怎麼用", "怎麼用小藍"]):
         return "小藍可以幫你建立、查詢、修改與刪除行程，查天氣和行程風險，也能回答防災問題。直接用一句話描述需求即可，所有行程變更都會先讓你確認。"
     if any(word in message for word in ["改名", "名稱"]):
@@ -545,10 +645,18 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
         return "GENERAL_CHAT"
     if _is_usage_help(message):
         return "GENERAL_CHAT"
+    if _is_recurring_request(message):
+        return "GENERAL_CHAT"
+    if _has_multiple_event_actions(message):
+        return "GENERAL_CHAT"
     if _is_event_query(message):
         return "QUERY_EVENT"
     if any(word in message for word in ["昨天", "前天", "上週", "上周", "剛剛", "已經", "之前"]):
         return "GENERAL_CHAT"
+    if re.match(r"^(?:不要|不用)提醒", message):
+        return "DELETE_EVENT"
+    if any(word in message for word in ["如果", "假如", "要是"]) and _has_weather_question(message):
+        return "QUERY_WEATHER"
     if any(word in message for word in ["如果", "假如", "要是", "希望", "不要", "不用"]):
         return "GENERAL_CHAT"
     explicit_create_prefix = bool(re.match(
@@ -562,7 +670,10 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
     )
     if cancel_with_target or any(word in message for word in ["刪掉", "取消行程", "移除行程", "不去了"]) or re.search(r"^(?:請)?刪除|^把.+(?:刪除|刪掉|取消)", message):
         return "DELETE_EVENT"
-    if any(word in message for word in ["改成", "改到", "改為", "修改", "更新行程", "延到", "提早", "換到"]):
+    if any(word in message for word in [
+        "改成", "改到", "改為", "改期", "改時間", "改地點", "改在", "修改", "更新行程",
+        "延到", "延後", "延期", "提早", "提前", "挪到", "換到", "移到",
+    ]):
         return "UPDATE_EVENT"
     if any(word in message for word in ["颱風", "台風", "地震", "防災", "淹水", "洪水", "避難", "豪雨"]) and any(
         wording in message for wording in ["怎麼分", "怎麼辦", "如何", "是什麼", "分幾種", "要做什麼", "可以去", "安全嗎", "注意什麼"]
@@ -576,6 +687,8 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
         return "DISASTER_INFO"
     activity = _activity(message)
     explicit_create = bool(re.search(r"提醒我|幫我提醒|記得提醒我|提醒一下|叫我|新增|加入|加行程|加一筆|排行程|安排|記下|幫我排|建立行程", message))
+    if _is_question(message) and not _time_mentions(message) and not re.match(r"^(?:記得提醒我|幫我提醒|提醒我|提醒一下|叫我)", message):
+        return "GENERAL_CHAT"
     if explicit_create:
         return "CREATE_EVENT"
     create_signal = any(word in message for word in ["我要去", "想去", "要去", "幫我排", "安排", "新增", "建立", "提醒我"]) or bool(
@@ -584,10 +697,10 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
     dates = _date_mentions(message, now)
     times = _time_mentions(message)
     location = _location(message)
-    destination_signal = bool(re.search(r"(?:去|到|前往)\s*[^，。！？\s]+", message))
+    destination_signal = bool(re.search(r"(?:去|到|前往|回)\s*[^，。！？\s]+", message))
     social_signal = bool(activity and message.startswith("跟"))
     scheduled_statement = not _is_question(message) and bool(dates or times) and bool(activity or destination_signal or _draft_title(message))
-    if create_signal or social_signal or (dates and destination_signal and not _is_question(message)) or scheduled_statement:
+    if create_signal or social_signal or destination_signal or (activity and not _is_question(message)) or scheduled_statement:
         return "CREATE_EVENT"
     if intent_hint == "CREATE_EVENT" and (
         (has_draft and _is_draft_followup(message, now)) or activity or times or location["city"]
@@ -616,15 +729,19 @@ def _draft_title(message: str) -> Optional[str]:
     activity = _activity(message)
     if activity:
         return activity
+    return_place = re.search(r"(?:^|要|會|想|[，,\s])回\s*([^，。！？!?\s]+)", message)
+    if return_place:
+        return f"回{return_place.group(1)}"
     place = _location_phrase(message)
-    if place and re.search(r"(?:去|到|前往)\s*" + re.escape(place), message):
+    if place and re.search(r"(?:去|到|前往|回)\s*" + re.escape(place), message):
         title_place = place[1:] if place.startswith("我") and len(place) > 1 else place
-        return f"去{title_place}"
+        return f"回{title_place}" if re.search(r"回\s*" + re.escape(place), message) else f"去{title_place}"
     text = message
     text = re.sub(r"記得提醒我|幫我提醒|可以?幫我|請幫我|提醒一下|提醒我|叫我|記得|幫我|我要|我該|我得|我想|想要|想|安排|新增|加入|建立|排行程|排|等一下|待會", " ", text)
-    text = re.sub(r"大後天|後天|明天|明早|明晚|今天|今早|今晚|等一下|(?:下|這|本)?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
+    text = re.sub(r"明年|明後天|大後天|後天|明天|明早|明晚|今天|今早|今晚|等一下|這個月|(?:下|這|本)?(?:星期|禮拜|週|周)[一二三四五六日天]|這週末|本週末", " ", text)
     text = re.sub(r"\btomorrow\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\d{1,2}\s*(?:/|月)\s*\d{1,2}\s*(?:日|號|号)?", " ", text)
+    text = re.sub(r"(?<!\d)\d{1,2}\s*(?:日|號|号)", " ", text)
     text = re.sub(
         r"(?:從\s*)?(?:(?:早上|上午|中午|下午|晚上|凌晨|傍晚|半夜|深夜)\s*)?(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時)?\s*(?:半|[零〇一二兩三四五六七八九十]{1,3}|\d{1,2})?\s*(?:分)?\s*(?:到|至|~|～|－|-|—)\s*(?:(?:早上|上午|中午|下午|晚上|凌晨|傍晚|半夜|深夜)\s*)?(?:十一|十二|十|[一二兩三四五六七八九]|\d{1,2})\s*(?:點|時)\s*(?:半|[零〇一二兩三四五六七八九十]{1,3}|\d{1,2})?\s*(?:分)?",
         " ", text,
@@ -680,8 +797,6 @@ def validate_chat_v2_response(result: Dict[str, Any], assistant_name: str = "小
     if result.get("contract_version") != 2:
         errors.append("invalid_contract_version")
 
-    result.pop("event_id", None)
-    result.pop("event_id_to_delete", None)
     intent = result.get("intent")
     if intent not in VALID_INTENTS:
         errors.append("invalid_intent")
@@ -727,6 +842,24 @@ def validate_chat_v2_response(result: Dict[str, Any], assistant_name: str = "小
                 datetime.strptime(str(date_value), "%Y-%m-%d")
             except ValueError:
                 errors.append("invalid_date")
+        for field in ["end_date"]:
+            value = draft.get(field)
+            if value:
+                try:
+                    datetime.strptime(str(value), "%Y-%m-%d")
+                except ValueError:
+                    errors.append(f"invalid_{field}")
+        if "dates" in draft:
+            values = draft.get("dates")
+            if not isinstance(values, list):
+                errors.append("invalid_dates")
+            else:
+                for value in values:
+                    try:
+                        datetime.strptime(str(value), "%Y-%m-%d")
+                    except ValueError:
+                        errors.append("invalid_dates")
+                        break
         for field in ["start_time", "end_time"]:
             value = draft.get(field)
             if value and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value)):
@@ -803,19 +936,13 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if intent == "CREATE_EVENT":
         existing = existing_draft
+        message_activity = _activity(message)
+        if existing.get("title") and message_activity and message_activity not in str(existing.get("title") or ""):
+            existing = {}
+            draft_id = f"draft-{uuid.uuid4().hex}"
+            response["draft_id"] = draft_id
         dates = _date_mentions(message, now)
         times = _time_mentions(message)
-        time_needs_clarification = _time_requires_clarification(message)
-        period_only = _normalize_period(message.strip(), 1) if message.strip() in TIME_PERIODS else ""
-        remembered_times = list(payload.get("_ambiguous_times") or AMBIGUOUS_DRAFT_TIMES.get(str(draft_id or ""), []))
-        if existing and period_only and remembered_times:
-            resolved_times = [_clock_with_period(value, period_only) for value in remembered_times]
-            times = [((0, len(message)), value) for value in resolved_times if value]
-            time_needs_clarification = False
-            AMBIGUOUS_DRAFT_TIMES.pop(str(draft_id), None)
-        elif time_needs_clarification and times:
-            _remember_ambiguous_times(draft_id, times)
-            response["_ambiguous_times"] = [value for _, value in times]
         if dates:
             draft_date = dates[0][1]
         elif existing.get("date"):
@@ -824,11 +951,36 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             draft_date = None
         else:
             draft_date = now.strftime("%Y-%m-%d")
+        time_needs_clarification = _time_requires_clarification(message)
+        past_time = False
+        period_only = _normalize_period(message.strip(), 1) if message.strip() in TIME_PERIODS else ""
+        remembered_times = list(payload.get("_ambiguous_times") or AMBIGUOUS_DRAFT_TIMES.get(str(draft_id or ""), []))
+        if existing and period_only and remembered_times:
+            resolved_times = [_clock_with_period(value, period_only) for value in remembered_times]
+            times = [((0, len(message)), value) for value in resolved_times if value]
+            times, time_needs_clarification, past_time = _resolve_ambiguous_times(
+                message,
+                times,
+                now,
+                str(draft_date or now.date().isoformat()),
+            )
+            AMBIGUOUS_DRAFT_TIMES.pop(str(draft_id), None)
+        else:
+            times, time_needs_clarification, past_time = _resolve_ambiguous_times(
+                message,
+                times,
+                now,
+                str(draft_date or now.date().isoformat()),
+            )
+            if time_needs_clarification and times:
+                _remember_ambiguous_times(draft_id, times)
+                response["_ambiguous_times"] = [value for _, value in times]
         has_time_wording = bool(times) or time_needs_clarification
         is_reminder = bool(existing.get("is_reminder")) or bool(re.search(r"提醒我|幫我提醒|記得提醒我|提醒一下|叫我", message)) or bool(
             re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
         )
-        preferred_city = existing.get("city")
+        current_location = _location(_text(payload.get("current_location"))) if payload.get("current_location") else {}
+        preferred_city = existing.get("city") or current_location.get("city")
         location = _location(message, preferred_city)
         explicit_location = _explicit_location_name(message)
         title = _draft_title(message)
@@ -874,22 +1026,32 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             "district": location["district"] if location["city"] is not None else existing.get("district"),
             "location": location["location"] if location["location"] is not None else existing.get("location"),
         }
-        location_optional = _is_location_optional(draft.get("title"))
-        draft["location_optional"] = location_optional
-        draft["location_requires_city"] = not location_optional
+        unique_dates = list(dict.fromkeys(value for _, value in dates))
+        if len(unique_dates) > 1:
+            date_spans = sorted(dates, key=lambda item: item[0][0])
+            has_range_separator = "明後天" in message or any(
+                re.search(r"(?:到|至|~|～|－|-)", message[left[0][1]:right[0][0]])
+                for left, right in zip(date_spans, date_spans[1:])
+            )
+            if has_range_separator:
+                draft["end_date"] = unique_dates[-1]
+            else:
+                draft["dates"] = unique_dates
+        draft["location_optional"] = True
+        draft["location_requires_city"] = False
         missing = [key for key in ["title", "date"] if not draft.get(key)]
         if (has_time_wording or existing_start) and not draft.get("start_time"):
             missing.append("start_time")
-        if not location_optional and not draft.get("city"):
-            missing.append("city")
         if missing:
             first_missing = missing[0]
             if first_missing == "title":
                 reply = "要記成什麼行程呢？"
             elif first_missing == "date":
                 reply = "哪一天呢？"
+            elif first_missing == "start_time" and past_time:
+                reply = "這個時間今天已經過了，要改成幾點呢？"
             elif first_missing == "start_time" and times and time_needs_clarification:
-                reply = "是上午還是下午？"
+                reply = "要改成幾點呢？"
             elif first_missing == "start_time":
                 period = next((period for period in TIME_PERIODS if period in message), "")
                 reply = f"{period}幾點呢？" if period else "幾點呢？"
@@ -915,15 +1077,31 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         changes: Dict[str, Any] = {}
         if len(dates) > 1:
             changes["date"] = dates[-1][1]
+        elif dates:
+            change_marker = max((message.rfind(word) for word in ["改到", "改成", "改為", "改期", "延期", "延到", "挪到", "移到"]), default=-1)
+            if change_marker >= 0 and dates[0][0][0] > change_marker:
+                changes["date"] = dates[0][1]
+                event_filter["date"] = None
         if times:
-            changes["start_time"] = times[-1][1]
-        if change_location["city"]:
-            changes.update(change_location)
+            target_date = changes.get("date") or event_filter.get("date") or (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            resolved_times, needs_time, past_time = _resolve_ambiguous_times(message, [times[-1]], now, target_date)
+            if not needs_time and resolved_times:
+                changes["start_time"] = resolved_times[0][1]
+            elif past_time:
+                response["missing_fields"] = ["start_time"]
+                response["reply"] = "這個時間今天已經過了，要改成幾點呢？"
+        title_change = re.search(r"(?:名稱|標題)\s*(?:改成|改為|改到)\s*([^，。！？!?]+)", message)
+        if title_change:
+            changes["title"] = _text(title_change.group(1)).strip(" \"'「」『』") or None
+        if any(word in message for word in ["地點", "改在", "換到", "移到"]):
+            for key, value in change_location.items():
+                if value is not None:
+                    changes[key] = value
         if not any(event_filter.values()):
             response["missing_fields"] = ["target"]
             response["needs_clarification"] = True
             response["reply"] = "你想修改哪一筆行程呢？"
-        else:
+        elif not response.get("missing_fields"):
             response["reply"] = "我已整理好要修改的內容，確認後才會更新。"
         response["event_filter"] = event_filter
         response["changes"] = changes or None
@@ -977,7 +1155,13 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             response["reply"] = "請先確認官方警報，避開危險區域並準備飲水、藥品、證件與行動電源。"
         return response
 
-    if _is_usage_help(message):
+    if _is_recurring_request(message):
+        response["reply"] = "目前還不支援每天或每週的重複行程，請先一次設定一個日期。"
+        response["_skip_gemini"] = True
+    elif _has_multiple_event_actions(message):
+        response["reply"] = "我一次先整理一筆行程，請把兩件事分開告訴我，避免漏掉時間或地點。"
+        response["_skip_gemini"] = True
+    elif _is_usage_help(message):
         response["reply"] = _usage_help_reply(message)
         response["_skip_gemini"] = True
     else:

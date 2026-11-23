@@ -26,6 +26,12 @@ The response uses the same v2 contract as `POST /api/chat`. The endpoint never
 writes an event. A complete `CREATE_EVENT` response is still only a proposal.
 The caller must show a confirmation action before calling the confirm endpoint.
 
+For `UPDATE_EVENT` and `DELETE_EVENT`, a unique match includes `event_id` (and
+`event_id_to_delete` for delete compatibility). No match or multiple matches
+returns `event_id: null`, `missing_fields: ["target"]`, and a numbered
+`event_filter.candidates` array. The bridge must still show a confirmation card
+before calling an event mutation endpoint.
+
 The endpoint returns within 14.5 seconds. A timeout response has
 `status: "error"` and `timing.timeout: true`.
 
@@ -51,6 +57,10 @@ The endpoint returns within 14.5 seconds. A timeout response has
 
 The same `draft_id` is idempotent for a user. Repeated confirmation returns the
 existing event with `idempotent_replay: true` instead of creating another row.
+For a non-contiguous multi-date draft, `draft_event.dates` is an array of
+`YYYY-MM-DD` values. Confirmation creates one idempotent event per date and
+returns them in `data.events`. A continuous all-day range instead uses
+`date` plus `end_date` and is stored as one cross-day event.
 
 ## Cancel a draft
 

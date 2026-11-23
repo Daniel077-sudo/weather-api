@@ -4,6 +4,7 @@ import ast
 import hmac
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
@@ -16,7 +17,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, get_required_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_ambiguous_draft_times, get_chat_history, get_event_query_answer, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, persist_chat_turn, reset_user_memory_response
+from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_ambiguous_draft_times, get_chat_history, get_event_query_answer, get_recent_chat_event_ids, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, list_chat_mutation_events, persist_chat_turn, reset_user_memory_response
 from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -315,6 +316,154 @@ async def enrich_chat_event_query_result(result: Dict[str, Any], user_id: str) -
     return result
 
 
+def _chat_event_candidate(event: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(event.get("id") or ""),
+        "title": str(event.get("title") or ""),
+        "start_time": event.get("start_time"),
+        "end_time": event.get("end_time"),
+        "city": event.get("city") or "",
+        "district": event.get("district") or "",
+        "location": event.get("location") or "",
+        "external_source": event.get("external_source") or "",
+    }
+
+
+def _event_local_date(event: Dict[str, Any]) -> str:
+    value = parse_datetime(event.get("start_time"))
+    return value.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d") if value else ""
+
+
+def filter_chat_mutation_candidates(
+    events: list[Dict[str, Any]],
+    event_filter: Dict[str, Any],
+    message: str,
+) -> list[Dict[str, Any]]:
+    editable = [event for event in events if event.get("chat_editable")]
+    candidates = list(editable)
+    numbered = re.search(r"第\s*(\d+)\s*(?:個|筆)", message)
+    if numbered:
+        index = int(numbered.group(1)) - 1
+        return [editable[index]] if 0 <= index < len(editable) else []
+
+    target_date = str(event_filter.get("date") or "")
+    if target_date:
+        candidates = [event for event in candidates if _event_local_date(event) == target_date]
+
+    keyword = str(event_filter.get("title_keyword") or "").strip()
+    if keyword and not any(fragment in keyword for fragment in ["行程名稱", "下午的行程", "上午的行程", "那個", "這個"]):
+        matching = [
+            event for event in candidates
+            if keyword in str(event.get("title") or "") or str(event.get("title") or "") in keyword
+        ]
+        if matching:
+            candidates = matching
+
+    target_time = str(event_filter.get("time") or "")
+    if target_time:
+        candidates = [
+            event for event in candidates
+            if (parse_datetime(event.get("start_time")) and parse_datetime(event.get("start_time")).astimezone(timezone(timedelta(hours=8))).strftime("%H:%M") == target_time)
+        ]
+    if "下午" in message:
+        afternoon = [event for event in candidates if (parse_datetime(event.get("start_time")) and parse_datetime(event.get("start_time")).astimezone(timezone(timedelta(hours=8))).hour >= 12)]
+        if afternoon:
+            candidates = afternoon
+    elif any(word in message for word in ["上午", "早上"]):
+        morning = [event for event in candidates if (parse_datetime(event.get("start_time")) and parse_datetime(event.get("start_time")).astimezone(timezone(timedelta(hours=8))).hour < 12)]
+        if morning:
+            candidates = morning
+    return candidates
+
+
+async def enrich_chat_event_mutation_result(
+    result: Dict[str, Any],
+    user_id: str,
+    message: str,
+) -> Dict[str, Any]:
+    """Resolve UPDATE/DELETE targets for a confirmation card; never write events here."""
+    intent = result.get("intent")
+    if intent not in {"UPDATE_EVENT", "DELETE_EVENT"} or not user_id:
+        return result
+
+    events = await asyncio.to_thread(list_chat_mutation_events, user_id, 60)
+    reference_phrase = bool(re.search(r"第\s*\d+\s*(?:個|筆)|(?:這|那)(?:個|筆)", message))
+    if reference_phrase:
+        recent_ids = await asyncio.to_thread(get_recent_chat_event_ids, user_id, 30)
+        if recent_ids:
+            by_id = {str(event.get("id") or ""): event for event in events}
+            recent_events = [by_id[event_id] for event_id in recent_ids if event_id in by_id]
+            remaining = [event for event in events if str(event.get("id") or "") not in set(recent_ids)]
+            events = recent_events + remaining
+            if len(recent_events) == 1 and re.search(r"(?:這|那)(?:個|筆)", message):
+                events = recent_events
+    event_filter = dict(result.get("event_filter") or {})
+    candidates = filter_chat_mutation_candidates(events, event_filter, message)
+
+    if len(candidates) > 1:
+        schema = {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": ["string", "null"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["event_id", "reason"],
+        }
+        prompt = (
+            "你只負責從候選行程挑出使用者唯一指的那一筆。不能編造 id；無法唯一判斷就回 null。\n"
+            f"使用者：{message}\n候選：{json.dumps([_chat_event_candidate(event) for event in candidates], ensure_ascii=False)}"
+        )
+        try:
+            raw = await call_gemini_raw(prompt, temperature=0.0, response_schema=schema, max_retries=0)
+            cleaned = str(raw or "").strip().removeprefix("```json").removesuffix("```").strip()
+            selected_id = str((json.loads(cleaned) if cleaned.startswith("{") else {}).get("event_id") or "")
+            selected = [event for event in candidates if str(event.get("id") or "") == selected_id]
+            if selected:
+                candidates = selected
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    if len(candidates) == 1:
+        selected = candidates[0]
+        event_id = str(selected.get("id") or "")
+        result["event_id"] = event_id
+        result["event_id_to_delete"] = event_id if intent == "DELETE_EVENT" else None
+        result["event_title"] = str(selected.get("title") or "")
+        result["event_start"] = selected.get("start_time") or ""
+        result["event_end"] = selected.get("end_time") or ""
+        result["event_city"] = selected.get("city") or ""
+        result["event_district"] = selected.get("district") or ""
+        result["event_location"] = selected.get("location") or ""
+        result["missing_fields"] = [field for field in result.get("missing_fields", []) if field != "target"]
+        result["needs_clarification"] = bool(result["missing_fields"])
+        operation = "刪除" if intent == "DELETE_EVENT" else "修改"
+        result["reply"] = f"找到「{result['event_title']}」，確認後才會{operation}。"
+        return result
+
+    candidate_payload = [_chat_event_candidate(event) for event in candidates[:8]]
+    if not candidate_payload:
+        # A matching phone-calendar event is intentionally read-only here.
+        phone_events = [
+            {**event, "chat_editable": True}
+            for event in events
+            if event.get("external_source") == "phone_calendar"
+        ]
+        phone_matches = filter_chat_mutation_candidates(phone_events, event_filter, message)
+        if phone_matches:
+            result["reply"] = "這筆是手機行事曆匯入的行程，請回手機行事曆修改或刪除。"
+        else:
+            result["reply"] = "我找不到符合的可修改行程，請先查詢行程後再指定標題或編號。"
+    else:
+        result["reply"] = "我找到不只一筆可能的行程，請說第幾個或補上標題、日期。"
+    event_filter["candidates"] = candidate_payload
+    result["event_filter"] = event_filter
+    result["event_id"] = None
+    result["event_id_to_delete"] = None
+    result["missing_fields"] = list(dict.fromkeys([*result.get("missing_fields", []), "target"]))
+    result["needs_clarification"] = True
+    return result
+
+
 async def _process_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -337,6 +486,7 @@ async def _process_chat_command(
             )
             result = await enrich_chat_weather_result(result, payload)
             result = await enrich_chat_event_query_result(result, user_id)
+            result = await enrich_chat_event_mutation_result(result, user_id, payload.message)
             if result.get("intent") == "GENERAL_CHAT" and not result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
                 history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
                 history = history_response.get("data") if isinstance(history_response, dict) else []
@@ -346,12 +496,10 @@ async def _process_chat_command(
             result.setdefault("gemini_status", "not_called")
             result.setdefault("ai_failed", False)
             result["channel"] = result_channel
-            result.update({
-                "event_id": None,
-                "event_id_to_delete": None,
-                "event_created": None,
-                "event_updated": None,
-            })
+            result.setdefault("event_id", None)
+            result.setdefault("event_id_to_delete", None)
+            result.setdefault("event_created", None)
+            result.setdefault("event_updated", None)
             result["action_type"] = {
                 "CREATE_EVENT": "CREATE_EVENT",
                 "UPDATE_EVENT": "UPDATE_EVENT",
@@ -451,6 +599,10 @@ async def _process_chat_command(
                 "changes": None,
                 "entities": None,
                 "action_type": "NONE",
+                "event_id": None,
+                "event_id_to_delete": None,
+                "event_created": None,
+                "event_updated": None,
                 "timing": get_timing(),
             }
         return {
@@ -467,7 +619,7 @@ async def _process_chat_command(
         reset_timing(timing_token)
 
 
-@app.post("/api/chat", response_model=ChatCommandResponse, response_model_exclude={"event_id", "event_id_to_delete"})
+@app.post("/api/chat", response_model=ChatCommandResponse)
 async def chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -485,7 +637,7 @@ def require_internal_key(value: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail={"status": "error", "code": "invalid_internal_key"})
 
 
-@app.post("/api/chat/internal", response_model=ChatCommandResponse, response_model_exclude={"event_id", "event_id_to_delete"})
+@app.post("/api/chat/internal", response_model=ChatCommandResponse)
 async def internal_chat_command(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -517,6 +669,8 @@ async def internal_chat_command(
             reply="訊息處理逾時，請稍後再試。",
             channel="line",
             action_type="NONE",
+            event_id=None,
+            event_id_to_delete=None,
             timing={"total_ms": 14500, "timeout": True},
         )
 
@@ -543,11 +697,14 @@ def draft_event_to_event_create(user_id: str, draft_id: str, draft: Dict[str, An
 
     all_day = bool(draft.get("all_day"))
     if all_day and date_value:
+        end_date_value = str(draft.get("end_date") or date_value).strip()
         start_time = f"{date_value}T00:00:00+08:00"
-        end_time = f"{date_value}T23:59:00+08:00"
+        end_time = f"{end_date_value}T23:59:00+08:00"
     else:
         start_time = combine_datetime(raw_start)
         end_time = combine_datetime(raw_end)
+        if start_time and end_time and datetime.fromisoformat(end_time) <= datetime.fromisoformat(start_time):
+            end_time = (datetime.fromisoformat(end_time) + timedelta(days=1)).isoformat(timespec="seconds")
         if start_time and not end_time:
             end_time = (datetime.fromisoformat(start_time) + timedelta(hours=1)).isoformat(timespec="seconds")
 
@@ -595,6 +752,60 @@ async def confirm_chat_draft(
         raise HTTPException(status_code=422, detail={"status": "error", "code": "invalid_user_id"})
     if not draft_id or not payload.draft_event:
         raise HTTPException(status_code=422, detail={"status": "error", "code": "missing_draft_event"})
+    multi_dates = list(dict.fromkeys(str(value) for value in (payload.draft_event.get("dates") or []) if value))
+    if len(multi_dates) > 1:
+        confirmed_events = []
+        replay_count = 0
+        for date_value in multi_dates:
+            item_draft_id = f"{draft_id}:{date_value}"
+            try:
+                existing_item = (
+                    supabase.table("events")
+                    .select("*")
+                    .eq("user_id", payload.user_id)
+                    .eq("external_source", "chat_draft")
+                    .eq("external_event_id", item_draft_id)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"status": "error", "code": "idempotency_check_failed", "message": str(exc)},
+                ) from exc
+            if existing_item.data:
+                confirmed_events.append(normalize_event(existing_item.data[0]))
+                replay_count += 1
+                continue
+            item_draft = {**payload.draft_event, "date": date_value}
+            item_draft.pop("dates", None)
+            item_event = draft_event_to_event_create(payload.user_id, item_draft_id, item_draft)
+            item_result = await create_event(item_event, background_tasks)
+            if item_result.get("status") != "success" or item_result.get("source") == "memory_fallback":
+                failed_item = item_result.get("data") or {}
+                if failed_item.get("id"):
+                    delete_memory_event(str(failed_item["id"]), payload.user_id)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "status": "partial_success" if confirmed_events else "error",
+                        "code": "event_write_failed",
+                        "confirmed_count": len(confirmed_events),
+                        "message": "Retrying the same draft safely resumes the remaining dates.",
+                    },
+                )
+            confirmed_events.append(item_result.get("data") or {})
+        return safe_response(
+            "success",
+            {
+                "draft_id": draft_id,
+                "confirmed": True,
+                "idempotent_replay": replay_count == len(multi_dates),
+                "events": confirmed_events,
+            },
+            "multi-date draft confirmed",
+            "events",
+        )
     try:
         existing = (
             supabase.table("events")

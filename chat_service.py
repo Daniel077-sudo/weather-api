@@ -1043,6 +1043,90 @@ def find_event_for_draft(user_id: str, title: str = "", target_start: str = "") 
     return {}
 
 
+def list_chat_mutation_events(user_id: str, days: int = 60) -> List[Dict[str, Any]]:
+    """Return upcoming events that chat may reference, without mutating anything."""
+    if not user_id:
+        return []
+    now = taipei_now()
+    from_time = (now - timedelta(hours=1)).isoformat()
+    to_time = (now + timedelta(days=max(1, min(days, 90)))).isoformat()
+    rows: List[Dict[str, Any]] = []
+    try:
+        future_result = (
+            supabase.table("events")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("start_time", from_time)
+            .lte("start_time", to_time)
+            .order("start_time")
+            .limit(200)
+            .execute()
+        )
+        rows.extend(future_result.data or [])
+        active_result = (
+            supabase.table("events")
+            .select("*")
+            .eq("user_id", user_id)
+            .lt("start_time", from_time)
+            .gte("end_time", now.isoformat())
+            .order("start_time")
+            .limit(50)
+            .execute()
+        )
+        rows.extend(active_result.data or [])
+    except Exception:
+        rows.extend(list_memory_events(user_id, from_time, to_time, 200))
+
+    unique: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        event = normalize_event(row)
+        event_id = str(event.get("id") or "")
+        if not event_id:
+            continue
+        source = str(event.get("external_source") or "")
+        event["chat_editable"] = source not in {"shared_only", "phone_calendar"}
+        unique[event_id] = event
+    return sorted(unique.values(), key=lambda item: str(item.get("start_time") or ""))
+
+
+def get_recent_chat_event_ids(user_id: str, minutes: int = 30) -> List[str]:
+    """Return the latest event list shown to this user, preserving its displayed order."""
+    if not user_id:
+        return []
+    cutoff = (taipei_now() - timedelta(minutes=max(1, min(minutes, 120)))).isoformat()
+    try:
+        rows = (
+            supabase.table(CHAT_LOGS_TABLE)
+            .select("response_payload,created_at")
+            .eq("user_id", user_id)
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+        ).data or []
+    except Exception:
+        return []
+    for row in rows:
+        payload = row.get("response_payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        if not isinstance(payload, dict):
+            continue
+        entities = payload.get("entities") or {}
+        event_filter = payload.get("event_filter") or {}
+        candidates = entities.get("matched_events") or event_filter.get("candidates") or []
+        ids = [str(item.get("id") or "") for item in candidates if isinstance(item, dict) and item.get("id") is not None]
+        if ids:
+            return ids
+        event_id = payload.get("event_id")
+        if event_id:
+            return [str(event_id)]
+    return []
+
+
 async def update_event_from_chat(user_id: str, message: str, current_location: Optional[str] = None) -> Dict[str, Any]:
     title = infer_event_title(message, "ADD_EVENT")
     existing = find_event_to_update(user_id, title)

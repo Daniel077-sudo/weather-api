@@ -53,15 +53,12 @@
       "input": "我要去游泳",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event": {
           "title": "游泳",
           "date": "2026-09-23",
           "all_day": true
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -69,15 +66,12 @@
       "input": "明天想去游泳",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event": {
           "title": "游泳",
           "date": "2026-09-24",
           "all_day": true
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -86,16 +80,13 @@
       "_備註": "沒講地點：不可自動填 current_location（高雄市），地點選填並保留空值",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event": {
           "title": "開會",
           "date": "2026-09-24",
           "start_time": "09:00",
           "city": null
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -437,11 +428,11 @@
         "draft_event": {
           "title": "上班",
           "date": "2026-09-23",
-          "start_time": "13:30",
+          "start_time": null,
           "city": null
         },
         "missing_fields_include": [
-          "city"
+          "start_time"
         ]
       }
     },
@@ -502,16 +493,13 @@
       "input": "明天下午三點開會，地點在新光三越",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event": {
           "title": "開會",
           "start_time": "15:00",
           "city": null,
           "location": "新光三越"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -605,14 +593,11 @@
       "input": "明天下午三點去全聯",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event_absent": [
           "city"
         ],
-        "_說明": "連鎖店不知道哪一家：不猜、不用目前位置",
-        "missing_fields_include": [
-          "city"
-        ]
+        "_說明": "連鎖店不知道哪一家：不猜、不用目前位置"
       }
     },
     {
@@ -620,11 +605,8 @@
       "input": "明天下午三點去學校",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event_absent": [
-          "city"
-        ],
-        "missing_fields_include": [
           "city"
         ]
       }
@@ -801,14 +783,11 @@
       "input": "明天3點開會",
       "expect": {
         "intent": "CREATE_EVENT",
-        "needs_clarification": true,
+        "needs_clarification": false,
         "draft_event": {
-          "start_time": null
+          "start_time": "15:00"
         },
-        "_說明": "依 App／LINE 定案：非當天的 1 至 6 點視為下午",
-        "missing_fields_include": [
-          "start_time"
-        ]
+        "_說明": "依 App／LINE 定案：非當天的 1 至 6 點視為下午"
       }
     },
     {
@@ -993,10 +972,7 @@
           "date": "2026-12-15",
           "start_time": "15:00",
           "end_time": "15:15"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1026,10 +1002,7 @@
           "title": "上班",
           "start_time": "14:00",
           "end_time": "22:30"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1042,10 +1015,7 @@
           "title": "吃飯",
           "start_time": "11:00",
           "end_time": "13:00"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1058,10 +1028,7 @@
           "title": "值班",
           "start_time": "23:00",
           "end_time": "01:00"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1072,11 +1039,9 @@
         "intent": "CREATE_EVENT",
         "draft_event": {
           "date": "2026-11-24",
-          "start_time": null
+          "start_time": "15:00"
         },
-        "missing_fields_include": [
-          "start_time"
-        ]
+        "needs_clarification": false
       }
     },
     {
@@ -1088,10 +1053,7 @@
         "draft_event": {
           "title": "看牙醫",
           "start_time": "15:15"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1163,8 +1125,7 @@
           "location": "全聯"
         },
         "missing_fields_include": [
-          "start_time",
-          "city"
+          "start_time"
         ]
       }
     },
@@ -1179,10 +1140,7 @@
           "date": "2026-12-04",
           "start_time": "08:00",
           "location": "我公司"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1282,10 +1240,7 @@
         "draft_event": {
           "title": "上班",
           "location": "小西門"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
@@ -1320,10 +1275,7 @@
         "draft_event": {
           "title": "爬山",
           "date": "2026-11-28"
-        },
-        "missing_fields_include": [
-          "city"
-        ]
+        }
       }
     },
     {
