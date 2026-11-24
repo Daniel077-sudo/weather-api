@@ -3,8 +3,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from fastapi.testclient import TestClient
-
 import main
 from chat_contract_v2 import build_chat_v2_response, extract_location_entities, validate_chat_v2_response
 from gemini_service import _sanitize_general_chat_reply
@@ -12,6 +10,14 @@ from gemini_service import _sanitize_general_chat_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = json.loads((ROOT / "docs" / "intent_test_cases.json").read_text(encoding="utf-8"))
+
+
+def run_immediate(coroutine):
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("chat coroutine unexpectedly suspended; mock external I/O in this test")
 
 
 def partial_diff(expected, actual, path=""):
@@ -72,6 +78,18 @@ class ChatContractV2Tests(unittest.TestCase):
             "draft_event": case.get("draft_event"),
         }
 
+    def process_chat(self, payload):
+        request = main.ChatRequest(**payload)
+        response = main.Response()
+        background_tasks = main.BackgroundTasks()
+        auth = main.AuthContext(
+            user_id="test-user",
+            claims={"sub": "test-user"},
+            authenticated=True,
+        )
+        result = run_immediate(main._process_chat_command(request, background_tasks, response, auth, "app"))
+        return main.ChatCommandResponse(**result).model_dump()
+
     def test_all_golden_intent_cases(self):
         failures = []
         for case in SUITE["cases"]:
@@ -86,36 +104,27 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertFalse(failures, "\n".join(failures))
 
     def test_v2_endpoint_bypasses_legacy_mutating_flow(self):
-        client = TestClient(main.app)
         with patch.object(main, "persist_chat_turn", return_value=None):
-            response = client.post("/api/chat", json=self.payload_for(SUITE["cases"][0]))
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+            body = self.process_chat(self.payload_for(SUITE["cases"][0]))
         self.assertEqual(body["intent"], "CREATE_EVENT")
         self.assertIsNone(body["event_id"])
         self.assertIsNone(body["event_created"])
 
     def test_p0_draft_mode_does_not_call_legacy_create_flow(self):
-        client = TestClient(main.app)
         payload = self.payload_for(SUITE["cases"][0])
         payload.pop("contract_version")
         payload["draft_mode"] = True
         with patch.object(main, "persist_chat_turn", return_value=None):
-            response = client.post("/api/chat", json=payload)
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+            body = self.process_chat(payload)
         self.assertEqual(body["action_type"], "CREATE_EVENT")
         self.assertIsNone(body["event_id"])
         self.assertIsNone(body["event_created"])
         self.assertIn("確認後", body["reply"])
 
     def test_v2_requires_client_now_instead_of_using_server_clock(self):
-        client = TestClient(main.app)
         payload = self.payload_for(SUITE["cases"][0])
         payload.pop("client_now")
-        response = client.post("/api/chat", json=payload)
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+        body = self.process_chat(payload)
         self.assertEqual(body["status"], "error")
         self.assertEqual(body["contract_version"], 2)
         self.assertNotIn("client_now", body["reply"])
@@ -137,7 +146,6 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertIn("七級風暴風", result["reply"])
 
     def test_p0_delete_only_reads_target_and_never_calls_legacy_flow(self):
-        client = TestClient(main.app)
         payload = {
             "user_id": "test-user",
             "message": "刪掉明天的開會",
@@ -148,14 +156,12 @@ class ChatContractV2Tests(unittest.TestCase):
         with patch.object(main, "find_event_for_draft", return_value=matched), patch.object(
             main, "persist_chat_turn", return_value=None
         ):
-            response = client.post("/api/chat", json=payload)
-        body = response.json()
+            body = self.process_chat(payload)
         self.assertEqual(body["action_type"], "DELETE_EVENT")
         self.assertEqual(body["event_id_to_delete"], "123")
         self.assertIn("確認後", body["reply"])
 
     def test_p0_update_returns_requested_change_without_writing(self):
-        client = TestClient(main.app)
         payload = {
             "user_id": "test-user",
             "message": "把明天開會改成下午四點",
@@ -166,25 +172,20 @@ class ChatContractV2Tests(unittest.TestCase):
         with patch.object(main, "find_event_for_draft", return_value=matched), patch.object(
             main, "persist_chat_turn", return_value=None
         ):
-            response = client.post("/api/chat", json=payload)
-        body = response.json()
+            body = self.process_chat(payload)
         self.assertEqual(body["action_type"], "UPDATE_EVENT")
         self.assertEqual(body["event_id"], "456")
         self.assertIn("16:00:00+08:00", body["event_start"])
         self.assertIn("確認後", body["reply"])
 
     def test_unversioned_chat_contract_is_retired(self):
-        client = TestClient(main.app)
-        response = client.post("/api/chat", json={"user_id": "test-user", "message": "明天下午三點去台南開會"})
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+        body = self.process_chat({"user_id": "test-user", "message": "明天下午三點去台南開會"})
         self.assertEqual(body["status"], "error")
         self.assertEqual(body["action_type"], "NONE")
         self.assertIsNone(body["event_id"])
         self.assertIn("contract_version: 2", body["reply"])
 
     def test_general_chat_uses_gemini_and_custom_assistant_name(self):
-        client = TestClient(main.app)
         payload = {
             "user_id": "test-user",
             "message": "我今天心情有點累",
@@ -201,10 +202,8 @@ class ChatContractV2Tests(unittest.TestCase):
             "generate_general_chat_reply",
             new=AsyncMock(side_effect=successful_reply),
         ) as generate_reply, patch.object(main, "persist_chat_turn", return_value=None):
-            response = client.post("/api/chat", json=payload)
+            body = self.process_chat(payload)
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
         self.assertEqual(body["intent"], "GENERAL_CHAT")
         self.assertEqual(body["assistant_name"], "晴晴")
         self.assertIn("晴晴", body["reply"])
@@ -222,7 +221,6 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(body["reply"], "AI 暫時忙不過來，請稍後再試。")
 
     def test_cancel_general_chat_stays_deterministic_without_gemini(self):
-        client = TestClient(main.app)
         payload = {
             "user_id": "test-user",
             "message": "不用了",
@@ -233,9 +231,8 @@ class ChatContractV2Tests(unittest.TestCase):
         with patch.object(main, "generate_general_chat_reply", new=AsyncMock()) as generate_reply, patch.object(
             main, "persist_chat_turn", return_value=None
         ):
-            response = client.post("/api/chat", json=payload)
+            body = self.process_chat(payload)
 
-        body = response.json()
         self.assertEqual(body["reply"], "好的，這次不建立草稿。")
         self.assertEqual(body["assistant_name"], "阿晴")
         generate_reply.assert_not_awaited()
