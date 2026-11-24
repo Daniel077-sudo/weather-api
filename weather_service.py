@@ -562,14 +562,16 @@ def build_weather_suggestion(city: str, district: str, message: str, weather: Di
     pop = safe_int(weather.get("pop"))
     tags = risk.get("risk_tags") or []
 
+    if pop >= 50:
+        return f"{location}降雨機率{pop}%，很可能下雨，帶傘或雨衣。"
+    if pop >= 30:
+        return f"{location}降雨機率{pop}%，可能會下雨，帶把傘備用。"
     if "heavy_rain" in tags:
-        return f"{location}降雨機率{pop}%，建議帶雨具並避開低窪、地下道。"
+        return f"{location}已有明顯降雨或官方雨勢資訊，請攜帶雨具並避開低窪、地下道。"
     if "strong_wind" in tags:
         return f"{location}可能有強風，外出請避開招牌、路樹與施工圍籬。"
     if "high_uvi" in tags:
         return f"{location}紫外線偏高，請補水並做好防曬。"
-    if pop >= 30:
-        return f"{location}有降雨機會，行程「{message}」建議預留交通緩衝。"
     if pop < 30 and any(keyword in str(description) for keyword in ["雨", "雷"]):
         description = "天氣風險低"
     return f"{location}目前{description}，行程「{message}」可照常，仍請留意最新天氣。"

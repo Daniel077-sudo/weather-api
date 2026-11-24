@@ -637,6 +637,14 @@ def _is_usage_help(message: str) -> bool:
     return has_how and has_feature and has_operation
 
 
+def _is_existing_event_location_update(message: str) -> bool:
+    """Recognize wording that adds a location to an already-mentioned event."""
+    return bool(re.search(
+        r"(?:的?行程\s*(?:是在|在|的?地點(?:是|在|為))|行程的?地點\s*(?:是|在|為))",
+        message,
+    ))
+
+
 def _usage_help_reply(message: str) -> str:
     if "行程可以分享" in message:
         return "可以，請先在 App 建立行程，再從行程詳情使用分享功能邀請家人；只有檢視權限的共享行程仍要由原建立者修改。"
@@ -649,7 +657,7 @@ def _usage_help_reply(message: str) -> str:
     if "天氣" in message:
         return "你可以直接問「明天臺南會下雨嗎？」、「週五高雄幾度？」或「明天去爬山適合嗎？」。小藍會依日期、地點與活動查詢天氣。"
     if any(word in message for word in ["防災", "警報"]):
-        return "你可以直接問「地震時怎麼辦？」、「颱風警報怎麼分？」或「淹水時要往哪裡避難？」。小藍會提供防災指引；即時警報仍以政府官方資訊為準。"
+        return "你可以直接問「地震時怎麼辦？」、「颱風警報怎麼分？」或「淹水時要往哪裡避難？」。App 內也有地震小教室、火災小教室與颱風豪雨小教室；即時警報以中央氣象署及政府官方資訊為準。"
     if "草稿" in message or "確認" in message:
         return "小藍整理完行程後會顯示確認卡；按下確認才會寫入行事曆。若不需要，可以按取消或直接說「不用了」。"
     if any(word in message for word in ["清除", "略過"]) and "地點" in message:
@@ -698,6 +706,8 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
         "改成", "改到", "改為", "改期", "改時間", "改地點", "改在", "修改", "更新行程",
         "延到", "延後", "延期", "提早", "提前", "挪到", "換到", "移到",
     ]):
+        return "UPDATE_EVENT"
+    if _is_existing_event_location_update(message):
         return "UPDATE_EVENT"
     if _is_event_query(message):
         return "QUERY_EVENT"
@@ -816,6 +826,7 @@ def _base_response(intent: str, message: str, draft_id: Optional[str]) -> Dict[s
         "event_filter": None,
         "changes": None,
         "entities": None,
+        "time_guessed": False,
         "repeat": "none",
         "events": None,
     }
@@ -1020,6 +1031,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             while datetime.strptime(str(draft_date), "%Y-%m-%d").date() < now.date():
                 draft_date = _advance_repeat_date(str(draft_date), repeat)
         time_needs_clarification = _time_requires_clarification(message)
+        ambiguous_time_in_original_message = bool(times) and time_needs_clarification
         past_time = False
         period_only = _normalize_period(message.strip(), 1) if message.strip() in TIME_PERIODS else ""
         remembered_times = list(payload.get("_ambiguous_times") or AMBIGUOUS_DRAFT_TIMES.get(str(draft_id or ""), []))
@@ -1051,6 +1063,12 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
                 now,
                 str(draft_date),
             )
+        response["time_guessed"] = bool(
+            ambiguous_time_in_original_message
+            and times
+            and not time_needs_clarification
+            and not past_time
+        )
         has_time_wording = bool(times) or time_needs_clarification
         is_reminder = bool(existing.get("is_reminder")) or bool(re.search(r"提醒我|幫我提醒|記得提醒我|提醒一下|叫我", message)) or bool(
             re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
@@ -1181,7 +1199,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         title_change = re.search(r"(?:名稱|標題)\s*(?:改成|改為|改到)\s*([^，。！？!?]+)", message)
         if title_change:
             changes["title"] = _text(title_change.group(1)).strip(" \"'「」『』") or None
-        if any(word in message for word in ["地點", "改在", "換到", "移到"]):
+        if _is_existing_event_location_update(message) or any(word in message for word in ["地點", "改在", "換到", "移到"]):
             for key, value in change_location.items():
                 if value is not None:
                     changes[key] = value

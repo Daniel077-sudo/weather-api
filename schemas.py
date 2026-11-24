@@ -97,6 +97,7 @@ class ChatCommandResponse(BaseModel):
     event_filter: Optional[Dict[str, Any]] = None
     changes: Optional[Dict[str, Any]] = None
     entities: Optional[Dict[str, Any]] = None
+    time_guessed: bool = False
     repeat: Literal["none", "daily", "weekly", "monthly"] = "none"
     events: Optional[List[Dict[str, Any]]] = None
 

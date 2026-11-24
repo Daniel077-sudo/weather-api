@@ -515,7 +515,7 @@ class CoreLogicTests(unittest.TestCase):
         class Client:
             def table(self, _name): return Query()
 
-        with patch("chat_service.supabase", Client()), patch("chat_service.list_memory_events", return_value=[]):
+        with patch("chat_service.supabase", Client()):
             answer = get_event_query_answer(
                 "user-id",
                 {"start_date": "2026-11-16", "end_date": "2026-11-16", "activity": None},
@@ -535,7 +535,51 @@ class CoreLogicTests(unittest.TestCase):
         medium_risk = analyze_weather_risk({"description": "多雲", "pop": 30})
         self.assertEqual(medium_risk["risk_level"], "medium")
         medium_text = build_weather_suggestion("臺南市", "東區", "散步", {"description": "多雲", "pop": 30}, medium_risk)
-        self.assertIn("降雨機會", medium_text)
+        self.assertIn("可能會下雨，帶把傘備用", medium_text)
+
+        high_risk = analyze_weather_risk({"description": "短暫雨", "pop": 50})
+        high_text = build_weather_suggestion("臺南市", "東區", "散步", {"description": "短暫雨", "pop": 50}, high_risk)
+        self.assertIn("很可能下雨，帶傘或雨衣", high_text)
+
+    def test_event_database_failure_never_creates_local_event(self):
+        class FailingQuery:
+            def select(self, *_args): return self
+            def insert(self, *_args): return self
+            def order(self, *_args, **_kwargs): return self
+            def limit(self, *_args): return self
+            def eq(self, *_args): return self
+            def gte(self, *_args): return self
+            def lte(self, *_args): return self
+            def execute(self): raise RuntimeError("database unavailable")
+
+        class FailingClient:
+            def table(self, *_args): return FailingQuery()
+
+        event = main.EventCreate(
+            user_id="test-user",
+            title="測試行程",
+            start_time="2026-11-25T15:00:00+08:00",
+            end_time="2026-11-25T16:00:00+08:00",
+        )
+        auth_context = auth.AuthContext(user_id="test-user", claims={"sub": "test-user"}, authenticated=True)
+        with patch.object(main, "supabase", FailingClient()):
+            create_call = main.create_event(event, main.BackgroundTasks())
+            list_call = main.get_events("test-user", None, None, 100, auth_context)
+            try:
+                create_call.send(None)
+            except StopIteration as completed:
+                created = completed.value
+            try:
+                list_call.send(None)
+            except StopIteration as completed:
+                listed = completed.value
+
+        self.assertEqual(created["status"], "error")
+        self.assertEqual(created["source"], "supabase")
+        self.assertIsNone(created["data"])
+        self.assertEqual(listed["status"], "error")
+        self.assertEqual(listed["data"], [])
+        self.assertNotIn("memory_fallback", json.dumps({"created": created, "listed": listed}))
 
     def test_draft_event_conversion_uses_taipei_time_and_idempotency_fields(self):
         event = main.draft_event_to_event_create(
@@ -1189,6 +1233,18 @@ class CoreLogicTests(unittest.TestCase):
             self.assertEqual(auth.resolve_user_id(context, "body-user"), "jwt-user")
         finally:
             auth.SUPABASE_JWT_SECRET = original_secret
+
+    def test_anonymous_supabase_claims_require_only_sub(self):
+        claims = {
+            "sub": "anonymous-user-id",
+            "is_anonymous": True,
+            "role": "authenticated",
+            "exp": int(time.time()) + 300,
+        }
+        validated = auth.validate_claims(claims)
+        context = auth.AuthContext(user_id=validated["sub"], claims=validated, authenticated=True)
+        self.assertEqual(auth.resolve_user_id(context, "untrusted-body-user"), "anonymous-user-id")
+        self.assertNotIn("email", validated)
 
     def test_supabase_es256_jwt_uses_jwks(self):
         original_cache = dict(auth.JWKS_CACHE)

@@ -277,12 +277,14 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertFalse(result["needs_clarification"])
         self.assertEqual(result["draft_event"]["start_time"], "15:00")
         self.assertFalse(result["draft_event"]["all_day"])
+        self.assertTrue(result["time_guessed"])
 
         today = build_chat_v2_response({
             "message": "兩點四十五分開會", "contract_version": 2,
             "client_now": "2026-11-23T14:41:00+08:00",
         })
         self.assertEqual(today["draft_event"]["start_time"], "14:45")
+        self.assertTrue(today["time_guessed"])
 
         passed = build_chat_v2_response({
             "message": "三點開會", "contract_version": 2,
@@ -290,6 +292,26 @@ class ChatContractV2Tests(unittest.TestCase):
         })
         self.assertIn("start_time", passed["missing_fields"])
         self.assertIn("已經過了", passed["reply"])
+        self.assertFalse(passed["time_guessed"])
+
+        explicit = build_chat_v2_response({
+            "message": "明天下午三點開會", "contract_version": 2,
+            "client_now": "2026-11-23T14:41:00+08:00",
+        })
+        self.assertFalse(explicit["time_guessed"])
+
+    def test_existing_event_location_statement_is_update(self):
+        result = build_chat_v2_response({
+            "message": "幫我記錄一下明天吃飯的行程是在台南市中西區",
+            "contract_version": 2,
+            "client_now": "2026-11-24T10:00:00+08:00",
+        })
+        self.assertEqual(result["intent"], "UPDATE_EVENT")
+        self.assertEqual(result["event_filter"]["date"], "2026-11-25")
+        self.assertEqual(result["event_filter"]["title_keyword"], "吃飯")
+        self.assertEqual(result["changes"]["city"], "臺南市")
+        self.assertEqual(result["changes"]["district"], "中西區")
+        self.assertEqual(result["changes"]["location"], "台南市中西區")
 
     def test_compound_day_period_words_set_both_date_and_clock_period(self):
         result = build_chat_v2_response({

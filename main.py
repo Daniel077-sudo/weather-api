@@ -22,7 +22,7 @@ from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history
 from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
-from event_service import build_event_risk, create_memory_event, delete_memory_event, enrich_event_payload_with_risk, list_memory_events, monitor_event_weather_window, normalize_event
+from event_service import build_event_risk, enrich_event_payload_with_risk, monitor_event_weather_window, normalize_event
 from gemini_service import call_gemini_json_cached, call_gemini_raw, call_gemini_vision, generate_general_chat_reply, normalize_assistant_name, summarize_ai_usage
 from local_ai_service import build_local_ai_suggestion, load_local_ai_rules
 from schemas import ChatCommandResponse, ChatDraftActionRequest, ChatRequest, EmergencyKitVisionRequest, EventCreate, EventRiskCheckRequest, EventUpdate, GameScoreCreate, GameSubmitRequest, GeocodeRequest, HomeSafetyVisionRequest, LocalAIRequest, PushDeviceTokenRequest, QuizScoreSubmitRequest, UserPreferenceRequest, UserQuery, WatchAreaCreate, WeatherSuggestionRequest
@@ -768,10 +768,7 @@ async def confirm_chat_draft(
             item_draft.pop("dates", None)
             item_event = draft_event_to_event_create(payload.user_id, item_draft_id, item_draft)
             item_result = await create_event(item_event, background_tasks)
-            if item_result.get("status") != "success" or item_result.get("source") == "memory_fallback":
-                failed_item = item_result.get("data") or {}
-                if failed_item.get("id"):
-                    delete_memory_event(str(failed_item["id"]), payload.user_id)
+            if item_result.get("status") != "success":
                 raise HTTPException(
                     status_code=503,
                     detail={
@@ -818,10 +815,7 @@ async def confirm_chat_draft(
 
     event = draft_event_to_event_create(payload.user_id, draft_id, payload.draft_event)
     result = await create_event(event, background_tasks)
-    if result.get("status") != "success" or result.get("source") == "memory_fallback":
-        event_data = result.get("data") or {}
-        if event_data.get("id"):
-            delete_memory_event(str(event_data["id"]), payload.user_id)
+    if result.get("status") != "success":
         raise HTTPException(
             status_code=503,
             detail={"status": "error", "code": "event_write_failed", "message": "The event was not persisted."},
@@ -1039,7 +1033,7 @@ async def weather_suggestion(payload: WeatherSuggestionRequest, auth: AuthContex
             f"使用者問題:{payload.message or payload.activity or '天氣建議'}\n"
             f"天氣:{json.dumps(current_weather, ensure_ascii=False)}\n"
             f"風險:{json.dumps(risk_payload, ensure_ascii=False)}\n"
-            "規則：降雨機率 30% 以上才可說可能下雨或建議帶傘；低於 30% 不可做降雨提醒。\n"
+            "規則：降雨機率 30–49% 說『可能會下雨，帶把傘備用』；50% 以上說『很可能下雨，帶傘或雨衣』；低於 30% 不可只因降雨機率做提醒。\n"
             "JSON 欄位: suggestion(60字內自然建議), risk_summary, recommended_action, confidence。"
         )
         ai_raw = await call_gemini_json_cached(
@@ -1903,14 +1897,9 @@ async def create_event(event: EventCreate, background_tasks: BackgroundTasks):
             if should_refresh_weather and event_id and background_tasks:
                 background_tasks.add_task(update_event_weather_snapshot, event_id, {**db_payload, **created_event})
             return {"status": "success", "data": normalize_event(created_event)}
-        memory_event = create_memory_event(db_payload)
-        return {"status": "success", "data": normalize_event(memory_event), "source": "memory_fallback"}
-    except Exception as e:
-        try:
-            memory_event = create_memory_event(db_payload if "db_payload" in locals() else event.model_dump(mode="json", exclude_none=True))
-            return {"status": "success", "data": normalize_event(memory_event), "source": "memory_fallback", "message": str(e)}
-        except Exception:
-            return {"status": "error", "message": str(e)}
+        return {"status": "error", "data": None, "message": "行程未寫入資料庫，請稍後再試。", "source": "supabase"}
+    except Exception:
+        return {"status": "error", "data": None, "message": "行程未寫入資料庫，請稍後再試。", "source": "supabase"}
 
 # 注意：路由從 /events 改成了 /api/events 配合前端
 @app.post("/api/events")
@@ -1942,14 +1931,12 @@ async def get_events(
             query = query.lte("start_time", to_time)
         res = query.execute()
         events_data = res.data
-        memory_events = list_memory_events(user_id or "", from_time or "", to_time or "", limit)
-        combined_events = (events_data or []) + memory_events
-        if not combined_events:
+        if not events_data:
             return {"status": "success", "data": []}
 
         return {
             "status": "success",
-            "data": [normalize_event(event) for event in combined_events],
+            "data": [normalize_event(event) for event in events_data],
         }
 
         formatted_events = []
@@ -1976,9 +1963,8 @@ async def get_events(
             "status": "success",
             "data": formatted_events
         }
-    except Exception as e:
-        memory_events = list_memory_events(user_id or "", from_time or "", to_time or "", limit)
-        return {"status": "success", "data": [normalize_event(event) for event in memory_events], "source": "memory_fallback", "message": str(e)}
+    except Exception:
+        return {"status": "error", "data": [], "source": "supabase", "message": "目前無法讀取行程，請稍後再試。"}
 
 
 async def update_event_by_id(
@@ -2084,20 +2070,16 @@ async def delete_event(
         if user_id:
             query = query.eq("user_id", user_id)
         res = query.execute()
-        memory_deleted = delete_memory_event(event_id, user_id or "")
         return {
             "status": "success",
             "data": {
                 "id": event_id,
                 "deleted": True,
                 "user_id": user_id,
-                "deleted_rows": len(res.data or []) + (1 if memory_deleted else 0),
+                "deleted_rows": len(res.data or []),
             },
         }
     except Exception as e:
-        memory_deleted = delete_memory_event(event_id, user_id or "")
-        if memory_deleted:
-            return {"status": "success", "data": {"id": event_id, "deleted": True, "user_id": user_id, "deleted_rows": 1}, "source": "memory_fallback", "message": str(e)}
         return {"status": "error", "message": str(e), "data": {"id": event_id, "deleted": False}}
 
 

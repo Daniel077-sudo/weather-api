@@ -1,5 +1,4 @@
 import json
-import uuid
 from datetime import timedelta
 from typing import Any, Dict, List
 
@@ -16,47 +15,6 @@ from weather_service import (
     build_weather_snapshot, build_weather_suggestion, compare_weather_snapshots,
     pick_current_weather, resolve_event_location_parts, risk_rank,
 )
-
-LOCAL_EVENT_MEMORY: List[Dict[str, Any]] = []
-
-
-def create_memory_event(event: Dict[str, Any]) -> Dict[str, Any]:
-    memory_event = {
-        **event,
-        "id": event.get("id") or f"local-{uuid.uuid4().hex[:12]}",
-        "created_at": event.get("created_at") or taipei_now().isoformat(),
-        "source": "memory_fallback",
-    }
-    LOCAL_EVENT_MEMORY.append(memory_event)
-    return memory_event
-
-
-def list_memory_events(
-    user_id: str = "",
-    from_time: str = "",
-    to_time: str = "",
-    limit: int = 100,
-) -> List[Dict[str, Any]]:
-    events = LOCAL_EVENT_MEMORY
-    if user_id:
-        events = [event for event in events if (event.get("user_id") or "") == user_id]
-    if from_time:
-        events = [event for event in events if str(event.get("start_time") or "") >= from_time]
-    if to_time:
-        events = [event for event in events if str(event.get("start_time") or "") <= to_time]
-    return events[:limit]
-
-
-def delete_memory_event(event_id: str, user_id: str = "") -> bool:
-    for index, event in enumerate(list(LOCAL_EVENT_MEMORY)):
-        if str(event.get("id")) != str(event_id):
-            continue
-        if user_id and (event.get("user_id") or "") != user_id:
-            continue
-        del LOCAL_EVENT_MEMORY[index]
-        return True
-    return False
-
 
 def normalize_event(event: dict) -> dict:
     """Return the exact JSON shape expected by the iOS frontend."""
@@ -310,7 +268,7 @@ async def build_event_risk(payload: EventRiskCheckRequest) -> Dict[str, Any]:
         f"交通:{payload.transport_type or ''}\n"
         f"天氣:{weather_text}\n"
         f"警報:{alert_text}\n"
-        "規則：降雨機率 30% 以上才可說可能下雨或建議帶傘；低於 30% 不可做降雨提醒。\n"
+        "規則：降雨機率 30–49% 說『可能會下雨，帶把傘備用』；50% 以上說『很可能下雨，帶傘或雨衣』；低於 30% 不可只因降雨機率做提醒。\n"
         "JSON 欄位: intent, risk_summary, recommended_action, alternative_location, confidence。"
     )
     ai_raw = await call_gemini_json_cached(
