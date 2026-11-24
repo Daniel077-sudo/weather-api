@@ -4,6 +4,7 @@ import ast
 import hmac
 import hashlib
 import json
+import os
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -17,7 +18,7 @@ import uvicorn
 
 from calendar_service import fetch_timetree_events, sync_timetree_event_payloads
 from auth import AuthContext, get_auth_context, get_required_auth_context, resolve_user_id
-from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_ambiguous_draft_times, get_chat_history, get_event_query_answer, get_recent_chat_event_ids, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, list_chat_mutation_events, persist_chat_turn, reset_user_memory_response
+from chat_service import XIAOLAN_PERSONA, find_event_for_draft, get_chat_history, get_event_query_answer, get_recent_chat_event_ids, get_user_memory_response, get_xiaolan_training_profile, is_valid_uuid, list_chat_mutation_events, persist_chat_turn, reset_user_memory_response
 from config import BACKEND_INTERNAL_KEY, CRON_SECRET, CRON_STATUS, CWA_API_KEY, GEMINI_API_KEY, MOENV_API_KEY, SUPABASE_KEY, SUPABASE_URL, TDX_CLIENT_ID, TDX_CLIENT_SECRET, TIMETREE_ACCESS_TOKEN, VISION_DAILY_LIMIT, supabase
 from data import GAME_QUESTIONS, GAME_SCORE_MEMORY, REQUIRED_EMERGENCY_KIT_ITEMS, TAIWAN_LOCATIONS
 from disaster_service import cleanup_expired_disaster_alerts, get_active_disaster_alerts, monitor_watch_areas, refresh_disaster_alerts, summarize_disaster_alert_risk
@@ -215,26 +216,6 @@ def apply_general_chat_result(result: Dict[str, Any], reply: str, gemini_status:
     result["ai_failed"] = result["gemini_status"] != "ok"
     result["reply"] = "AI 暫時忙不過來，請稍後再試。" if result["ai_failed"] else str(reply or "")
     return result
-
-
-async def restore_ambiguous_draft_times(payload_data: Dict[str, Any], user_id: str) -> Dict[str, Any]:
-    """Recover a clock such as `三點` when the next turn only supplies `下午`."""
-    period_only = str(payload_data.get("message") or "").strip()
-    if not user_id or not payload_data.get("draft_id") or period_only not in {
-        "凌晨", "早上", "上午", "中午", "下午", "傍晚", "晚上", "今晚", "明晚", "今早", "明早", "半夜", "深夜", "晚",
-    }:
-        return payload_data
-    try:
-        remembered = await asyncio.to_thread(
-            get_ambiguous_draft_times,
-            user_id,
-            str(payload_data.get("draft_id") or ""),
-        )
-        if remembered:
-            payload_data["_ambiguous_times"] = remembered
-    except Exception:
-        pass
-    return payload_data
 
 
 async def enrich_chat_weather_result(result: Dict[str, Any], payload: ChatRequest) -> Dict[str, Any]:
@@ -479,7 +460,7 @@ async def _process_chat_command(
         if payload.contract_version == 2:
             if not payload.client_now:
                 raise ValueError("client_now is required for contract_version 2")
-            payload_data = await restore_ambiguous_draft_times(payload.model_dump(), user_id)
+            payload_data = payload.model_dump()
             result = validate_chat_v2_response(
                 build_chat_v2_response(payload_data),
                 normalize_assistant_name(payload.assistant_name),
@@ -488,9 +469,12 @@ async def _process_chat_command(
             result = await enrich_chat_event_query_result(result, user_id)
             result = await enrich_chat_event_mutation_result(result, user_id, payload.message)
             if result.get("intent") == "GENERAL_CHAT" and not result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
-                history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
-                history = history_response.get("data") if isinstance(history_response, dict) else []
-                generated_reply = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
+                generated_reply = await generate_general_chat_reply(
+                    payload.message,
+                    payload.assistant_name,
+                    payload.recent_turns,
+                    payload.context,
+                )
                 apply_general_chat_result(result, generated_reply, get_timing().get("gemini_status", "error"))
             result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
             result.setdefault("gemini_status", "not_called")
@@ -518,9 +502,12 @@ async def _process_chat_command(
                 normalize_assistant_name(payload.assistant_name),
             )
             if draft_result.get("intent") == "GENERAL_CHAT" and not draft_result.pop("_skip_gemini", False) and payload.message.strip() not in {"不用了", "算了", "取消好了", "先不用"}:
-                history_response = await asyncio.to_thread(get_chat_history, user_id, 6) if user_id else {}
-                history = history_response.get("data") if isinstance(history_response, dict) else []
-                generated_reply = await generate_general_chat_reply(payload.message, payload.assistant_name, history)
+                generated_reply = await generate_general_chat_reply(
+                    payload.message,
+                    payload.assistant_name,
+                    payload.recent_turns,
+                    payload.context,
+                )
                 apply_general_chat_result(draft_result, generated_reply, get_timing().get("gemini_status", "error"))
             result = draft_to_legacy_response(draft_result)
             result["assistant_name"] = normalize_assistant_name(payload.assistant_name)
@@ -561,6 +548,10 @@ async def _process_chat_command(
                 "event_created": None,
                 "event_updated": None,
             }
+        total_ms = round((time.perf_counter() - started) * 1000, 2)
+        set_timing("total_ms", total_ms)
+        result["timing"] = get_timing()
+        response.headers["X-Process-Time"] = str(total_ms)
         persist_info = result.pop("_persist_chat_turn", None)
         if persist_info:
             response_for_history = dict(result)
@@ -571,10 +562,6 @@ async def _process_chat_command(
                 response_for_history,
                 result_channel,
             )
-        total_ms = round((time.perf_counter() - started) * 1000, 2)
-        set_timing("total_ms", total_ms)
-        result["timing"] = get_timing()
-        response.headers["X-Process-Time"] = str(total_ms)
         return result
     except Exception as e:
         total_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -872,6 +859,13 @@ async def get_assistant_profile():
             "name": "小藍",
             "persona": XIAOLAN_PERSONA,
             "training": get_xiaolan_training_profile(),
+            "text_generation": {
+                "model": os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash"),
+                "fallback_model": os.getenv("GEMINI_TEXT_FALLBACK_MODEL", "gemini-3.5-flash-lite"),
+                "general_chat_model": os.getenv("GEMINI_CHAT_MODEL", "gemini-3.5-flash-lite"),
+                "thinking": "provider_default_not_explicitly_enabled",
+                "usage_logging": True,
+            },
             "supported_actions": [
                 "NONE",
                 "CLARIFY",

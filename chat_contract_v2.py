@@ -591,6 +591,34 @@ def _is_recurring_request(message: str) -> bool:
     return bool(re.search(r"每天|每日|每週|每周|每星期|每禮拜|每個月|每月", message))
 
 
+def _repeat_kind(message: str) -> str:
+    if re.search(r"每天|每日", message):
+        return "daily"
+    if re.search(r"每週|每周|每星期|每禮拜", message):
+        return "weekly"
+    if re.search(r"每個月|每月", message):
+        return "monthly"
+    return "none"
+
+
+def _advance_repeat_date(date_value: str, repeat: str) -> str:
+    day = datetime.strptime(date_value, "%Y-%m-%d")
+    if repeat == "daily":
+        return (day + timedelta(days=1)).strftime("%Y-%m-%d")
+    if repeat == "weekly":
+        return (day + timedelta(days=7)).strftime("%Y-%m-%d")
+    if repeat == "monthly":
+        year = day.year + (1 if day.month == 12 else 0)
+        month = 1 if day.month == 12 else day.month + 1
+        while day.day > 28:
+            try:
+                return day.replace(year=year, month=month).strftime("%Y-%m-%d")
+            except ValueError:
+                day -= timedelta(days=1)
+        return day.replace(year=year, month=month).strftime("%Y-%m-%d")
+    return date_value
+
+
 def _has_multiple_event_actions(message: str) -> bool:
     if not any(separator in message for separator in ["然後", "接著", "再去", "之後"]):
         return False
@@ -645,18 +673,36 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
         return "GENERAL_CHAT"
     if _is_usage_help(message):
         return "GENERAL_CHAT"
-    if _is_recurring_request(message):
-        return "GENERAL_CHAT"
     if _has_multiple_event_actions(message):
-        return "GENERAL_CHAT"
+        return "CREATE_EVENT"
+    if re.match(r"^(?:不要|不用)提醒", message):
+        return "DELETE_EVENT"
+    cancel_with_target = message.startswith("取消") and bool(
+        _date_mentions(message, now) or _activity(message) or any(word in message for word in ["行程", "活動", "提醒"])
+    )
+    if cancel_with_target or any(word in message for word in ["刪掉", "取消行程", "移除行程", "不去了"]) or re.search(r"^(?:請)?刪除|^把.+(?:刪除|刪掉|取消)", message):
+        return "DELETE_EVENT"
+    if any(word in message for word in ["如果", "假如", "要是"]) and _has_weather_question(message):
+        return "EVENT_WEATHER" if _activity(message) else "QUERY_WEATHER"
+    draft_location = _location(message)
+    draft_dates = _date_mentions(message, now)
+    if has_draft and not _is_question(message) and (
+        _time_mentions(message)
+        or draft_location.get("city")
+        or _location_phrase(message)
+        or message.strip() in TIME_PERIODS
+        or (draft_dates and _is_draft_followup(message, now))
+    ):
+        return "CREATE_EVENT"
+    if any(word in message for word in [
+        "改成", "改到", "改為", "改期", "改時間", "改地點", "改在", "修改", "更新行程",
+        "延到", "延後", "延期", "提早", "提前", "挪到", "換到", "移到",
+    ]):
+        return "UPDATE_EVENT"
     if _is_event_query(message):
         return "QUERY_EVENT"
     if any(word in message for word in ["昨天", "前天", "上週", "上周", "剛剛", "已經", "之前"]):
         return "GENERAL_CHAT"
-    if re.match(r"^(?:不要|不用)提醒", message):
-        return "DELETE_EVENT"
-    if any(word in message for word in ["如果", "假如", "要是"]) and _has_weather_question(message):
-        return "QUERY_WEATHER"
     if any(word in message for word in ["如果", "假如", "要是", "希望", "不要", "不用"]):
         return "GENERAL_CHAT"
     explicit_create_prefix = bool(re.match(
@@ -665,16 +711,6 @@ def _infer_intent(message: str, intent_hint: Optional[str], now: datetime, has_d
     ))
     if explicit_create_prefix:
         return "CREATE_EVENT"
-    cancel_with_target = message.startswith("取消") and bool(
-        _date_mentions(message, now) or _activity(message) or any(word in message for word in ["行程", "活動", "提醒"])
-    )
-    if cancel_with_target or any(word in message for word in ["刪掉", "取消行程", "移除行程", "不去了"]) or re.search(r"^(?:請)?刪除|^把.+(?:刪除|刪掉|取消)", message):
-        return "DELETE_EVENT"
-    if any(word in message for word in [
-        "改成", "改到", "改為", "改期", "改時間", "改地點", "改在", "修改", "更新行程",
-        "延到", "延後", "延期", "提早", "提前", "挪到", "換到", "移到",
-    ]):
-        return "UPDATE_EVENT"
     if any(word in message for word in ["颱風", "台風", "地震", "防災", "淹水", "洪水", "避難", "豪雨"]) and any(
         wording in message for wording in ["怎麼分", "怎麼辦", "如何", "是什麼", "分幾種", "要做什麼", "可以去", "安全嗎", "注意什麼"]
     ):
@@ -780,6 +816,8 @@ def _base_response(intent: str, message: str, draft_id: Optional[str]) -> Dict[s
         "event_filter": None,
         "changes": None,
         "entities": None,
+        "repeat": "none",
+        "events": None,
     }
 
 
@@ -800,6 +838,10 @@ def validate_chat_v2_response(result: Dict[str, Any], assistant_name: str = "小
     intent = result.get("intent")
     if intent not in VALID_INTENTS:
         errors.append("invalid_intent")
+    if result.get("repeat", "none") not in {"none", "daily", "weekly", "monthly"}:
+        errors.append("invalid_repeat")
+    if result.get("events") is not None and not isinstance(result.get("events"), list):
+        errors.append("invalid_events")
 
     missing = result.get("missing_fields")
     if not isinstance(missing, list) or any(field not in VALID_MISSING_FIELDS for field in missing):
@@ -928,14 +970,37 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     message = _text(payload.get("message"))
     assistant_name = " ".join(str(payload.get("assistant_name") or "").split())[:24] or "小藍"
     now = _client_now(payload.get("client_now"))
-    existing_draft = dict(payload.get("draft_event") or {})
+    existing_draft = dict(payload.get("draft_event") or payload.get("pending_card") or {})
     intent = _infer_intent(message, payload.get("intent_hint"), now, bool(existing_draft))
     draft_id = payload.get("draft_id") or (f"draft-{uuid.uuid4().hex}" if intent == "CREATE_EVENT" else None)
     response = _base_response(intent, message, draft_id)
     response["assistant_name"] = assistant_name
 
     if intent == "CREATE_EVENT":
+        if _has_multiple_event_actions(message):
+            response.update({
+                "draft_event": {
+                    "title": None,
+                    "date": None,
+                    "start_time": None,
+                    "end_time": None,
+                    "all_day": False,
+                    "is_reminder": False,
+                    "city": None,
+                    "district": None,
+                    "location": None,
+                    "location_optional": True,
+                    "location_requires_city": False,
+                },
+                "events": [],
+                "missing_fields": ["title"],
+                "needs_clarification": True,
+                "reply": "我聽到兩件行程，為了避免漏掉時間或地點，請一次告訴我一件事。",
+            })
+            return response
         existing = existing_draft
+        repeat = _repeat_kind(message)
+        response["repeat"] = repeat
         message_activity = _activity(message)
         if existing.get("title") and message_activity and message_activity not in str(existing.get("title") or ""):
             existing = {}
@@ -951,6 +1016,9 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             draft_date = None
         else:
             draft_date = now.strftime("%Y-%m-%d")
+        if repeat != "none" and draft_date:
+            while datetime.strptime(str(draft_date), "%Y-%m-%d").date() < now.date():
+                draft_date = _advance_repeat_date(str(draft_date), repeat)
         time_needs_clarification = _time_requires_clarification(message)
         past_time = False
         period_only = _normalize_period(message.strip(), 1) if message.strip() in TIME_PERIODS else ""
@@ -975,6 +1043,14 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             if time_needs_clarification and times:
                 _remember_ambiguous_times(draft_id, times)
                 response["_ambiguous_times"] = [value for _, value in times]
+        if repeat != "none" and past_time and draft_date:
+            draft_date = _advance_repeat_date(str(draft_date), repeat)
+            times, time_needs_clarification, past_time = _resolve_ambiguous_times(
+                message,
+                _time_mentions(message),
+                now,
+                str(draft_date),
+            )
         has_time_wording = bool(times) or time_needs_clarification
         is_reminder = bool(existing.get("is_reminder")) or bool(re.search(r"提醒我|幫我提醒|記得提醒我|提醒一下|叫我", message)) or bool(
             re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
@@ -985,7 +1061,19 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         explicit_location = _explicit_location_name(message)
         title = _draft_title(message)
         generic_location = _generic_location_name(message, title)
-        if existing.get("title") and not _activity(message) and not dates and (not times or period_only) and _is_draft_followup(message, now):
+        if (
+            existing.get("title")
+            and not _activity(message)
+            and not dates
+            and _is_draft_followup(message, now)
+            and (
+                times
+                or period_only
+                or location.get("city")
+                or location.get("location")
+                or payload.get("intent_hint") == "CREATE_EVENT"
+            )
+        ):
             title = None
         if explicit_location:
             location["location"] = explicit_location
@@ -1155,13 +1243,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             response["reply"] = "請先確認官方警報，避開危險區域並準備飲水、藥品、證件與行動電源。"
         return response
 
-    if _is_recurring_request(message):
-        response["reply"] = "目前還不支援每天或每週的重複行程，請先一次設定一個日期。"
-        response["_skip_gemini"] = True
-    elif _has_multiple_event_actions(message):
-        response["reply"] = "我一次先整理一筆行程，請把兩件事分開告訴我，避免漏掉時間或地點。"
-        response["_skip_gemini"] = True
-    elif _is_usage_help(message):
+    if _is_usage_help(message):
         response["reply"] = _usage_help_reply(message)
         response["_skip_gemini"] = True
     else:

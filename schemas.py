@@ -27,6 +27,9 @@ class ChatRequest(BaseModel):
     intent_hint: Optional[str] = None
     draft_id: Optional[str] = None
     draft_event: Optional[Dict[str, Any]] = None
+    pending_card: Optional[Dict[str, Any]] = None
+    recent_turns: List[Dict[str, Any]] = Field(default_factory=list)
+    context: Optional[Dict[str, Any]] = None
     channel: Literal["app", "line"] = "app"
 
 
@@ -94,6 +97,8 @@ class ChatCommandResponse(BaseModel):
     event_filter: Optional[Dict[str, Any]] = None
     changes: Optional[Dict[str, Any]] = None
     entities: Optional[Dict[str, Any]] = None
+    repeat: Literal["none", "daily", "weekly", "monthly"] = "none"
+    events: Optional[List[Dict[str, Any]]] = None
 
 
 class EventCreate(BaseModel):

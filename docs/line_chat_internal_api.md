@@ -18,9 +18,18 @@ use the same `BACKEND_INTERNAL_KEY` value.
   "current_location": null,
   "intent_hint": null,
   "draft_id": null,
-  "draft_event": null
+  "draft_event": null,
+  "pending_card": null,
+  "recent_turns": [],
+  "context": null
 }
 ```
+
+`pending_card`, `recent_turns`, and `context` are optional. When no card is
+active, send `pending_card: null`; the backend does not recover an abandoned
+draft from chat history. Repeating requests return `repeat` as `daily`,
+`weekly`, or `monthly` while the draft itself represents only the next
+occurrence.
 
 The response uses the same v2 contract as `POST /api/chat`. The endpoint never
 writes an event. A complete `CREATE_EVENT` response is still only a proposal.

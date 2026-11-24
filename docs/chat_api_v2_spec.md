@@ -4,7 +4,7 @@ This document describes the stable contract shared by the App, LINE bridge, and 
 
 ## Request
 
-`POST /api/chat` uses `contract_version: 2`, `message`, and `client_now`. `current_location` is query context only and must never be copied into an event draft. A follow-up may include `intent_hint`, `draft_id`, and `draft_event`.
+`POST /api/chat` uses `contract_version: 2`, `message`, and `client_now`. `current_location` is query context only and must never be copied into an event draft. A follow-up may include `intent_hint`, `draft_id`, and `draft_event`. New clients may additionally send `pending_card`, `recent_turns` (up to six UI-visible turns), and `context` (current weather and nearby event summaries). All three are optional. A null `draft_event`/`pending_card` means there is no active draft; the backend never restores one from `chat_logs`.
 
 ## Intents
 
@@ -27,6 +27,8 @@ When signals overlap, classify by the user's requested action in this order: `DE
 - Do not guess the city for private, generic, or chain locations such as `我家`, `學校`, `新光三越`, or `全聯`; retain supplied text in `location`. A city without a district remains city-only and never receives an invented default district in the draft.
 - Preserve complete station and landmark names such as `臺南火車站`, `臺北車站`, `高鐵臺中站`, `捷運西門站`, `板橋站`, and `臺北101/世貿站`; do not shorten them to a city or generic `火車站`/`車站` category.
 - Dates and weekdays are resolved only from `client_now`. A plain weekday is the nearest occurrence including today, `下週五` belongs to the following Monday-Sunday week, and a weekend begins on Saturday.
+- Repeating wording returns `repeat: daily|weekly|monthly` but prepares only the next occurrence. For example, after 18:10, `每天早上七點提醒我吃藥` prepares tomorrow at 07:00. The client explains that only this occurrence will be created.
+- A sentence containing two separate activities joined by `然後`/`接著` returns a clarification instead of silently dropping one activity or treating it as a location. The optional `events` response field is reserved for future multi-draft support.
 
 ## Response invariants
 
@@ -40,9 +42,10 @@ When signals overlap, classify by the user's requested action in this order: `DE
 - `/api/chat` only prepares a draft. It does not write events before explicit confirmation.
 - Gemini failures return `status: success`, `ai_failed: true`, `gemini_status: timeout|error`, and a non-empty temporary-failure reply; they must not produce an HTTP 500 or a false claim that an action was completed.
 - Draft, create, update, delete, and query replies describe preparation or lookup only. They never claim an event was added, changed, deleted, remembered, or scheduled before the user confirms it.
+- General-chat generation uses only `recent_turns` and `context` explicitly supplied by the client. It does not use server-side chat history to revive drafts or infer the user's current activity. Non-greeting replies do not force a self-introduction, are limited to three sentences, and are checked for false completion claims before delivery.
 - `/api/chat` and event mutation endpoints require `Authorization: Bearer <Supabase access_token>`. LINE uses `/api/chat/internal` with `X-Internal-Key`; authenticated user identity is never trusted from the request body.
 
-Text generation uses `GEMINI_TEXT_MODEL` (default `gemini-3.5-flash`). A transient 429/5xx or request timeout retries once with `GEMINI_TEXT_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`).
+Structured text generation uses `GEMINI_TEXT_MODEL` (default `gemini-3.5-flash`). General chat uses `GEMINI_CHAT_MODEL` (default `gemini-3.5-flash-lite`) and falls back to the text model. A transient 429/5xx or request timeout retries once. Gemini `usageMetadata` input/output/thinking/total token counts and the selected model are recorded in response timing, chat-log response payloads, and service logs.
 
 ## Examples
 

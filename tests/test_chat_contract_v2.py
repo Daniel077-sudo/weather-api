@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import main
 from chat_contract_v2 import build_chat_v2_response, extract_location_entities, validate_chat_v2_response
+from gemini_service import _sanitize_general_chat_reply
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -502,6 +503,35 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(result["draft_event"]["title"], "開會")
         self.assertEqual(result["draft_event"]["location"], "臺南大學")
 
+    def test_pending_card_location_follow_up_is_merged_without_fake_success(self):
+        result = build_chat_v2_response({
+            "message": "臺南東區",
+            "client_now": "2026-11-23T18:10:00+08:00",
+            "draft_id": "card-1",
+            "pending_card": {
+                "title": "開會",
+                "date": "2026-11-24",
+                "start_time": "15:00",
+                "all_day": False,
+            },
+        })
+        self.assertEqual(result["intent"], "CREATE_EVENT")
+        self.assertEqual(result["draft_id"], "card-1")
+        self.assertEqual(result["draft_event"]["title"], "開會")
+        self.assertEqual(result["draft_event"]["city"], "臺南市")
+        self.assertEqual(result["draft_event"]["district"], "東區")
+        self.assertIn("確認後", result["reply"])
+
+        changed_time = build_chat_v2_response({
+            "message": "改到四點",
+            "client_now": "2026-11-23T18:10:00+08:00",
+            "draft_id": "card-1",
+            "pending_card": result["draft_event"],
+        })
+        self.assertEqual(changed_time["intent"], "CREATE_EVENT")
+        self.assertEqual(changed_time["draft_event"]["title"], "開會")
+        self.assertEqual(changed_time["draft_event"]["start_time"], "16:00")
+
     def test_create_event_supports_at_location_and_duration(self):
         result = build_chat_v2_response(self.payload_for({"input": "週六下午兩點開會兩小時＠信義區"}))
         self.assertEqual(result["intent"], "CREATE_EVENT")
@@ -598,8 +628,10 @@ class ChatContractV2Tests(unittest.TestCase):
                 self.assertTrue(result.get("_skip_gemini"))
 
         recurring = build_chat_v2_response({"message": "每天早上七點提醒我吃藥", "client_now": now})
-        self.assertEqual(recurring["intent"], "GENERAL_CHAT")
-        self.assertIn("重複行程", recurring["reply"])
+        self.assertEqual(recurring["intent"], "CREATE_EVENT")
+        self.assertEqual(recurring["repeat"], "daily")
+        self.assertEqual(recurring["draft_event"]["date"], "2026-11-24")
+        self.assertEqual(recurring["draft_event"]["start_time"], "07:00")
         return_trip = build_chat_v2_response({"message": "回台南", "client_now": now})
         self.assertEqual(return_trip["draft_event"]["title"], "回台南")
 
@@ -612,8 +644,14 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(multiple["draft_event"]["dates"], ["2026-11-25", "2026-11-26", "2026-11-27"])
 
         split_required = build_chat_v2_response({"message": "後天早上看醫生然後下午上課", "client_now": now})
-        self.assertEqual(split_required["intent"], "GENERAL_CHAT")
-        self.assertIn("分開", split_required["reply"])
+        self.assertEqual(split_required["intent"], "CREATE_EVENT")
+        self.assertTrue(split_required["needs_clarification"])
+        self.assertEqual(split_required["events"], [])
+        self.assertIn("一次", split_required["reply"])
+
+        conditional = build_chat_v2_response({"message": "如果明天沒下雨就去爬山", "client_now": now})
+        self.assertEqual(conditional["intent"], "EVENT_WEATHER")
+        self.assertEqual(conditional["entities"]["activity"], "爬山")
 
     def test_mutation_target_filter_selects_only_editable_matching_event(self):
         events = [
@@ -627,6 +665,25 @@ class ChatContractV2Tests(unittest.TestCase):
             "取消明天的開會",
         )
         self.assertEqual([event["id"] for event in selected], [501])
+
+    def test_general_reply_sanitizer_blocks_context_leaks_and_false_success(self):
+        self.assertEqual(
+            _sanitize_general_chat_reply("我是小藍。今天辛苦了。", "我好累喔", "小藍", None),
+            "今天辛苦了。",
+        )
+        self.assertEqual(
+            _sanitize_general_chat_reply("收到，明天開會記得準時。", "臺南東區", "小藍", None),
+            "",
+        )
+        self.assertEqual(
+            _sanitize_general_chat_reply(
+                "明天的牙醫看起來很重要。",
+                "你猜",
+                "小藍",
+                {"events": [{"title": "牙醫"}]},
+            ),
+            "",
+        )
 
     def test_contract_validator_blocks_invalid_mobile_payload(self):
         invalid = {
