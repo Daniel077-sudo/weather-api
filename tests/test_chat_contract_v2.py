@@ -480,6 +480,41 @@ class ChatContractV2Tests(unittest.TestCase):
                 self.assertEqual(result["draft_event"]["end_time"], end_time)
                 self.assertEqual(result["time_guessed"], guessed)
 
+    def test_invalid_dates_and_times_require_correction(self):
+        invalid_dates = [
+            ("2/30下午3點開會", "15:00"),
+            ("12/32下午3點比賽", "15:00"),
+            ("13/15早上9點看醫生", "09:00"),
+        ]
+        for message, expected_time in invalid_dates:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                    "current_location": "臺南市東區",
+                })
+                self.assertEqual(result["intent"], "CREATE_EVENT")
+                self.assertIsNone(result["draft_event"]["date"])
+                self.assertEqual(result["draft_event"]["start_time"], expected_time)
+                self.assertIn("date", result["missing_fields"])
+                self.assertNotIn("start_time", result["missing_fields"])
+                self.assertIn("日期好像不正確", result["reply"])
+
+        for message in ["明天25:00開會", "明天下午3:60開會"]:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                    "current_location": "臺南市東區",
+                })
+                self.assertEqual(result["intent"], "CREATE_EVENT")
+                self.assertIsNone(result["draft_event"]["start_time"])
+                self.assertFalse(result["draft_event"]["all_day"])
+                self.assertIn("start_time", result["missing_fields"])
+                self.assertIn("時間好像不正確", result["reply"])
+
     def test_event_operation_questions_return_help_without_creating_drafts(self):
         cases = {
             "怎麼新增行程": ["整理成草稿", "確認後才加入"],

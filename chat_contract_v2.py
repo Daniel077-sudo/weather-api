@@ -617,6 +617,26 @@ def _has_date_wording(message: str) -> bool:
     return bool(re.search(r"明年|今天|明天|後天|大後天|週末|周末|星期|禮拜|週|周|\d{1,2}\s*(?:/|月)\s*\d{1,2}|\d{1,2}\s*(?:日|號|号)", message))
 
 
+def _has_invalid_date_wording(message: str, now: datetime) -> bool:
+    if _date_mentions(message, now):
+        return False
+    return bool(
+        re.search(r"\d{1,2}\s*(?:/|月)\s*\d{1,2}\s*(?:日|號|号)?", message)
+        or re.search(r"(?<![月/\d])\d{1,2}\s*(?:日|號|号)", message)
+    )
+
+
+def _has_invalid_time_wording(message: str) -> bool:
+    normalized = _normalize_dot_clocks(message)
+    numeric = re.compile(r"(?<!\d)(\d{1,2})\s*(?:點|时|時|:|：)\s*(\d{1,2})?\s*(?:分)?")
+    for match in numeric.finditer(normalized):
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        if hour > 23 or minute > 59:
+            return True
+    return False
+
+
 def _is_recurring_request(message: str) -> bool:
     return bool(re.search(r"每天|每日|每週|每周|每星期|每禮拜|每個月|每月", message))
 
@@ -1055,6 +1075,8 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             response["draft_id"] = draft_id
         dates = _date_mentions(message, now)
         times = _time_mentions(message)
+        invalid_date = _has_invalid_date_wording(message, now)
+        invalid_time = _has_invalid_time_wording(message)
         if dates:
             draft_date = dates[0][1]
         elif existing.get("date"):
@@ -1078,7 +1100,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
                 message,
                 times,
                 now,
-                str(draft_date or now.date().isoformat()),
+                str(draft_date or (now + timedelta(days=1)).date().isoformat()),
             )
             AMBIGUOUS_DRAFT_TIMES.pop(str(draft_id), None)
         else:
@@ -1086,7 +1108,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
                 message,
                 times,
                 now,
-                str(draft_date or now.date().isoformat()),
+                str(draft_date or (now + timedelta(days=1)).date().isoformat()),
             )
             if time_needs_clarification and times:
                 _remember_ambiguous_times(draft_id, times)
@@ -1105,7 +1127,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             and not time_needs_clarification
             and not past_time
         )
-        has_time_wording = bool(times) or time_needs_clarification
+        has_time_wording = bool(times) or time_needs_clarification or invalid_time
         is_reminder = bool(existing.get("is_reminder")) or bool(re.search(r"提醒我|幫我提醒|記得提醒我|提醒一下|叫我", message)) or bool(
             re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
         )
@@ -1179,7 +1201,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
                 else (_add_minutes(start_time, duration) if duration else existing.get("end_time"))
             )
             all_day = False
-        elif time_needs_clarification:
+        elif time_needs_clarification or invalid_time:
             start_time = existing_start
             end_time = existing.get("end_time")
             all_day = False
@@ -1224,7 +1246,9 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             if first_missing == "title":
                 reply = "要記成什麼行程呢？"
             elif first_missing == "date":
-                reply = "哪一天呢？"
+                reply = "日期好像不正確，請再確認是哪一天。" if invalid_date else "哪一天呢？"
+            elif first_missing == "start_time" and invalid_time:
+                reply = "時間好像不正確，請再確認是幾點。"
             elif first_missing == "start_time" and past_time:
                 reply = "這個時間今天已經過了，要改成幾點呢？"
             elif first_missing == "start_time" and times and time_needs_clarification:
