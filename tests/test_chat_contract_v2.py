@@ -460,9 +460,12 @@ class ChatContractV2Tests(unittest.TestCase):
         cases = [
             ("明天下午3.接小孩", "15:00", None, False),
             ("明天下午3.15表演", "15:15", None, False),
+            ("明天下午３．１５表演", "15:15", None, False),
             ("明天3.15練習", "15:15", None, True),
             ("明天15.30看醫生", "15:30", None, False),
             ("明天15.00到17.30比賽", "15:00", "17:30", False),
+            ("明天下午3:15到5:45比賽", "15:15", "17:45", False),
+            ("明天下午3.15到5.45比賽", "15:15", "17:45", False),
         ]
         for message, start_time, end_time, guessed in cases:
             with self.subTest(message=message):

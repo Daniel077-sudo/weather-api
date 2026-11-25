@@ -289,7 +289,7 @@ def _resolve_ambiguous_times(
 def _normalize_dot_clocks(message: str) -> str:
     """Treat 3. and 3.15 as clock notation while preserving string offsets."""
     return re.sub(
-        r"(?<!\d)(\d{1,2})\.(?=(?:\d{1,2})?(?!\d))",
+        r"(?<!\d)(\d{1,2})[.．](?=(?:\d{1,2})?(?!\d))",
         lambda match: match.group(1) + ":",
         message,
     )
@@ -297,6 +297,8 @@ def _normalize_dot_clocks(message: str) -> str:
 
 def _time_range_mentions(message: str) -> List[Tuple[Tuple[int, int], str]]:
     message = _normalize_dot_clocks(message)
+    message = re.sub(r"(?<=\d)[:：](?=\d{1,2}(?!\d))", "點", message)
+    message = re.sub(r"(?<=\d)[:：](?!\d)", "點", message)
     hour = r"十一|十二|十|[一二兩三四五六七八九]|\d{1,2}"
     period = r"凌晨|早上|上午|中午|下午|傍晚|晚上|今晚|明晚|今早|明早|半夜|深夜|晚"
     minute = r"半|[零〇一二兩三四五六七八九十]{1,3}|\d{1,2}(?!\s*樓)"
