@@ -422,7 +422,10 @@ def build_own_weather_answer(
                     lines.append(" ".join(parts))
             range_label = f"{start_date} 至 {end_date}"
             subject = "每日降雨機率" if detail_type == "rain_probability" else "每日預報"
-            reply = f"{location}{range_label}{subject}：" + "；".join(lines) + "。" + _multi_day_rain_advice(daily)
+            advice = _multi_day_rain_advice(daily)
+            reply = f"{location}{range_label}{subject}：\n" + "\n".join(lines)
+            if advice:
+                reply += f"\n{advice}"
         else:
             reply = f"目前讀不到{location}{start_date}至{end_date}的每日預報資料。"
     elif detail_type == "humidity":
