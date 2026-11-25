@@ -456,6 +456,27 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(weather["intent"], "EVENT_WEATHER")
         self.assertEqual(weather["entities"]["activity"], "比賽")
 
+    def test_dot_clock_notation_is_supported(self):
+        cases = [
+            ("明天下午3.接小孩", "15:00", None, False),
+            ("明天下午3.15表演", "15:15", None, False),
+            ("明天3.15練習", "15:15", None, True),
+            ("明天15.30看醫生", "15:30", None, False),
+            ("明天15.00到17.30比賽", "15:00", "17:30", False),
+        ]
+        for message, start_time, end_time, guessed in cases:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                    "current_location": "臺南市東區",
+                })
+                self.assertEqual(result["intent"], "CREATE_EVENT")
+                self.assertEqual(result["draft_event"]["start_time"], start_time)
+                self.assertEqual(result["draft_event"]["end_time"], end_time)
+                self.assertEqual(result["time_guessed"], guessed)
+
     def test_event_operation_questions_return_help_without_creating_drafts(self):
         cases = {
             "怎麼新增行程": ["整理成草稿", "確認後才加入"],
