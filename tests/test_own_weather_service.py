@@ -123,8 +123,19 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertIn("20%", result["reply"])
         self.assertIn("40%", result["reply"])
         self.assertIn("70%", result["reply"])
+        self.assertIn("很可能下雨，帶傘或雨衣", result["reply"])
+        self.assertIn("可能會下雨，帶把傘備用", result["reply"])
         self.assertNotIn("氣溫 28", result["reply"])
         self.assertEqual(len(result["weather_summary"]["daily"]), 3)
+
+        dry = build_own_weather_answer(
+            "臺南市", "中西區", "未來三天降雨機率", start, end, [],
+            [{"daily": [
+                {"date": (today + timedelta(days=index)).isoformat(), "pop": pop}
+                for index, pop in enumerate([0, 10, 20])
+            ], "updated_at": taipei_now().isoformat()}],
+        )
+        self.assertNotIn("帶傘", dry["reply"])
 
     def test_daily_array_is_expanded(self):
         tomorrow = (taipei_now().date() + timedelta(days=1)).isoformat()

@@ -284,6 +284,29 @@ def _range_text(values: List[float], suffix: str = "") -> str:
     return f"{low_text}{suffix}" if low == high else f"{low_text}–{high_text}{suffix}"
 
 
+def _multi_day_rain_advice(daily: List[Dict[str, Any]]) -> str:
+    medium_dates: List[str] = []
+    high_dates: List[str] = []
+    for item in daily:
+        try:
+            pop = float(_percent_text(item.get("pop")))
+        except (TypeError, ValueError):
+            continue
+        date_text = str(item.get("date") or "")
+        label = date_text[5:].replace("-", "/") if len(date_text) >= 10 else date_text
+        if pop >= 50:
+            high_dates.append(label)
+        elif pop >= 30:
+            medium_dates.append(label)
+
+    advice = []
+    if high_dates:
+        advice.append(f"{'、'.join(high_dates)}很可能下雨，帶傘或雨衣")
+    if medium_dates:
+        advice.append(f"{'、'.join(medium_dates)}可能會下雨，帶把傘備用")
+    return "；".join(advice) + ("。" if advice else "")
+
+
 def _no_data_reply(location: str, detail_type: str) -> str:
     labels = {
         "humidity": "濕度",
@@ -399,7 +422,7 @@ def build_own_weather_answer(
                     lines.append(" ".join(parts))
             range_label = f"{start_date} 至 {end_date}"
             subject = "每日降雨機率" if detail_type == "rain_probability" else "每日預報"
-            reply = f"{location}{range_label}{subject}：" + "；".join(lines) + "。"
+            reply = f"{location}{range_label}{subject}：" + "；".join(lines) + "。" + _multi_day_rain_advice(daily)
         else:
             reply = f"目前讀不到{location}{start_date}至{end_date}的每日預報資料。"
     elif detail_type == "humidity":
