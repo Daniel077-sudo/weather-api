@@ -411,6 +411,51 @@ class ChatContractV2Tests(unittest.TestCase):
                 self.assertEqual(result["draft_event"]["district"], district)
                 self.assertEqual(result["draft_event"]["location"], location)
 
+    def test_family_pickup_performance_competition_and_practice_intents(self):
+        create_cases = [
+            ("明天接小孩", "接小孩", "2026-11-26", None),
+            ("明天下午三點表演", "表演", "2026-11-26", "15:00"),
+            ("提醒我明天晚上七點比賽", "比賽", "2026-11-26", "19:00"),
+            ("後天早上九點練習", "練習", "2026-11-27", "09:00"),
+        ]
+        for message, title, date, start_time in create_cases:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                    "current_location": "臺南市東區",
+                })
+                self.assertEqual(result["intent"], "CREATE_EVENT")
+                self.assertEqual(result["draft_event"]["title"], title)
+                self.assertEqual(result["draft_event"]["date"], date)
+                self.assertEqual(result["draft_event"]["start_time"], start_time)
+
+        deletion = build_chat_v2_response({
+            "message": "取消明天的比賽",
+            "contract_version": 2,
+            "client_now": "2026-11-25T14:00:00+08:00",
+        })
+        self.assertEqual(deletion["intent"], "DELETE_EVENT")
+        self.assertEqual(deletion["event_filter"]["title_keyword"], "比賽")
+
+        update = build_chat_v2_response({
+            "message": "把明天的練習改到下午四點",
+            "contract_version": 2,
+            "client_now": "2026-11-25T14:00:00+08:00",
+        })
+        self.assertEqual(update["intent"], "UPDATE_EVENT")
+        self.assertEqual(update["event_filter"]["title_keyword"], "練習")
+        self.assertEqual(update["changes"]["start_time"], "16:00")
+
+        weather = build_chat_v2_response({
+            "message": "明天去臺南比賽會下雨嗎",
+            "contract_version": 2,
+            "client_now": "2026-11-25T14:00:00+08:00",
+        })
+        self.assertEqual(weather["intent"], "EVENT_WEATHER")
+        self.assertEqual(weather["entities"]["activity"], "比賽")
+
     def test_event_operation_questions_return_help_without_creating_drafts(self):
         cases = {
             "怎麼新增行程": ["整理成草稿", "確認後才加入"],
