@@ -103,7 +103,10 @@ class OwnWeatherServiceTests(unittest.TestCase):
         today = taipei_now().date()
         daily_rows = [{
             "daily": [
-                {"date": (today + timedelta(days=index)).isoformat(), "description": "多雲", "min_t": 22, "max_t": 29, "pop": pop}
+                {
+                    "date": (today + timedelta(days=index)).isoformat(), "description": "多雲",
+                    "min_t": 22, "max_t": 29, "app_min": 23, "app_max": 31, "rh": 78, "pop": pop,
+                }
                 for index, pop in enumerate([20, 40, 70])
             ],
             "updated_at": taipei_now().isoformat(),
@@ -119,16 +122,21 @@ class OwnWeatherServiceTests(unittest.TestCase):
             daily_rows,
         )
 
-        self.assertIn("每日降雨機率", result["reply"])
+        self.assertIn("每日天氣與降雨提醒", result["reply"])
+        self.assertEqual(result["reply"].count("降雨機率"), 3)
+        self.assertEqual(result["reply"].count("多雲"), 3)
+        self.assertEqual(result["reply"].count("氣溫 22–29°C"), 3)
+        self.assertEqual(result["reply"].count("體感 23–31°C"), 3)
+        self.assertEqual(result["reply"].count("平均濕度 78%"), 3)
         self.assertIn("20%", result["reply"])
         self.assertIn("40%", result["reply"])
         self.assertIn("70%", result["reply"])
         self.assertIn("很可能下雨，帶傘或雨衣", result["reply"])
         self.assertIn("可能會下雨，帶把傘備用", result["reply"])
         self.assertNotIn("氣溫 28", result["reply"])
-        self.assertEqual(result["reply"].count("\n"), 4)
+        self.assertEqual(result["reply"].count("\n"), 3)
         self.assertIn("\n" + (today + timedelta(days=1)).strftime("%m/%d"), result["reply"])
-        self.assertTrue(result["reply"].splitlines()[-1].endswith("帶把傘備用。"))
+        self.assertTrue(result["reply"].splitlines()[-1].endswith("帶傘或雨衣。"))
         self.assertEqual(len(result["weather_summary"]["daily"]), 3)
 
         dry = build_own_weather_answer(
@@ -140,6 +148,7 @@ class OwnWeatherServiceTests(unittest.TestCase):
         )
         self.assertNotIn("帶傘", dry["reply"])
         self.assertEqual(dry["reply"].count("\n"), 3)
+        self.assertEqual(dry["reply"].count("降雨機會較低"), 3)
 
     def test_daily_array_is_expanded(self):
         tomorrow = (taipei_now().date() + timedelta(days=1)).isoformat()

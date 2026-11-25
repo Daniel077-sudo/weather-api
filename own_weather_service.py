@@ -41,7 +41,9 @@ def _value(objects: Iterable[Dict[str, Any]], keys: Iterable[str]) -> Any:
 
 
 def _percent_text(value: Any) -> str:
-    return str(value or "").strip().removesuffix("%").strip()
+    if value is None:
+        return ""
+    return str(value).strip().removesuffix("%").strip()
 
 
 def _column(columns: set[str], candidates: Iterable[str]) -> Optional[str]:
@@ -284,27 +286,18 @@ def _range_text(values: List[float], suffix: str = "") -> str:
     return f"{low_text}{suffix}" if low == high else f"{low_text}–{high_text}{suffix}"
 
 
-def _multi_day_rain_advice(daily: List[Dict[str, Any]]) -> str:
-    medium_dates: List[str] = []
-    high_dates: List[str] = []
-    for item in daily:
-        try:
-            pop = float(_percent_text(item.get("pop")))
-        except (TypeError, ValueError):
-            continue
-        date_text = str(item.get("date") or "")
-        label = date_text[5:].replace("-", "/") if len(date_text) >= 10 else date_text
-        if pop >= 50:
-            high_dates.append(label)
-        elif pop >= 30:
-            medium_dates.append(label)
-
-    advice = []
-    if high_dates:
-        advice.append(f"{'、'.join(high_dates)}很可能下雨，帶傘或雨衣")
-    if medium_dates:
-        advice.append(f"{'、'.join(medium_dates)}可能會下雨，帶把傘備用")
-    return "；".join(advice) + ("。" if advice else "")
+def _daily_rain_advice(pop_value: Any) -> str:
+    if pop_value in (None, ""):
+        return "降雨機率暫無資料，出發前請再確認最新預報"
+    try:
+        pop = float(_percent_text(pop_value))
+    except (TypeError, ValueError):
+        return "降雨機率暫無資料，出發前請再確認最新預報"
+    if pop >= 50:
+        return f"降雨機率 {_percent_text(pop_value)}%，很可能下雨，帶傘或雨衣"
+    if pop >= 30:
+        return f"降雨機率 {_percent_text(pop_value)}%，可能會下雨，帶把傘備用"
+    return f"降雨機率 {_percent_text(pop_value)}%，降雨機會較低"
 
 
 def _no_data_reply(location: str, detail_type: str) -> str:
@@ -407,25 +400,17 @@ def build_own_weather_answer(
             for item in daily:
                 date_text = str(item.get("date") or "")
                 label = date_text[5:].replace("-", "/") if len(date_text) >= 10 else date_text
-                if detail_type == "rain_probability":
-                    pop_value = item.get("pop")
-                    rain_text = f"{_percent_text(pop_value)}%" if pop_value not in (None, "") else "暫無資料"
-                    lines.append(f"{label} {rain_text}")
-                else:
-                    parts = [label]
-                    if item.get("description"):
-                        parts.append(str(item["description"]))
-                    if item.get("temp_min") not in (None, "") and item.get("temp_max") not in (None, ""):
-                        parts.append(f"{item['temp_min']}–{item['temp_max']}°C")
-                    if item.get("pop") not in (None, ""):
-                        parts.append(f"降雨機率 {_percent_text(item['pop'])}%")
-                    lines.append(" ".join(parts))
+                parts = [str(item.get("description") or "天氣現象暫無資料")]
+                if item.get("temp_min") not in (None, "") and item.get("temp_max") not in (None, ""):
+                    parts.append(f"氣溫 {item['temp_min']}–{item['temp_max']}°C")
+                if item.get("app_min") not in (None, "") and item.get("app_max") not in (None, ""):
+                    parts.append(f"體感 {item['app_min']}–{item['app_max']}°C")
+                if item.get("rh") not in (None, ""):
+                    parts.append(f"平均濕度 {_percent_text(item['rh'])}%")
+                parts.append(_daily_rain_advice(item.get("pop")))
+                lines.append(f"{label}：" + "；".join(parts) + "。")
             range_label = f"{start_date} 至 {end_date}"
-            subject = "每日降雨機率" if detail_type == "rain_probability" else "每日預報"
-            advice = _multi_day_rain_advice(daily)
-            reply = f"{location}{range_label}{subject}：\n" + "\n".join(lines)
-            if advice:
-                reply += f"\n{advice}"
+            reply = f"{location}{range_label}每日天氣與降雨提醒：\n" + "\n".join(lines)
         else:
             reply = f"目前讀不到{location}{start_date}至{end_date}的每日預報資料。"
     elif detail_type == "humidity":
