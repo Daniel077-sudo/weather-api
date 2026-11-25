@@ -99,6 +99,33 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertIn("體感 23–32°C", result["reply"])
         self.assertEqual(result["weather_summary"]["daily"][0]["app_max"], 32)
 
+    def test_three_day_rain_probability_lists_each_day_without_current_temperature(self):
+        today = taipei_now().date()
+        daily_rows = [{
+            "daily": [
+                {"date": (today + timedelta(days=index)).isoformat(), "description": "多雲", "min_t": 22, "max_t": 29, "pop": pop}
+                for index, pop in enumerate([20, 40, 70])
+            ],
+            "updated_at": taipei_now().isoformat(),
+        }]
+        start = today.isoformat()
+        end = (today + timedelta(days=2)).isoformat()
+
+        result = build_own_weather_answer(
+            "臺南市", "中西區", "未來三天的降雨機率", start, end,
+            [{"valid_until": (taipei_now() + timedelta(minutes=30)).isoformat(), "weather_data": {
+                "current": {"temp": 28, "pop": 10, "description": "晴"},
+            }}],
+            daily_rows,
+        )
+
+        self.assertIn("每日降雨機率", result["reply"])
+        self.assertIn("20%", result["reply"])
+        self.assertIn("40%", result["reply"])
+        self.assertIn("70%", result["reply"])
+        self.assertNotIn("氣溫 28", result["reply"])
+        self.assertEqual(len(result["weather_summary"]["daily"]), 3)
+
     def test_daily_array_is_expanded(self):
         tomorrow = (taipei_now().date() + timedelta(days=1)).isoformat()
         rows = [{

@@ -417,7 +417,8 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(result["draft_event"]["title"], "準備期中考")
         self.assertEqual(result["draft_event"]["start_time"], "13:00")
         self.assertTrue(result["draft_event"]["is_reminder"])
-        self.assertIsNone(result["draft_event"]["location"])
+        self.assertEqual(result["draft_event"]["location"], "高雄市左營區")
+        self.assertEqual(result["draft_event"]["location_source"], "current_location")
 
     def test_chain_landmark_keeps_location_without_requiring_city(self):
         payload = self.payload_for({"input": "明天下午三點開會，地點在新光三越"})
@@ -491,15 +492,32 @@ class ChatContractV2Tests(unittest.TestCase):
                 if "什麼時候" in message or "下次" in message:
                     self.assertEqual(result["entities"]["end_date"], "2026-09-29")
 
-    def test_current_location_is_not_copied_and_all_event_locations_are_optional(self):
-        for message in ["今天晚上八點要倒垃圾", "明天早上九點去銀行", "明天下午三點開會"]:
+    def test_current_location_fills_only_events_without_an_explicit_place(self):
+        for message in ["今天晚上八點要倒垃圾", "明天下午三點開會"]:
             with self.subTest(message=message):
                 result = build_chat_v2_response(self.payload_for({"input": message}))
                 self.assertEqual(result["intent"], "CREATE_EVENT")
-                self.assertIsNone(result["draft_event"]["city"])
+                self.assertEqual(result["draft_event"]["city"], "高雄市")
+                self.assertEqual(result["draft_event"]["district"], "左營區")
+                self.assertEqual(result["draft_event"]["location_source"], "current_location")
                 self.assertNotIn("city", result["missing_fields"])
                 if "倒垃圾" in message:
                     self.assertEqual(result["draft_event"]["title"], "倒垃圾")
+
+        generic_place = build_chat_v2_response(self.payload_for({"input": "明天早上九點去銀行"}))
+        self.assertIsNone(generic_place["draft_event"]["city"])
+        self.assertEqual(generic_place["draft_event"]["location"], "銀行")
+
+        explicit = build_chat_v2_response(self.payload_for({"input": "明天下午三點在新光三越開會"}))
+        self.assertIsNone(explicit["draft_event"]["city"])
+        self.assertEqual(explicit["draft_event"]["location"], "新光三越")
+        self.assertEqual(explicit["draft_event"]["location_source"], "message")
+
+    def test_future_three_days_weather_range_is_not_reduced_to_today(self):
+        result = build_chat_v2_response(self.payload_for({"input": "未來三天的降雨機率如何？"}))
+        self.assertEqual(result["intent"], "QUERY_WEATHER")
+        self.assertEqual(result["entities"]["start_date"], "2026-09-23")
+        self.assertEqual(result["entities"]["end_date"], "2026-09-25")
 
     def test_unrelated_message_does_not_continue_existing_draft(self):
         payload = self.payload_for({"input": "我今天心情不錯"})

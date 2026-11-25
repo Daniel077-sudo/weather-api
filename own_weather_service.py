@@ -238,6 +238,7 @@ def _humidity_level(value: Any) -> str:
 def _detail_type(message: str) -> str:
     checks = [
         ("detail", ("詳細天氣", "天氣資料", "氣象資料", "觀測", "測站", "日照")),
+        ("rain_probability", ("降雨機率", "下雨機率", "會下雨", "可能下雨")),
         ("feels_like", ("體感",)),
         ("dew", ("露點",)),
         ("humidity", ("濕度", "溼度", "潮濕", "很濕", "乾燥", "悶熱", "好悶")),
@@ -292,6 +293,7 @@ def _no_data_reply(location: str, detail_type: str) -> str:
         "moon": "月出月落",
         "pressure": "氣壓",
         "rainfall": "累積雨量",
+        "rain_probability": "降雨機率",
         "visibility": "能見度",
         "wind": "風速風向",
         "detail": "詳細天氣",
@@ -374,8 +376,33 @@ def build_own_weather_answer(
     hourly_humidity = _hourly_values(hourly, ("humidity", "hum", "rh"))
     hourly_app = _hourly_values(hourly, ("app_temp", "apparent_temperature"))
     hourly_dew = _hourly_values(hourly, ("dew_point", "dew"))
+    multi_day = bool(start_date and end_date and start_date != end_date)
 
-    if detail_type == "humidity":
+    if multi_day:
+        if daily:
+            lines = []
+            for item in daily:
+                date_text = str(item.get("date") or "")
+                label = date_text[5:].replace("-", "/") if len(date_text) >= 10 else date_text
+                if detail_type == "rain_probability":
+                    pop_value = item.get("pop")
+                    rain_text = f"{_percent_text(pop_value)}%" if pop_value not in (None, "") else "暫無資料"
+                    lines.append(f"{label} {rain_text}")
+                else:
+                    parts = [label]
+                    if item.get("description"):
+                        parts.append(str(item["description"]))
+                    if item.get("temp_min") not in (None, "") and item.get("temp_max") not in (None, ""):
+                        parts.append(f"{item['temp_min']}–{item['temp_max']}°C")
+                    if item.get("pop") not in (None, ""):
+                        parts.append(f"降雨機率 {_percent_text(item['pop'])}%")
+                    lines.append(" ".join(parts))
+            range_label = f"{start_date} 至 {end_date}"
+            subject = "每日降雨機率" if detail_type == "rain_probability" else "每日預報"
+            reply = f"{location}{range_label}{subject}：" + "；".join(lines) + "。"
+        else:
+            reply = f"目前讀不到{location}{start_date}至{end_date}的每日預報資料。"
+    elif detail_type == "humidity":
         parts = []
         if humidity not in (None, ""):
             source_note = station_note if humidity_source == "observation" else "（預報）"

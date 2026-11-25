@@ -966,6 +966,12 @@ def _entity_dates(message: str, now: datetime, default_today: bool = False) -> T
     weekend = _weekend_range(message, now)
     if weekend:
         return weekend
+    day_count_match = re.search(r"(?:未來|接下來|往後)?\s*([2-8二兩三四五六七八])\s*天", message)
+    if day_count_match:
+        day_count = {
+            "二": 2, "兩": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8,
+        }.get(day_count_match.group(1), int(day_count_match.group(1)) if day_count_match.group(1).isdigit() else 3)
+        return now.strftime("%Y-%m-%d"), (now + timedelta(days=day_count - 1)).strftime("%Y-%m-%d")
     if any(word in message for word in [
         "這週", "本週", "一週", "未來一週", "七天", "未來七天", "未來幾天",
         "雨什麼時候", "雨會下到", "雨要下多久", "什麼時候會下雨",
@@ -1076,6 +1082,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         current_location = _location(_text(payload.get("current_location"))) if payload.get("current_location") else {}
         preferred_city = existing.get("city") or current_location.get("city")
         location = _location(message, preferred_city)
+        location_source = "message" if any(location.get(key) for key in ["city", "district", "location"]) else None
         explicit_location = _explicit_location_name(message)
         title = _draft_title(message)
         generic_location = _generic_location_name(message, title)
@@ -1099,6 +1106,18 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             location["location"] = generic_location
         elif existing and not dates and not times and not _activity(message) and not any(period in message for period in TIME_PERIODS) and _is_draft_followup(message, now):
             location["location"] = message
+            location_source = "message"
+        if (
+            not any(location.get(key) for key in ["city", "district", "location"])
+            and not any(existing.get(key) for key in ["city", "district", "location"])
+            and current_location.get("city")
+        ):
+            location = {
+                "city": current_location.get("city"),
+                "district": current_location.get("district"),
+                "location": _text(payload.get("current_location")) or current_location.get("location"),
+            }
+            location_source = "current_location"
         existing_start = existing.get("start_time")
         if times and not time_needs_clarification:
             start_time = times[0][1]
@@ -1131,6 +1150,7 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             "city": location["city"] if location["city"] is not None else existing.get("city"),
             "district": location["district"] if location["city"] is not None else existing.get("district"),
             "location": location["location"] if location["location"] is not None else existing.get("location"),
+            "location_source": location_source or existing.get("location_source"),
         }
         unique_dates = list(dict.fromkeys(value for _, value in dates))
         if len(unique_dates) > 1:

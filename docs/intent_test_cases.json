@@ -77,7 +77,7 @@
     {
       "id": "create-06-no-city",
       "input": "明天早上九點開會",
-      "_備註": "沒講地點：不可自動填 current_location（高雄市），地點選填並保留空值",
+      "_備註": "沒講地點：使用 request 的 current_location 作為定位推定，地點仍為選填",
       "expect": {
         "intent": "CREATE_EVENT",
         "needs_clarification": false,
@@ -85,7 +85,7 @@
           "title": "開會",
           "date": "2026-09-24",
           "start_time": "09:00",
-          "city": null
+          "city": "高雄市"
         }
       }
     },
@@ -429,7 +429,7 @@
           "title": "上班",
           "date": "2026-09-23",
           "start_time": null,
-          "city": null
+          "city": "高雄市"
         },
         "missing_fields_include": [
           "start_time"
@@ -458,7 +458,7 @@
           "title": "吃飯",
           "date": "2026-09-24",
           "start_time": "19:00",
-          "city": null
+          "city": "高雄市"
         }
       }
     },
@@ -834,7 +834,7 @@
           "title": "倒垃圾",
           "date": "2026-09-23",
           "start_time": "20:00",
-          "city": null
+          "city": "高雄市"
         }
       }
     },
