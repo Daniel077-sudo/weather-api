@@ -396,7 +396,7 @@ def _station_phrase(message: str) -> Optional[str]:
     cleaned = message
     spans = [span for span, _ in _date_mentions(message, datetime.now(TAIPEI_TZ))]
     spans.extend(span for span, _ in _time_mentions(message))
-    for start, end in sorted(spans, reverse=True):
+    for start, end in sorted(set(spans), reverse=True):
         cleaned = cleaned[:start] + " " + cleaned[end:]
     cleaned = re.sub(
         r"記得提醒我|幫我提醒|提醒我|提醒一下|叫我|記得|幫我|我要|我想|新增|加入|安排|建立|排行程",
@@ -405,10 +405,15 @@ def _station_phrase(message: str) -> Optional[str]:
     )
     cleaned = re.sub(r"^(?:\s|我|我們|要|會|去|到|在|前往)+", "", cleaned)
 
+    station_prefix = r"(?:高鐵|臺鐵|台鐵|捷運|輕軌)[^\s，。！？!?]{1,20}?站"
+    named_station = r"[^\s，。！？!?]{1,24}(?:火車站|高鐵站|捷運站|轉運站|車站)"
+    generic_station = r"[^\s，。！？!?]{1,24}站(?=$|[\s，。！？!?]|集合|搭車|開會|上車|下車|轉車)"
     patterns = [
-        r"((?:高鐵|臺鐵|台鐵|捷運|輕軌)[^\s，。！？!?]{1,20}?站)",
-        r"([^\s，。！？!?]{1,20}?(?:火車站|高鐵站|捷運站|轉運站|車站))",
-        r"([^\s，。！？!?]{1,16}?站)(?=$|[\s，。！？!?]|集合|搭車|開會|上車|下車|轉車)",
+        rf"({station_prefix})",
+        rf"(?:前往|約在|去|到|在)\s*({named_station})",
+        rf"^({named_station})",
+        rf"(?:前往|約在|去|到|在)\s*({generic_station})",
+        rf"^({generic_station})",
     ]
     for pattern in patterns:
         match = re.search(pattern, cleaned)
@@ -471,16 +476,24 @@ def _location(message: str, preferred_city: Optional[str] = None) -> Dict[str, O
         raw_city = next((alias for alias in sorted(aliases, key=len, reverse=True) if alias and alias in message), None)
         if raw_city or candidate in normalized:
             city = candidate
-            for item in districts:
-                short = item[:-1] if item.endswith(("區", "鄉", "鎮", "市")) else item
+            # Match complete district names first. A district short name can be
+            # identical to its city (桃園區/桃園市, 苗栗市/苗栗縣), so checking
+            # short names inline would incorrectly select the first district.
+            for item in sorted(districts, key=len, reverse=True):
                 if item in normalized:
                     district = item
                     raw_district = item if item in message else item.replace("臺", "台")
                     break
-                if len(short) >= 2 and short in normalized:
-                    district = item
-                    raw_district = short if short in message else short.replace("臺", "台")
-                    break
+            city_stem = candidate[:-1] if candidate.endswith(("市", "縣")) else candidate
+            if not district:
+                for item in districts:
+                    short = item[:-1] if item.endswith(("區", "鄉", "鎮", "市")) else item
+                    if len(short) < 2 or short == city_stem:
+                        continue
+                    if short in normalized:
+                        district = item
+                        raw_district = short if short in message else short.replace("臺", "台")
+                        break
             break
 
     if not city and preferred_city in TAIWAN_LOCATIONS:
@@ -507,7 +520,7 @@ def _explicit_location_name(message: str) -> Optional[str]:
 
 def _generic_location_name(message: str, title: Optional[str] = None) -> Optional[str]:
     phrase = _location_phrase(message)
-    if phrase and phrase != title:
+    if phrase and any(suffix in phrase for suffix in ["火車站", "高鐵站", "捷運站", "轉運站", "車站"]):
         return phrase
     patterns = [
         r"(?:去|前往)\s*([^，。！？!?\s]+)",
@@ -522,6 +535,8 @@ def _generic_location_name(message: str, title: Optional[str] = None) -> Optiona
             value = value[:-len(title)]
         if value and value not in ACTIVITIES:
             return value[:120]
+    if phrase and phrase != title:
+        return phrase
     return None
 
 
@@ -1107,6 +1122,27 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif existing and not dates and not times and not _activity(message) and not any(period in message for period in TIME_PERIODS) and _is_draft_followup(message, now):
             location["location"] = message
             location_source = "message"
+        activity_location = str(location.get("location") or "")
+        location_wording = bool(
+            activity_location
+            and re.search(
+                rf"(?:去|到|在|前往|地點\s*(?:在|是|為|：|:))\s*{re.escape(activity_location)}",
+                message,
+            )
+        )
+        if (
+            activity_location
+            and title
+            and str(title).endswith(activity_location)
+            and not explicit_location
+            and not location_wording
+            and not location.get("city")
+            and not location.get("district")
+        ):
+            # "看牙醫" names an activity, not a user-supplied place. Only
+            # treat 牙醫 as a place when the sentence explicitly says 去/在牙醫.
+            location["location"] = None
+            location_source = None
         if (
             not any(location.get(key) for key in ["city", "district", "location"])
             and not any(existing.get(key) for key in ["city", "district", "location"])

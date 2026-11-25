@@ -334,11 +334,48 @@ class ChatContractV2Tests(unittest.TestCase):
             "明天到左營高鐵站搭車": "左營高鐵站",
             "明天在捷運西門站集合": "捷運西門站",
             "明天在西門捷運站集合": "西門捷運站",
+            "明天跟朋友在南港火車站吃飯": "南港火車站",
+            "明天和同學約在西門捷運站集合": "西門捷運站",
         }
         for message, station in cases.items():
             with self.subTest(message=message):
                 self.assertEqual(extract_location_entities(message)["location"], station)
         self.assertIsNone(extract_location_entities("明天在網站開會")["location"])
+
+    def test_location_parser_prefers_complete_district_station_and_venue_names(self):
+        cases = [
+            ("後天下午三點在桃園市中壢區打球", "桃園市", "中壢區", "桃園市中壢區"),
+            ("明天去臺南市安南區爬山", "臺南市", "安南區", "臺南市安南區"),
+            ("明天晚上七點到九點在南港火車站打球", None, None, "南港火車站"),
+            ("明天晚上七點到九點在西門捷運站值班", None, None, "西門捷運站"),
+            ("明天晚上七點到九點在南港高鐵站看電影", None, None, "南港高鐵站"),
+            ("明天晚上七點到九點在臺南新光三越西門店開會", "臺南市", None, "臺南新光三越西門店"),
+        ]
+        for message, city, district, location in cases:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                })
+                self.assertEqual(result["intent"], "CREATE_EVENT")
+                self.assertEqual(result["draft_event"]["city"], city)
+                self.assertEqual(result["draft_event"]["district"], district)
+                self.assertEqual(result["draft_event"]["location"], location)
+
+    def test_activity_name_does_not_block_current_location_fallback(self):
+        result = build_chat_v2_response({
+            "message": "明天看牙醫",
+            "contract_version": 2,
+            "client_now": "2026-11-25T14:00:00+08:00",
+            "current_location": "臺南市東區",
+        })
+        self.assertEqual(result["intent"], "CREATE_EVENT")
+        self.assertEqual(result["draft_event"]["title"], "看牙醫")
+        self.assertEqual(result["draft_event"]["city"], "臺南市")
+        self.assertEqual(result["draft_event"]["district"], "東區")
+        self.assertEqual(result["draft_event"]["location"], "臺南市東區")
+        self.assertEqual(result["draft_event"]["location_source"], "current_location")
 
     def test_event_operation_questions_return_help_without_creating_drafts(self):
         cases = {
