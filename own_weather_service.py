@@ -237,10 +237,124 @@ def _humidity_level(value: Any) -> str:
     return "舒適"
 
 
+def _number(value: Any) -> Optional[float]:
+    try:
+        return float(str(value).replace(">", "").replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _temperature_advice(value: Any) -> str:
+    temp = _number(value)
+    if temp is None:
+        return ""
+    if temp >= 36:
+        return "體感炎熱，請補充水分並避免長時間曝曬"
+    if temp >= 30:
+        return "體感偏熱，外出請補水並做好防曬"
+    if temp <= 15:
+        return "體感偏冷，外出建議加件保暖衣物"
+    if temp <= 20:
+        return "早晚稍涼，建議攜帶薄外套"
+    return "體感大致舒適"
+
+
+def _humidity_advice(value: Any) -> str:
+    level = _humidity_level(value)
+    return {
+        "非常潮濕": "非常潮濕，衣物不易乾，室內可以開除濕機",
+        "潮濕": "偏潮濕，室內請留意通風或除濕",
+        "乾燥": "空氣乾燥，請適時補水並注意保濕",
+        "偏乾": "空氣偏乾，建議適時補水",
+        "舒適": "濕度在一般舒適範圍",
+    }.get(level, "")
+
+
+def _wind_advice(wind_ms: Any, gust_ms: Any) -> str:
+    wind = _number(wind_ms) or 0
+    gust = _number(gust_ms) or 0
+    strongest = max(wind, gust)
+    if strongest >= 10.8:
+        return "風勢或陣風偏強，請避開招牌、路樹及海邊"
+    if strongest >= 7.9:
+        return "風勢較強，騎車請減速並固定戶外物品"
+    return "目前風勢不強" if wind_ms not in (None, "") or gust_ms not in (None, "") else ""
+
+
+def _visibility_advice(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith(">"):
+        return "能見度良好"
+    first = _number(text.split("-", 1)[0])
+    if first is not None and first <= 1:
+        return "能見度很低，行車請開近光燈或霧燈並大幅減速"
+    if first is not None and first <= 6:
+        return "能見度偏低，行車請減速並加大安全距離"
+    return "能見度尚可"
+
+
+def _pressure_advice(value: Any) -> str:
+    pressure = _number(value)
+    if pressure is None:
+        return ""
+    if pressure < 1000:
+        return "氣壓偏低，鋒面或低壓系統接近時常見，請留意最新天氣變化"
+    if pressure >= 1025:
+        return "氣壓偏高，天氣通常較穩定，但仍請以最新預報為準"
+    return "氣壓在常見範圍"
+
+
+def _rainfall_advice(value: Any) -> str:
+    rainfall = _number(value)
+    if rainfall is None:
+        return ""
+    if rainfall >= 80:
+        return "今天累積雨量偏高，請留意低窪地區積淹水與山區落石"
+    if rainfall >= 40:
+        return "今天累積雨量較多，外出請避開積水路段"
+    if rainfall > 0:
+        return "今天已有降雨，路面可能濕滑，外出請留意"
+    return "今天目前尚無累積雨量"
+
+
+def _uvi_advice(value: Any) -> str:
+    uvi = _number(value)
+    if uvi is None:
+        return ""
+    if uvi >= 11:
+        return "紫外線達危險級，上午 10 點至下午 2 點盡量避免戶外曝曬"
+    if uvi >= 8:
+        return "紫外線過量，外出請使用防曬、帽子及遮陽衣物"
+    if uvi >= 6:
+        return "紫外線偏高，外出建議做好防曬"
+    return "紫外線目前不高，長時間戶外活動仍建議基本防曬"
+
+
+def _aqi_advice(value: Any) -> str:
+    aqi = _number(value)
+    if aqi is None:
+        return ""
+    if aqi >= 301:
+        return "空氣品質達危害等級，建議留在室內並關好門窗"
+    if aqi >= 201:
+        return "空氣品質非常不健康，請避免戶外活動"
+    if aqi >= 151:
+        return "空氣品質對所有族群不健康，請減少戶外活動並視需要戴口罩"
+    if aqi >= 101:
+        return "敏感族群請減少長時間或劇烈戶外活動"
+    if aqi >= 51:
+        return "空氣品質普通，敏感族群若不適可減少戶外活動"
+    return "空氣品質良好，適合一般戶外活動"
+
+
 def _detail_type(message: str) -> str:
     checks = [
         ("detail", ("詳細天氣", "天氣資料", "氣象資料", "觀測", "測站", "日照")),
         ("rain_probability", ("降雨機率", "下雨機率", "會下雨", "可能下雨")),
+        ("uvi", ("紫外線", "防曬")),
+        ("air_quality", ("空氣品質", "AQI", "PM2.5", "口罩")),
         ("feels_like", ("體感",)),
         ("dew", ("露點",)),
         ("humidity", ("濕度", "溼度", "潮濕", "很濕", "乾燥", "悶熱", "好悶")),
@@ -286,18 +400,24 @@ def _range_text(values: List[float], suffix: str = "") -> str:
     return f"{low_text}{suffix}" if low == high else f"{low_text}–{high_text}{suffix}"
 
 
-def _daily_rain_advice(pop_value: Any) -> str:
+def _rain_action(pop_value: Any) -> str:
     if pop_value in (None, ""):
-        return "降雨機率暫無資料，出發前請再確認最新預報"
+        return "出發前請再確認最新降雨預報"
     try:
         pop = float(_percent_text(pop_value))
     except (TypeError, ValueError):
-        return "降雨機率暫無資料，出發前請再確認最新預報"
+        return "出發前請再確認最新降雨預報"
     if pop >= 50:
-        return f"降雨機率 {_percent_text(pop_value)}%，很可能下雨，帶傘或雨衣"
+        return "很可能下雨，帶傘或雨衣"
     if pop >= 30:
-        return f"降雨機率 {_percent_text(pop_value)}%，可能會下雨，帶把傘備用"
-    return f"降雨機率 {_percent_text(pop_value)}%，降雨機會較低"
+        return "可能會下雨，帶把傘備用"
+    return "降雨機會較低"
+
+
+def _daily_rain_advice(pop_value: Any) -> str:
+    if pop_value in (None, ""):
+        return "降雨機率暫無資料，出發前請再確認最新預報"
+    return f"降雨機率 {_percent_text(pop_value)}%，{_rain_action(pop_value)}"
 
 
 def _no_data_reply(location: str, detail_type: str) -> str:
@@ -310,6 +430,8 @@ def _no_data_reply(location: str, detail_type: str) -> str:
         "pressure": "氣壓",
         "rainfall": "累積雨量",
         "rain_probability": "降雨機率",
+        "uvi": "紫外線",
+        "air_quality": "空氣品質",
         "visibility": "能見度",
         "wind": "風速風向",
         "detail": "詳細天氣",
@@ -360,6 +482,9 @@ def build_own_weather_answer(
     pop = _value(objects, ("pop", "rain_probability", "probability_of_precipitation"))
     dew = _value((current_hourly, current), ("dew", "dew_point", "dewPoint"))
     comfort_desc = _value((current_hourly, current), ("comfort_desc", "comfort", "comfort_description"))
+    uvi = _value((current, usable_cache_row), ("uvi",))
+    aqi = _value((current, usable_cache_row), ("aqi",))
+    aqi_status = _value((current, usable_cache_row), ("aqi_status",))
     fetched_at = cache_row.get("updated_at") or current.get("time")
 
     first_daily = daily[0] if daily else {}
@@ -418,10 +543,8 @@ def build_own_weather_answer(
         if humidity not in (None, ""):
             source_note = station_note if humidity_source == "observation" else "（預報）"
             parts.append(f"{location}現在相對濕度 {_percent_text(humidity)}%{source_note}")
-            level = _humidity_level(humidity)
-            if level:
-                advice = "衣服不容易乾，室內可以開除濕機" if level in {"非常潮濕", "潮濕"} else ""
-                parts.append(f"{level}{'，' + advice if advice else ''}")
+            if _humidity_advice(humidity):
+                parts.append(_humidity_advice(humidity))
         if hourly_humidity:
             parts.append(f"今天接下來預報 {_range_text(hourly_humidity, '%')}")
         reply = "。".join(parts) + ("。" if parts else "")
@@ -431,10 +554,17 @@ def build_own_weather_answer(
             parts.append(f"{location}現在體感 {app_temp}°C" + (f"（氣溫 {temp}°C）" if temp not in (None, "") else ""))
         if hourly_app:
             parts.append(f"今天接下來體感 {_range_text(hourly_app, '°C')}")
+        if _temperature_advice(app_temp):
+            parts.append(_temperature_advice(app_temp))
         reply = "。".join(parts) + ("。" if parts else "")
     elif detail_type == "dew":
         if dew not in (None, ""):
+            difference = None
+            if _number(temp) is not None and _number(dew) is not None:
+                difference = _number(temp) - _number(dew)
             note = "露點越接近氣溫，空氣越潮濕"
+            if difference is not None and difference <= 2:
+                note += "；目前兩者很接近，體感可能較悶"
             reply = f"{location}現在露點 {dew}°C（預報）" + (f"，氣溫 {temp}°C" if temp not in (None, "") else "") + f"。{note}。"
         elif hourly_dew:
             reply = f"{location}今天接下來露點 {_range_text(hourly_dew, '°C')}（預報）。"
@@ -474,14 +604,23 @@ def build_own_weather_answer(
                 reply = date_label + "、".join(moon_parts) + "。"
     elif detail_type == "pressure":
         pressure = obs.get("pressure")
-        reply = f"{observation_label}氣壓 {pressure} hPa{time_note}。" if pressure not in (None, "") else ""
+        reply = (
+            f"{observation_label}氣壓 {pressure} hPa{time_note}。{_pressure_advice(pressure)}。"
+            if pressure not in (None, "") else ""
+        )
     elif detail_type == "rainfall":
         rain_today = obs.get("rain_today")
-        reply = f"{observation_label}今天（0 點起）累積雨量 {rain_today} mm{time_note}。" if rain_today not in (None, "") else ""
+        reply = (
+            f"{observation_label}今天（0 點起）累積雨量 {rain_today} mm{time_note}。{_rainfall_advice(rain_today)}。"
+            if rain_today not in (None, "") else ""
+        )
     elif detail_type == "visibility":
         visibility = obs.get("visibility")
         vis_station = str(obs.get("vis_station") or station or location)
-        reply = f"{vis_station}測站能見度 {visibility} 公里{time_note}。" if visibility not in (None, "") else ""
+        reply = (
+            f"{vis_station}測站能見度 {visibility} 公里{time_note}。{_visibility_advice(visibility)}。"
+            if visibility not in (None, "") else ""
+        )
     elif detail_type == "wind":
         wind_ms = obs.get("wind_ms")
         gust_ms = obs.get("gust_ms")
@@ -493,7 +632,23 @@ def build_own_weather_answer(
             parts.append(str(wind_dir))
         if gust_ms not in (None, ""):
             parts.append(f"陣風 {gust_ms} m/s")
-        reply = f"{observation_label}" + "、".join(parts) + time_note + "。" if parts else ""
+        if parts:
+            reply = f"{observation_label}" + "、".join(parts) + time_note + "。"
+            if _wind_advice(wind_ms, gust_ms):
+                reply += _wind_advice(wind_ms, gust_ms) + "。"
+        else:
+            reply = ""
+    elif detail_type == "uvi":
+        if uvi not in (None, ""):
+            reply = f"{location}目前紫外線指數 {uvi}。{_uvi_advice(uvi)}。"
+        else:
+            reply = ""
+    elif detail_type == "air_quality":
+        if aqi not in (None, ""):
+            status_text = f"（{aqi_status}）" if aqi_status not in (None, "") else ""
+            reply = f"{location}目前 AQI {aqi}{status_text}。{_aqi_advice(aqi)}。"
+        else:
+            reply = ""
     elif detail_type == "detail":
         observed_parts = []
         for label, key, unit in [
@@ -529,7 +684,18 @@ def build_own_weather_answer(
         astro_parts = [part for part in [f"日出 {astro.get('sunrise')}" if astro.get("sunrise") else "", f"日落 {astro.get('sunset')}" if astro.get("sunset") else "", f"月出 {astro.get('moonrise')}" if astro.get("moonrise") else "", f"月落 {astro.get('moonset')}" if astro.get("moonset") else ""] if part]
         if astro_parts:
             sections.append("、".join(astro_parts))
-        reply = "；".join(sections) + ("。" if sections else "")
+        advice = [
+            item for item in [
+                _rain_action(pop) if pop not in (None, "") else "",
+                _temperature_advice(app_temp),
+                _humidity_advice(humidity),
+                _wind_advice(obs.get("wind_ms"), obs.get("gust_ms")),
+            ]
+            if item
+        ]
+        if advice:
+            sections.append("提醒：" + "；".join(dict.fromkeys(advice)))
+        reply = "。\n".join(sections) + ("。" if sections else "")
     elif first_daily and start_date and first_daily.get("date") == start_date and start_date != today:
         parts = [f"{location}{start_date}預報"]
         if first_daily.get("description"):
@@ -540,7 +706,11 @@ def build_own_weather_answer(
             parts.append(f"體感 {first_daily['app_min']}–{first_daily['app_max']}°C")
         if first_daily.get("rh") not in (None, ""):
             parts.append(f"相對濕度約 {_percent_text(first_daily['rh'])}%")
-        reply = "，".join(parts) + "。"
+        parts.append(_daily_rain_advice(first_daily.get("pop")))
+        daily_advice = _temperature_advice(first_daily.get("app_max"))
+        if daily_advice:
+            parts.append(daily_advice)
+        reply = "；".join(parts) + "。"
     else:
         parts = [f"{location}目前"]
         if description:
@@ -553,7 +723,18 @@ def build_own_weather_answer(
             parts.append(f"相對濕度 {_percent_text(humidity)}%")
         if pop not in (None, ""):
             parts.append(f"降雨機率 {_percent_text(pop)}%")
-        reply = "，".join(parts) + "。" if len(parts) > 1 else ""
+        reply = parts[0] + "：" + "，".join(parts[1:]) + "。" if len(parts) > 1 else ""
+        advice = [
+            item for item in [
+                _rain_action(pop) if pop not in (None, "") else "",
+                _temperature_advice(app_temp),
+                _humidity_advice(humidity),
+                _wind_advice(obs.get("wind_ms"), obs.get("gust_ms")),
+            ]
+            if item
+        ]
+        if advice:
+            reply += "提醒：" + "；".join(dict.fromkeys(advice)) + "。"
         if astro.get("sunrise") and astro.get("sunset"):
             reply += f"日出 {astro['sunrise']}、日落 {astro['sunset']}。"
         if astro.get("sunset") and tomorrow_astro.get("sunrise") and _clock(taipei_now().isoformat()) > _clock(astro.get("sunset")):
@@ -573,9 +754,9 @@ def build_own_weather_answer(
         "dew": dew,
         "comfort_desc": comfort_desc,
         "fetched_at": fetched_at,
-        "uvi": _value((current, usable_cache_row), ("uvi",)),
-        "aqi": _value((current, usable_cache_row), ("aqi",)),
-        "aqi_status": _value((current, usable_cache_row), ("aqi_status",)),
+        "uvi": uvi,
+        "aqi": aqi,
+        "aqi_status": aqi_status,
         "pressure": obs.get("pressure"),
         "rain_today": obs.get("rain_today"),
         "wind_ms": obs.get("wind_ms"),

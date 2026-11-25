@@ -97,6 +97,9 @@ class OwnWeatherServiceTests(unittest.TestCase):
 
         self.assertIn("相對濕度約 76%", result["reply"])
         self.assertIn("體感 23–32°C", result["reply"])
+        self.assertIn("降雨機率 20%", result["reply"])
+        self.assertIn("降雨機會較低", result["reply"])
+        self.assertIn("外出請補水並做好防曬", result["reply"])
         self.assertEqual(result["weather_summary"]["daily"][0]["app_max"], 32)
 
     def test_three_day_rain_probability_lists_each_day_without_current_temperature(self):
@@ -275,6 +278,50 @@ class OwnWeatherServiceTests(unittest.TestCase):
         detail = build_own_weather_answer("臺南市", "中西區", "詳細天氣資料", "", "", cache, [])
         self.assertIn("氣壓 1015.8 hPa", detail["reply"])
         self.assertIn("最高 28.1°C", detail["reply"])
+
+    def test_weather_questions_include_interpretation_and_action_advice(self):
+        today = taipei_now().date().isoformat()
+        cache = [{
+            "valid_until": (taipei_now() + timedelta(minutes=30)).isoformat(),
+            "uvi": 9,
+            "aqi": 160,
+            "aqi_status": "對所有族群不健康",
+            "weather_data": {
+                "current": {
+                    "description": "多雲短暫雨", "temp": 31, "app_temp": 34,
+                    "hum": 85, "pop": 60,
+                },
+                "obs": {
+                    "station": "中西", "time": taipei_now().isoformat(), "temp": 31,
+                    "hum": 85, "pressure": 995, "rain_today": 45,
+                    "wind_ms": 8.5, "wind_dir": "西南風", "gust_ms": 12,
+                    "visibility": "3-6", "vis_station": "臺南",
+                },
+            },
+        }]
+
+        general = build_own_weather_answer("臺南市", "中西區", "現在天氣如何", today, today, cache, [])
+        self.assertIn("降雨機率 60%", general["reply"])
+        self.assertIn("很可能下雨，帶傘或雨衣", general["reply"])
+        self.assertIn("體感偏熱", general["reply"])
+        self.assertIn("偏潮濕", general["reply"])
+
+        pressure = build_own_weather_answer("臺南市", "中西區", "現在氣壓", today, today, cache, [])
+        self.assertIn("氣壓偏低", pressure["reply"])
+        rainfall = build_own_weather_answer("臺南市", "中西區", "今天下了多少雨", today, today, cache, [])
+        self.assertIn("累積雨量 45 mm", rainfall["reply"])
+        self.assertIn("避開積水路段", rainfall["reply"])
+        visibility = build_own_weather_answer("臺南市", "中西區", "能見度如何", today, today, cache, [])
+        self.assertIn("能見度偏低", visibility["reply"])
+        wind = build_own_weather_answer("臺南市", "中西區", "現在風大嗎", today, today, cache, [])
+        self.assertIn("風勢或陣風偏強", wind["reply"])
+
+        uvi = build_own_weather_answer("臺南市", "中西區", "紫外線如何", today, today, cache, [])
+        self.assertIn("紫外線指數 9", uvi["reply"])
+        self.assertIn("防曬、帽子", uvi["reply"])
+        air = build_own_weather_answer("臺南市", "中西區", "空氣品質如何", today, today, cache, [])
+        self.assertIn("AQI 160", air["reply"])
+        self.assertIn("減少戶外活動", air["reply"])
 
     def test_no_rows_returns_explicit_no_data_reply(self):
         result = build_own_weather_answer("臺北市", "", "天氣", "", "", [], [])
