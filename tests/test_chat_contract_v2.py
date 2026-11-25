@@ -377,6 +377,40 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(result["draft_event"]["location"], "臺南市東區")
         self.assertEqual(result["draft_event"]["location_source"], "current_location")
 
+    def test_medical_activities_create_stable_drafts(self):
+        for activity in ["看醫生", "看中醫", "做手術", "吃藥", "健檢", "復健", "打針"]:
+            with self.subTest(activity=activity):
+                result = build_chat_v2_response({
+                    "message": f"提醒我明天下午三點{activity}",
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                    "current_location": "臺南市東區",
+                })
+                self.assertEqual(result["intent"], "CREATE_EVENT")
+                self.assertEqual(result["draft_event"]["title"], activity)
+                self.assertEqual(result["draft_event"]["date"], "2026-11-26")
+                self.assertEqual(result["draft_event"]["start_time"], "15:00")
+                self.assertTrue(result["draft_event"]["is_reminder"])
+                self.assertEqual(result["draft_event"]["city"], "臺南市")
+                self.assertEqual(result["draft_event"]["district"], "東區")
+
+        placed_cases = [
+            ("明天下午三點在臺北市中正區臺大醫院看醫生", "看醫生", "臺北市", "中正區", "臺北市中正區臺大醫院"),
+            ("明天下午三點在臺南市東區中醫診所看中醫", "看中醫", "臺南市", "東區", "臺南市東區中醫診所"),
+            ("明天早上八點在高雄市左營區醫院做手術", "做手術", "高雄市", "左營區", "高雄市左營區醫院"),
+        ]
+        for message, title, city, district, location in placed_cases:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-25T14:00:00+08:00",
+                })
+                self.assertEqual(result["draft_event"]["title"], title)
+                self.assertEqual(result["draft_event"]["city"], city)
+                self.assertEqual(result["draft_event"]["district"], district)
+                self.assertEqual(result["draft_event"]["location"], location)
+
     def test_event_operation_questions_return_help_without_creating_drafts(self):
         cases = {
             "怎麼新增行程": ["整理成草稿", "確認後才加入"],
