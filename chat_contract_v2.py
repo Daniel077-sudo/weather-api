@@ -689,10 +689,13 @@ def _is_usage_help(message: str) -> bool:
 
 def _is_existing_event_location_update(message: str) -> bool:
     """Recognize wording that adds a location to an already-mentioned event."""
-    return bool(re.search(
+    if re.search(
         r"(?:的?行程\s*(?:是在|在|的?地點(?:是|在|為))|行程的?地點\s*(?:是|在|為))",
         message,
-    ))
+    ):
+        return True
+    activity_pattern = "|".join(re.escape(item) for item in sorted(ACTIVITIES, key=len, reverse=True))
+    return bool(re.search(rf"(?:{activity_pattern})的?地點\s*(?:是|在|為)", message))
 
 
 def _usage_help_reply(message: str) -> str:
@@ -1131,8 +1134,9 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         is_reminder = bool(existing.get("is_reminder")) or bool(re.search(r"提醒我|幫我提醒|記得提醒我|提醒一下|叫我", message)) or bool(
             re.search(r"\bremind\s+me\s+to\b", message, re.IGNORECASE)
         )
-        current_location = _location(_text(payload.get("current_location"))) if payload.get("current_location") else {}
-        preferred_city = existing.get("city") or current_location.get("city")
+        # Device location is weather context, not event data. Only an existing
+        # draft or a place explicitly stated by the user may populate a draft.
+        preferred_city = existing.get("city")
         location = _location(message, preferred_city)
         location_source = "message" if any(location.get(key) for key in ["city", "district", "location"]) else None
         explicit_location = _explicit_location_name(message)
@@ -1180,17 +1184,6 @@ def build_chat_v2_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             # treat 牙醫 as a place when the sentence explicitly says 去/在牙醫.
             location["location"] = None
             location_source = None
-        if (
-            not any(location.get(key) for key in ["city", "district", "location"])
-            and not any(existing.get(key) for key in ["city", "district", "location"])
-            and current_location.get("city")
-        ):
-            location = {
-                "city": current_location.get("city"),
-                "district": current_location.get("district"),
-                "location": _text(payload.get("current_location")) or current_location.get("location"),
-            }
-            location_source = "current_location"
         existing_start = existing.get("start_time")
         if times and not time_needs_clarification:
             start_time = times[0][1]

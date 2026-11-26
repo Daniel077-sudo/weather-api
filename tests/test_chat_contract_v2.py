@@ -301,17 +301,45 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertFalse(explicit["time_guessed"])
 
     def test_existing_event_location_statement_is_update(self):
+        messages = [
+            "幫我記錄一下明天吃飯的行程是在台南市中西區",
+            "把明天吃飯改在台南市中西區",
+            "明天吃飯地點是台南市中西區",
+        ]
+        for message in messages:
+            with self.subTest(message=message):
+                result = build_chat_v2_response({
+                    "message": message,
+                    "contract_version": 2,
+                    "client_now": "2026-11-24T10:00:00+08:00",
+                })
+                self.assertEqual(result["intent"], "UPDATE_EVENT")
+                self.assertEqual(result["event_filter"]["date"], "2026-11-25")
+                self.assertEqual(result["event_filter"]["title_keyword"], "吃飯")
+                self.assertEqual(result["changes"]["city"], "臺南市")
+                self.assertEqual(result["changes"]["district"], "中西區")
+                self.assertEqual(result["changes"]["location"], "台南市中西區")
+
+    def test_location_update_resolves_unique_persisted_event_id(self):
         result = build_chat_v2_response({
-            "message": "幫我記錄一下明天吃飯的行程是在台南市中西區",
+            "message": "明天吃飯地點是台南市中西區",
             "contract_version": 2,
             "client_now": "2026-11-24T10:00:00+08:00",
         })
-        self.assertEqual(result["intent"], "UPDATE_EVENT")
-        self.assertEqual(result["event_filter"]["date"], "2026-11-25")
-        self.assertEqual(result["event_filter"]["title_keyword"], "吃飯")
-        self.assertEqual(result["changes"]["city"], "臺南市")
-        self.assertEqual(result["changes"]["district"], "中西區")
-        self.assertEqual(result["changes"]["location"], "台南市中西區")
+        events = [{
+            "id": 77,
+            "title": "吃飯",
+            "start_time": "2026-11-25T17:00:00+08:00",
+            "city": "",
+            "district": "",
+            "location": "",
+            "chat_editable": True,
+        }]
+        with patch.object(main.asyncio, "to_thread", new=AsyncMock(return_value=events)):
+            enriched = run_immediate(main.enrich_chat_event_mutation_result(result, "user-1", "明天吃飯地點是台南市中西區"))
+        self.assertEqual(enriched["event_id"], "77")
+        self.assertEqual(enriched["changes"]["city"], "臺南市")
+        self.assertEqual(enriched["changes"]["district"], "中西區")
 
     def test_compound_day_period_words_set_both_date_and_clock_period(self):
         result = build_chat_v2_response({
@@ -363,19 +391,19 @@ class ChatContractV2Tests(unittest.TestCase):
                 self.assertEqual(result["draft_event"]["district"], district)
                 self.assertEqual(result["draft_event"]["location"], location)
 
-    def test_activity_name_does_not_block_current_location_fallback(self):
+    def test_activity_name_is_not_a_place_and_device_location_is_not_copied(self):
         result = build_chat_v2_response({
-            "message": "明天看牙醫",
+            "message": "後天下午兩點看牙醫",
             "contract_version": 2,
             "client_now": "2026-11-25T14:00:00+08:00",
             "current_location": "臺南市東區",
         })
         self.assertEqual(result["intent"], "CREATE_EVENT")
         self.assertEqual(result["draft_event"]["title"], "看牙醫")
-        self.assertEqual(result["draft_event"]["city"], "臺南市")
-        self.assertEqual(result["draft_event"]["district"], "東區")
-        self.assertEqual(result["draft_event"]["location"], "臺南市東區")
-        self.assertEqual(result["draft_event"]["location_source"], "current_location")
+        self.assertIsNone(result["draft_event"]["city"])
+        self.assertIsNone(result["draft_event"]["district"])
+        self.assertIsNone(result["draft_event"]["location"])
+        self.assertIsNone(result["draft_event"]["location_source"])
 
     def test_medical_activities_create_stable_drafts(self):
         for activity in ["看醫生", "看中醫", "做手術", "吃藥", "健檢", "復健", "打針"]:
@@ -391,8 +419,9 @@ class ChatContractV2Tests(unittest.TestCase):
                 self.assertEqual(result["draft_event"]["date"], "2026-11-26")
                 self.assertEqual(result["draft_event"]["start_time"], "15:00")
                 self.assertTrue(result["draft_event"]["is_reminder"])
-                self.assertEqual(result["draft_event"]["city"], "臺南市")
-                self.assertEqual(result["draft_event"]["district"], "東區")
+                self.assertIsNone(result["draft_event"]["city"])
+                self.assertIsNone(result["draft_event"]["district"])
+                self.assertIsNone(result["draft_event"]["location"])
 
         placed_cases = [
             ("明天下午三點在臺北市中正區臺大醫院看醫生", "看醫生", "臺北市", "中正區", "臺北市中正區臺大醫院"),
@@ -592,8 +621,10 @@ class ChatContractV2Tests(unittest.TestCase):
         self.assertEqual(result["draft_event"]["title"], "準備期中考")
         self.assertEqual(result["draft_event"]["start_time"], "13:00")
         self.assertTrue(result["draft_event"]["is_reminder"])
-        self.assertEqual(result["draft_event"]["location"], "高雄市左營區")
-        self.assertEqual(result["draft_event"]["location_source"], "current_location")
+        self.assertIsNone(result["draft_event"]["city"])
+        self.assertIsNone(result["draft_event"]["district"])
+        self.assertIsNone(result["draft_event"]["location"])
+        self.assertIsNone(result["draft_event"]["location_source"])
 
     def test_chain_landmark_keeps_location_without_requiring_city(self):
         payload = self.payload_for({"input": "明天下午三點開會，地點在新光三越"})
@@ -667,14 +698,15 @@ class ChatContractV2Tests(unittest.TestCase):
                 if "什麼時候" in message or "下次" in message:
                     self.assertEqual(result["entities"]["end_date"], "2026-09-29")
 
-    def test_current_location_fills_only_events_without_an_explicit_place(self):
+    def test_current_location_is_never_copied_into_event_drafts(self):
         for message in ["今天晚上八點要倒垃圾", "明天下午三點開會"]:
             with self.subTest(message=message):
                 result = build_chat_v2_response(self.payload_for({"input": message}))
                 self.assertEqual(result["intent"], "CREATE_EVENT")
-                self.assertEqual(result["draft_event"]["city"], "高雄市")
-                self.assertEqual(result["draft_event"]["district"], "左營區")
-                self.assertEqual(result["draft_event"]["location_source"], "current_location")
+                self.assertIsNone(result["draft_event"]["city"])
+                self.assertIsNone(result["draft_event"]["district"])
+                self.assertIsNone(result["draft_event"]["location"])
+                self.assertIsNone(result["draft_event"]["location_source"])
                 self.assertNotIn("city", result["missing_fields"])
                 if "倒垃圾" in message:
                     self.assertEqual(result["draft_event"]["title"], "倒垃圾")

@@ -98,7 +98,7 @@ class OwnWeatherServiceTests(unittest.TestCase):
         self.assertIn("相對濕度約 76%", result["reply"])
         self.assertIn("體感 23–32°C", result["reply"])
         self.assertIn("降雨機率 20%", result["reply"])
-        self.assertIn("降雨機會較低", result["reply"])
+        self.assertNotIn("帶傘", result["reply"])
         self.assertIn("外出請補水並做好防曬", result["reply"])
         self.assertEqual(result["weather_summary"]["daily"][0]["app_max"], 32)
 
@@ -151,7 +151,8 @@ class OwnWeatherServiceTests(unittest.TestCase):
         )
         self.assertNotIn("帶傘", dry["reply"])
         self.assertEqual(dry["reply"].count("\n"), 3)
-        self.assertEqual(dry["reply"].count("降雨機會較低"), 3)
+        self.assertNotIn("降雨機會較低", dry["reply"])
+        self.assertEqual(dry["reply"].count("降雨機率"), 3)
 
     def test_daily_array_is_expanded(self):
         tomorrow = (taipei_now().date() + timedelta(days=1)).isoformat()

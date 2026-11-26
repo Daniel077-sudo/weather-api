@@ -411,13 +411,14 @@ def _rain_action(pop_value: Any) -> str:
         return "很可能下雨，帶傘或雨衣"
     if pop >= 30:
         return "可能會下雨，帶把傘備用"
-    return "降雨機會較低"
+    return ""
 
 
 def _daily_rain_advice(pop_value: Any) -> str:
     if pop_value in (None, ""):
         return "降雨機率暫無資料，出發前請再確認最新預報"
-    return f"降雨機率 {_percent_text(pop_value)}%，{_rain_action(pop_value)}"
+    advice = _rain_action(pop_value)
+    return f"降雨機率 {_percent_text(pop_value)}%" + (f"，{advice}" if advice else "")
 
 
 def _no_data_reply(location: str, detail_type: str) -> str:

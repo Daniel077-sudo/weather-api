@@ -1,5 +1,5 @@
 {
-  "_說明": "每個案例可用自己的 client_now；v1123-* 依 2026-11-23 iOS 完整契約新增。未指定地點時可使用 current_location，所有查詢與草稿回覆都不得為空。",
+  "_說明": "每個案例可用自己的 client_now；v1123-* 依 2026-11-23 iOS 完整契約新增。current_location 只用於天氣與查詢，未指定地點的行程必須回 null，所有查詢與草稿回覆都不得為空。",
   "client_now": "2026-09-23T19:30:00+08:00",
   "current_location": "高雄市左營區",
   "cases": [
@@ -77,7 +77,7 @@
     {
       "id": "create-06-no-city",
       "input": "明天早上九點開會",
-      "_備註": "沒講地點：使用 request 的 current_location 作為定位推定，地點仍為選填",
+      "_備註": "沒講地點：city、district、location 都維持 null，current_location 不得寫入行程",
       "expect": {
         "intent": "CREATE_EVENT",
         "needs_clarification": false,
@@ -85,7 +85,9 @@
           "title": "開會",
           "date": "2026-09-24",
           "start_time": "09:00",
-          "city": "高雄市"
+          "city": null,
+          "district": null,
+          "location": null
         }
       }
     },
@@ -429,7 +431,7 @@
           "title": "上班",
           "date": "2026-09-23",
           "start_time": null,
-          "city": "高雄市"
+          "city": null
         },
         "missing_fields_include": [
           "start_time"
@@ -445,9 +447,9 @@
           "title": "看牙醫",
           "date": "2026-09-24",
           "start_time": "09:00",
-          "city": "高雄市",
-          "district": "左營區",
-          "location": "高雄市左營區"
+          "city": null,
+          "district": null,
+          "location": null
         }
       }
     },
@@ -460,7 +462,7 @@
           "title": "吃飯",
           "date": "2026-09-24",
           "start_time": "19:00",
-          "city": "高雄市"
+          "city": null
         }
       }
     },
@@ -836,7 +838,7 @@
           "title": "倒垃圾",
           "date": "2026-09-23",
           "start_time": "20:00",
-          "city": "高雄市"
+          "city": null
         }
       }
     },
