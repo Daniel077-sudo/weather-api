@@ -1,410 +1,111 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>小藍 AI 助理測試</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>小藍 AI 助理公開測試</title>
   <style>
-    :root {
-      --bg: #eef4fb;
-      --panel: #ffffff;
-      --text: #162033;
-      --muted: #64748b;
-      --line: #d7e0ec;
-      --blue: #2563eb;
-      --blue-dark: #1d4ed8;
-      --soft-blue: #dbeafe;
-      --red: #dc2626;
-      --green: #15803d;
-      --amber: #b45309;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-    .app {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
-      gap: 14px;
-      width: min(1240px, 100%);
-      min-height: 100vh;
-      margin: 0 auto;
-      padding: 14px;
-    }
-    .chat, .side {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-    .chat {
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      min-height: calc(100vh - 28px);
-    }
-    header {
-      padding: 16px;
-      border-bottom: 1px solid var(--line);
-    }
-    h1 { margin: 0; font-size: 22px; }
-    .subtitle { margin-top: 5px; color: var(--muted); font-size: 14px; }
-    .setup {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 8px;
-      margin-top: 12px;
-    }
-    label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
-    input, textarea {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 9px 10px;
-      font: inherit;
-      color: var(--text);
-      background: #fff;
-    }
-    .messages {
-      padding: 18px;
-      overflow: auto;
-      background: #f8fbff;
-    }
-    .bubble {
-      width: fit-content;
-      max-width: 76%;
-      padding: 10px 12px;
-      margin-bottom: 10px;
-      border-radius: 8px;
-      line-height: 1.5;
-      white-space: pre-wrap;
-    }
-    .bubble.user { margin-left: auto; background: var(--soft-blue); }
-    .bubble.ai { margin-right: auto; background: #fff; border: 1px solid var(--line); }
-    .badge {
-      display: inline-block;
-      margin-bottom: 6px;
-      padding: 2px 7px;
-      border-radius: 999px;
-      background: #eef2ff;
-      color: #3730a3;
-      font-size: 12px;
-      font-weight: 600;
-    }
-    .composer {
-      padding: 14px;
-      border-top: 1px solid var(--line);
-      background: #fff;
-    }
-    .composer-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      align-items: end;
-    }
-    textarea { min-height: 58px; max-height: 160px; resize: vertical; }
-    button {
-      border: 0;
-      border-radius: 6px;
-      padding: 10px 14px;
-      font: inherit;
-      color: #fff;
-      background: var(--blue);
-      cursor: pointer;
-    }
-    button:hover { background: var(--blue-dark); }
-    button.secondary { background: #e8eef8; color: #1e3a8a; }
-    button.danger { background: var(--red); margin-top: 8px; }
-    .quick { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-    .side {
-      min-height: calc(100vh - 28px);
-      display: grid;
-      grid-template-rows: auto 1fr;
-    }
-    .side-header { padding: 16px; border-bottom: 1px solid var(--line); }
-    .side-body { padding: 14px; overflow: auto; }
-    .panel { border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 14px; }
-    .panel:last-child { border-bottom: 0; }
-    h2 { margin: 0 0 10px; font-size: 15px; }
-    .item {
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 10px;
-      margin-bottom: 8px;
-      background: #fff;
-    }
-    .item strong { display: block; margin-bottom: 4px; }
-    .meta { color: var(--muted); font-size: 13px; line-height: 1.45; }
-    .risk-high { color: var(--red); }
-    .risk-medium { color: var(--amber); }
-    .risk-low { color: var(--green); }
-    .status {
-      padding: 9px 10px;
-      border-radius: 6px;
-      background: #eff6ff;
-      color: #1e3a8a;
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .raw {
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 260px;
-      overflow: auto;
-      background: #0f172a;
-      color: #dbeafe;
-      border-radius: 6px;
-      padding: 10px;
-      font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
-    }
-    @media (max-width: 920px) {
-      .app { grid-template-columns: 1fr; }
-      .chat, .side { min-height: auto; }
-      .setup { grid-template-columns: 1fr; }
-      .bubble { max-width: 90%; }
-    }
+    :root{--bg:#eef4fb;--panel:#fff;--text:#172033;--muted:#64748b;--line:#d7e0ec;--blue:#2563eb;--soft:#dbeafe;--red:#b91c1c;--green:#15803d}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;overflow-x:hidden;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+    .app{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;width:min(1280px,100%);min-height:100vh;margin:auto;padding:14px}
+    .chat,.side{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}.chat{display:grid;grid-template-rows:auto minmax(300px,1fr) auto;min-height:calc(100vh - 28px)}
+    header,.side-head{padding:16px;border-bottom:1px solid var(--line)}h1{margin:0;font-size:22px}h2{margin:0 0 10px;font-size:15px}.subtitle,.meta,.notice{overflow-wrap:anywhere;color:var(--muted);font-size:13px;line-height:1.5}.subtitle{margin-top:5px}
+    .auth{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;margin-top:12px;padding:10px;border:1px solid var(--line);border-radius:6px;background:#f8fbff}
+    .setup{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.notice{margin-top:10px;font-size:12px}label{display:block;margin-bottom:5px;font-size:12px;color:var(--muted)}
+    input,textarea{min-width:0;width:100%;border:1px solid var(--line);border-radius:6px;padding:9px 10px;font:inherit;color:var(--text);background:#fff}input[readonly]{background:#f1f5f9;color:var(--muted)}
+    .messages{padding:18px;overflow:auto;background:#f8fbff}.bubble{width:fit-content;max-width:78%;padding:10px 12px;margin-bottom:10px;border-radius:8px;line-height:1.5;white-space:pre-wrap}.bubble.user{margin-left:auto;background:var(--soft)}.bubble.ai{border:1px solid var(--line);background:#fff}
+    .badge{display:inline-block;margin-bottom:6px;padding:2px 7px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px;font-weight:600}
+    .composer{padding:14px;border-top:1px solid var(--line)}.composer-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}textarea{min-height:58px;max-height:160px;resize:vertical}
+    button{border:0;border-radius:6px;padding:10px 14px;font:inherit;color:#fff;background:var(--blue);cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:#e8eef8;color:#1e3a8a}.success{background:var(--green)}.danger{background:var(--red)}.compact{padding:7px 10px;font-size:13px}.quick,.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.quick button{flex:0 0 auto}
+    .side{display:grid;grid-template-rows:auto 1fr;min-height:calc(100vh - 28px)}.side-body{padding:14px;overflow:auto}.panel{border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:14px}.panel:last-child{border:0}.item{border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:8px}.item strong{display:block;margin-bottom:4px}
+    .status{padding:9px 10px;border-radius:6px;background:#eff6ff;color:#1e3a8a;font-size:13px;line-height:1.4}.status.ok{background:#ecfdf5;color:#166534}.status.error{background:#fef2f2;color:#991b1b}
+    .raw{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0f172a;color:#dbeafe;border-radius:6px;padding:10px;font:12px/1.45 Consolas,monospace}
+    @media(max-width:920px){.app{grid-template-columns:minmax(0,1fr);padding:8px}.chat,.side{min-height:auto}.setup,.auth{grid-template-columns:minmax(0,1fr)}.bubble{max-width:92%}.quick button{max-width:100%}}
   </style>
 </head>
 <body>
   <div class="app">
     <section class="chat">
       <header>
-        <h1>小藍 AI 助理</h1>
-        <div class="subtitle">你只要聊天，小藍會自動建立行程、查天氣、給防災指引或開啟小遊戲。</div>
+        <h1>小藍 AI 助理公開測試</h1>
+        <div class="subtitle">測試行程草稿、天氣查詢、防災問答，以及確認後寫入行事曆。</div>
+        <div class="auth"><div id="authStatus" class="status">尚未建立訪客測試帳號。</div><button id="login">開始訪客測試</button></div>
         <div class="setup">
-          <div>
-            <label for="baseUrl">API Base URL</label>
-            <input id="baseUrl" placeholder="留空 = 目前網域" />
-          </div>
-          <div>
-            <label for="userId">user_id</label>
-            <input id="userId" value="demo-user-001" />
-          </div>
-          <div>
-            <label for="currentLocation">目前位置</label>
-            <input id="currentLocation" value="臺南市東區" />
-          </div>
+          <div><label for="userId">訪客 user_id</label><input id="userId" readonly placeholder="登入後自動產生"></div>
+          <div><label for="currentLocation">天氣查詢預設位置</label><input id="currentLocation" value="臺南市東區"></div>
         </div>
+        <div class="notice">訪客資料彼此隔離，但確認新增後會寫入正式資料庫。請勿輸入真實姓名、電話、住址或其他敏感資料；測試完可在右側清空自己的測試行程。</div>
       </header>
-
       <div id="messages" class="messages"></div>
-
       <div class="composer">
-        <div class="composer-row">
-          <textarea id="message" placeholder="輸入：我明天下午兩點要去台南安平打球">我明天下午兩點要去台南安平打球</textarea>
-          <button id="send">送出</button>
-        </div>
+        <div class="composer-row"><textarea id="message">明天下午兩點去臺南安平打球</textarea><button id="send">送出</button></div>
         <div class="quick">
-          <button class="secondary" data-msg="我明天下午兩點要去台南安平打球">建立行程</button>
+          <button class="secondary" data-msg="明天下午兩點去臺南安平打球">建立行程</button>
           <button class="secondary" data-msg="我禮拜六想去爬山">多輪追問</button>
-          <button class="secondary" data-msg="明天適合去阿里山嗎">查天氣</button>
-          <button class="secondary" data-msg="淹水怎麼辦">防災指引</button>
-          <button class="secondary" data-msg="我想玩淹水小遊戲">防災小遊戲</button>
+          <button class="secondary" data-msg="未來三天的降雨機率如何">三天天氣</button>
+          <button class="secondary" data-msg="地震時怎麼辦">防災問答</button>
+          <button class="secondary" data-msg="我要怎麼新增行程">操作說明</button>
         </div>
       </div>
     </section>
-
     <aside class="side">
-      <div class="side-header">
-        <h2>小藍自動整理</h2>
-        <div id="status" class="status">尚未送出訊息。</div>
-      </div>
+      <div class="side-head"><h2>測試結果</h2><div id="status" class="status">請先建立訪客測試帳號。</div></div>
       <div class="side-body">
-        <div class="panel">
-          <h2>最新動作</h2>
-          <div id="latestAction" class="item meta">等待小藍回覆。</div>
-        </div>
-        <div class="panel">
-          <h2>行事曆</h2>
-          <div id="events" class="meta">尚未讀取。</div>
-        </div>
-        <div class="panel">
-          <h2>天氣 / 風險</h2>
-          <div id="weather" class="item meta">尚無資料。</div>
-        </div>
-        <div class="panel">
-          <h2>防災 / 遊戲</h2>
-          <div id="guideGame" class="item meta">尚無資料。</div>
-        </div>
-        <div class="panel">
-          <h2>原始回應</h2>
-          <div id="raw" class="raw">{}</div>
-        </div>
+        <div class="panel"><h2>待確認動作</h2><div id="latestAction" class="item meta">目前沒有待確認內容。</div></div>
+        <div class="panel"><div style="display:flex;justify-content:space-between;align-items:center"><h2>我的測試行程</h2><button id="clearEvents" class="danger compact">清空</button></div><div id="events" class="meta">登入後自動讀取。</div></div>
+        <div class="panel"><h2>天氣摘要</h2><div id="weather" class="item meta">尚無資料。</div></div>
+        <div class="panel"><h2>原始 API 回應</h2><div id="raw" class="raw">{}</div></div>
       </div>
     </aside>
   </div>
-
   <script>
-    const $ = (id) => document.getElementById(id);
-    const messages = $("messages");
-
-    function baseUrl() {
-      return $("baseUrl").value.trim().replace(/\/$/, "") || window.location.origin;
+    const SUPABASE_URL="https://ovyygcsuiwwbgoywplbq.supabase.co";
+    const SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im92eXlnY3N1aXd3YmdveXdwbGJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2NzAzMzAsImV4cCI6MjA4OTI0NjMzMH0.1AEp3m7d6G23in44qJBqIQNC0fjzIq2C9V89c1niMaU";
+    const SESSION_KEY="xiaolan-public-test-session-v2";
+    const $=function(id){return document.getElementById(id)};
+    let session=loadSession(),activeDraft=null,activeMutation=null,recentTurns=[],eventCache=[];
+    function loadSession(){try{return JSON.parse(sessionStorage.getItem(SESSION_KEY)||"null")}catch(error){return null}}
+    function saveSession(value){session=value;if(value)sessionStorage.setItem(SESSION_KEY,JSON.stringify(value));else sessionStorage.removeItem(SESSION_KEY);renderAuth()}
+    function renderAuth(){const ready=Boolean(session&&session.access_token&&session.user_id);$("userId").value=ready?session.user_id:"";$("authStatus").className="status"+(ready?" ok":"");$("authStatus").textContent=ready?"訪客帳號已就緒："+session.user_id:"尚未建立訪客測試帳號。";$("login").textContent=ready?"重新建立訪客帳號":"開始訪客測試"}
+    function setStatus(text,kind){$("status").className="status"+(kind?" "+kind:"");$("status").textContent=text}
+    function esc(value){return String(value==null?"":value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
+    function showRaw(data){$("raw").textContent=JSON.stringify(data,null,2)}
+    function bubble(kind,text,action){const el=document.createElement("div");el.className="bubble "+kind;el.innerHTML=(action?'<span class="badge">'+esc(action)+"</span><br>":"")+esc(text);$("messages").appendChild(el);$("messages").scrollTop=$("messages").scrollHeight}
+    async function supabase(path,body){const response=await fetch(SUPABASE_URL+path,{method:"POST",headers:{"Content-Type":"application/json",apikey:SUPABASE_ANON_KEY,Authorization:"Bearer "+SUPABASE_ANON_KEY},body:JSON.stringify(body||{})});const data=await response.json().catch(function(){return{}});if(!response.ok)throw new Error(data.msg||data.message||"訪客登入失敗 ("+response.status+")");return data}
+    function normalizeSession(data){return{access_token:data.access_token||"",refresh_token:data.refresh_token||"",user_id:(data.user&&data.user.id)||(session&&session.user_id)||"",expires_at:Date.now()+Number(data.expires_in||3600)*1000}}
+    async function signIn(force){
+      if(!force&&session&&session.access_token&&session.expires_at>Date.now()+60000)return session;
+      if(!force&&session&&session.refresh_token){try{const restored=normalizeSession(await supabase("/auth/v1/token?grant_type=refresh_token",{refresh_token:session.refresh_token}));saveSession(restored);return restored}catch(error){saveSession(null)}}
+      setStatus("正在建立訪客測試帳號...");const next=normalizeSession(await supabase("/auth/v1/signup",{}));if(!next.access_token||!next.user_id)throw new Error("Supabase 未回傳完整訪客工作階段");saveSession(next);activeDraft=null;activeMutation=null;recentTurns=[];renderAction({});await refreshEvents();setStatus("訪客帳號建立完成，可以開始測試。","ok");return next;
     }
-
-    function escapeHtml(value) {
-      return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
+    async function api(path,options){options=options||{};const current=await signIn(false),headers=options.headers||{},request=Object.assign({},options);delete request.headers;request.headers=Object.assign({"Content-Type":"application/json",Authorization:"Bearer "+current.access_token},headers);const response=await fetch(path,request),text=await response.text();let data;try{data=text?JSON.parse(text):{}}catch(error){data={raw:text}}showRaw(data);if(response.status===401)saveSession(null);if(!response.ok)throw new Error(response.status+" "+((data.detail&&(data.detail.message||data.detail.code))||data.message||response.statusText));return data}
+    async function sendMessage(){
+      const message=$("message").value.trim();if(!message)return;$("send").disabled=true;bubble("user",message);$("message").value="";setStatus("小藍處理中...");
+      try{const data=await api("/api/chat",{method:"POST",body:JSON.stringify({user_id:session&&session.user_id,message:message,assistant_name:"小藍",current_location:$("currentLocation").value.trim()||null,contract_version:2,client_now:new Date().toISOString(),draft_id:activeDraft&&activeDraft.draft_id,draft_event:activeDraft&&activeDraft.needs_clarification?activeDraft.draft_event:null,pending_card:activeDraft&&!activeDraft.needs_clarification?activeDraft.draft_event:null,intent_hint:activeDraft?"CREATE_EVENT":null,recent_turns:recentTurns.slice(-6)})});bubble("ai",data.reply||"目前沒有可顯示的回覆。",data.intent||data.action_type||data.status);recentTurns.push({sender:"user",message:message},{sender:"assistant",message:data.reply||""});recentTurns=recentTurns.slice(-6);if(data.intent==="CREATE_EVENT"&&data.draft_event){activeDraft={draft_id:data.draft_id,draft_event:data.draft_event,needs_clarification:Boolean(data.needs_clarification),time_guessed:Boolean(data.time_guessed)};activeMutation=null}else if(data.intent==="UPDATE_EVENT"||data.intent==="DELETE_EVENT")activeMutation=data;renderAction(data);renderWeather(data);setStatus("完成："+(data.intent||data.action_type||data.status),"ok")}catch(error){bubble("ai","呼叫失敗："+error.message,"ERROR");setStatus("錯誤："+error.message,"error")}finally{$("send").disabled=false}
     }
-
-    function setStatus(text) { $("status").textContent = text; }
-    function showRaw(data) { $("raw").textContent = JSON.stringify(data, null, 2); }
-
-    function addBubble(kind, text, action = "") {
-      const el = document.createElement("div");
-      el.className = `bubble ${kind}`;
-      el.innerHTML = `${action ? `<span class="badge">${escapeHtml(action)}</span><br>` : ""}${escapeHtml(text)}`;
-      messages.appendChild(el);
-      messages.scrollTop = messages.scrollHeight;
+    function renderAction(data){
+      if(activeDraft){const d=activeDraft.draft_event||{},time=d.all_day?"全天":[d.start_time,d.end_time].filter(Boolean).join("–")||"未指定",place=[d.city,d.district,d.location].filter(Boolean).join(" ")||"未指定地點",controls=activeDraft.needs_clarification?'<div class="meta">請繼續回答缺少的資料。</div><div class="actions"><button class="danger compact" onclick="cancelPending()">取消草稿</button></div>':'<div class="actions"><button class="success compact" onclick="confirmCreate()">確認新增</button><button class="danger compact" onclick="cancelPending()">取消</button></div>';$("latestAction").innerHTML="<strong>"+esc(d.title||"待補行程")+'</strong><div class="meta">'+esc(d.date||"未指定日期")+" "+esc(time)+"<br>"+esc(place)+"</div>"+(activeDraft.time_guessed?'<div class="meta">時間為系統推定，可在確認前回覆「上午」或「下午」。</div>':"")+controls;return}
+      if(activeMutation){const d=activeMutation,id=d.event_id_to_delete||d.event_id,target=d.event_title||"尚未唯一確認";$("latestAction").innerHTML="<strong>"+esc(d.intent)+"："+esc(target)+'</strong><div class="meta">'+esc(d.reply||"")+"</div>"+(d.changes?'<div class="meta">變更：'+esc(JSON.stringify(d.changes))+"</div>":"")+(id?'<div class="actions"><button class="success compact" onclick="confirmMutation()">確認'+(d.intent==="DELETE_EVENT"?"刪除":"修改")+'</button><button class="danger compact" onclick="cancelPending()">取消</button></div>':"");return}
+      $("latestAction").innerHTML='<span class="meta">'+esc(data.reply||"目前沒有待確認內容。")+"</span>";
     }
-
-    async function api(path, options = {}) {
-      const res = await fetch(`${baseUrl()}${path}`, {
-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-        ...options,
-      });
-      const text = await res.text();
-      let data;
-      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-      showRaw(data);
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      return data;
-    }
-
-    async function sendMessage() {
-      const message = $("message").value.trim();
-      if (!message) return;
-
-      addBubble("user", message);
-      $("message").value = "";
-      setStatus("小藍處理中...");
-
-      try {
-        const data = await api("/api/chat", {
-          method: "POST",
-          body: JSON.stringify({
-            user_id: $("userId").value.trim(),
-            message,
-            current_location: $("currentLocation").value.trim(),
-          }),
-        });
-        addBubble("ai", data.reply || "(沒有 reply)", data.action_type || data.status);
-        renderAction(data);
-        await refreshEvents();
-        setStatus(`完成：${data.action_type || data.status}`);
-      } catch (err) {
-        addBubble("ai", `呼叫失敗：${err.message}`, "ERROR");
-        setStatus(`錯誤：${err.message}`);
-      }
-    }
-
-    function renderAction(data) {
-      const action = data.action_type || "NONE";
-      const event = data.event_created || data.event_updated || {};
-      $("latestAction").innerHTML = `
-        <strong>${escapeHtml(action)}</strong>
-        <div class="meta">${escapeHtml(data.reply || "")}</div>
-        ${event.title ? `<div class="meta">行程：${escapeHtml(event.title)}<br>${escapeHtml(event.start_time || "")}<br>${escapeHtml(event.city || "")}${escapeHtml(event.district || "")}</div>` : ""}
-      `;
-
-      if (data.weather_summary && Object.keys(data.weather_summary).length) {
-        const w = data.weather_summary;
-        $("weather").innerHTML = `
-          <strong>${escapeHtml(w.city || event.city || "天氣摘要")}${escapeHtml(w.district || event.district || "")}</strong>
-          <div class="meta">
-            天氣：${escapeHtml(w.wx || "未知")}<br>
-            降雨：${escapeHtml(w.pop ?? "-")}%<br>
-            溫度：${escapeHtml(w.temp ?? "-")}<br>
-            風險：${escapeHtml(w.risk_level || event.risk_level || "-")}
-          </div>
-        `;
-      }
-
-      if (data.guideline && Object.keys(data.guideline).length) {
-        $("guideGame").innerHTML = `
-          <strong>防災指引：${escapeHtml(data.guideline.disaster_type || "")}</strong>
-          <div class="meta">${escapeHtml(data.guideline.instruction || "")}</div>
-        `;
-      }
-
-      if (data.game && data.game.questions) {
-        $("guideGame").innerHTML = `
-          <strong>防災小遊戲：${escapeHtml(data.game.game_type || "")}</strong>
-          ${data.game.questions.map((q, index) => `
-            <div class="item">
-              <strong>${index + 1}. ${escapeHtml(q.question)}</strong>
-              <div class="meta">${(q.choices || []).map((c, i) => `${i + 1}. ${escapeHtml(c)}`).join("<br>")}</div>
-            </div>
-          `).join("")}
-        `;
-      }
-    }
-
-    async function refreshEvents() {
-      const userId = encodeURIComponent($("userId").value.trim());
-      try {
-        const data = await api(`/api/events?user_id=${userId}`);
-        const events = data.data || [];
-        $("events").innerHTML = events.length ? events.map(renderEvent).join("") : "目前沒有行程。";
-      } catch (err) {
-        $("events").textContent = `讀取行程失敗：${err.message}`;
-      }
-    }
-
-    function renderEvent(event) {
-      const risk = event.risk_level || "low";
-      return `
-        <div class="item">
-          <strong>${escapeHtml(event.title || "未命名行程")}</strong>
-          <div class="meta">
-            ${escapeHtml(event.start_time || "")}<br>
-            ${escapeHtml(event.city || "")}${escapeHtml(event.district || "")} ${escapeHtml(event.location || "")}<br>
-            <span class="risk-${escapeHtml(risk)}">risk: ${escapeHtml(risk)}</span>
-          </div>
-          <button class="danger" onclick="deleteEvent('${escapeHtml(event.id)}')">刪除</button>
-        </div>
-      `;
-    }
-
-    async function deleteEvent(id) {
-      if (!id) return;
-      setStatus("刪除行程中...");
-      try {
-        const userId = encodeURIComponent($("userId").value.trim());
-        await api(`/api/events/${encodeURIComponent(id)}?user_id=${userId}`, { method: "DELETE" });
-        addBubble("ai", `已刪除行程 ${id}`, "DELETE_EVENT");
-        renderAction({ action_type: "DELETE_EVENT", reply: `已刪除行程 ${id}` });
-        await refreshEvents();
-        setStatus("刪除完成");
-      } catch (err) {
-        setStatus(`刪除失敗：${err.message}`);
-      }
-    }
-
-    $("send").addEventListener("click", sendMessage);
-    $("message").addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        sendMessage();
-      }
-    });
-    document.querySelectorAll("[data-msg]").forEach((button) => {
-      button.addEventListener("click", () => {
-        $("message").value = button.dataset.msg;
-        $("message").focus();
-      });
-    });
-    window.deleteEvent = deleteEvent;
-
-    addBubble("ai", "我是小藍。你可以直接說要去哪、什麼時候、做什麼；我會幫你建立行程並整理天氣風險。", "READY");
-    refreshEvents();
+    function renderWeather(data){const w=data.weather_summary||{},daily=Array.isArray(w.daily)?w.daily:[];if(!Object.keys(w).length)return;if(daily.length){$("weather").innerHTML=daily.map(function(x){return"<div><strong>"+esc(x.date||"")+'</strong><span class="meta">'+esc(x.description||"")+(x.temp_min!=null?"，"+esc(x.temp_min)+"–"+esc(x.temp_max)+"°C":"")+(x.pop!=null?"，降雨機率 "+esc(x.pop)+"%":"")+"</span></div>"}).join("<br>");return}const c=w.current||w;$("weather").innerHTML="<strong>"+esc(w.city||"天氣資料")+esc(w.district||"")+'</strong><div class="meta">'+esc(c.description||c.wx||"")+(c.temp!=null?"<br>溫度："+esc(c.temp)+"°C":"")+(c.pop!=null?"<br>降雨機率："+esc(c.pop)+"%":"")+"</div>"}
+    function addDays(date,days){const value=new Date(date+"T12:00:00+08:00");value.setUTCDate(value.getUTCDate()+days);return taipeiDate(value)}
+    function parts(date){return Object.fromEntries(new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Taipei",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).formatToParts(date).map(function(x){return[x.type,x.value]}))}
+    function taipeiDate(date){const p=parts(date);return p.year+"-"+p.month+"-"+p.day}function taipeiClock(date){const p=parts(date);return p.hour+":"+p.minute}function taipeiIso(date){const p=parts(date);return p.year+"-"+p.month+"-"+p.day+"T"+p.hour+":"+p.minute+":"+p.second+"+08:00"}
+    function eventPayload(d,date,suffix){if(!d.title||!date)throw new Error("草稿缺少標題或日期");let start,end;if(d.all_day){start=date+"T00:00:00+08:00";end=(d.end_date||date)+"T23:59:00+08:00"}else{if(!d.start_time)throw new Error("草稿缺少開始時間");start=date+"T"+d.start_time+":00+08:00";if(d.end_time)end=(d.end_time<=d.start_time?addDays(date,1):date)+"T"+d.end_time+":00+08:00";else end=taipeiIso(new Date(new Date(start).getTime()+3600000))}return{title:d.title,start_time:start,end_time:end,city:d.city||null,district:d.district||null,location:d.location||null,external_source:"public_test_ui",external_event_id:activeDraft.draft_id+(suffix||"")}}
+    async function confirmCreate(){if(!activeDraft||activeDraft.needs_clarification)return;setStatus("正在寫入行事曆...");try{const d=activeDraft.draft_event,dates=Array.isArray(d.dates)&&d.dates.length?d.dates:[d.date];for(const date of dates){const result=await api("/api/events",{method:"POST",body:JSON.stringify(eventPayload(d,date,dates.length>1?":"+date:""))});if(result.status!=="success")throw new Error(result.message||"行程未寫入")}bubble("ai",dates.length>1?"已新增 "+dates.length+" 筆測試行程。":"已新增測試行程。","CONFIRMED");activeDraft=null;renderAction({reply:"行程已確認新增。"});await refreshEvents();setStatus("行程新增完成。","ok")}catch(error){setStatus("新增失敗："+error.message,"error")}}
+    function mutationPayload(data){const changes=Object.assign({},data.changes||{}),event=eventCache.find(function(x){return String(x.id)===String(data.event_id)});if(!event)return changes;if(changes.date||changes.start_time||changes.end_time){const oldStart=new Date(event.start_time),oldEnd=new Date(event.end_time),date=changes.date||taipeiDate(oldStart),clock=changes.start_time||taipeiClock(oldStart),nextStart=new Date(date+"T"+clock+":00+08:00");changes.start_time=taipeiIso(nextStart);if(changes.end_time){let nextEnd=new Date(date+"T"+changes.end_time+":00+08:00");if(nextEnd<=nextStart)nextEnd=new Date(nextEnd.getTime()+86400000);changes.end_time=taipeiIso(nextEnd)}else if(!Number.isNaN(oldEnd.getTime()))changes.end_time=taipeiIso(new Date(nextStart.getTime()+Math.max(oldEnd-oldStart,3600000)));delete changes.date}return changes}
+    async function confirmMutation(){if(!activeMutation)return;const deleting=activeMutation.intent==="DELETE_EVENT",id=activeMutation.event_id_to_delete||activeMutation.event_id;if(!id)return;try{const result=await api("/api/events/"+encodeURIComponent(id),deleting?{method:"DELETE"}:{method:"PATCH",body:JSON.stringify(mutationPayload(activeMutation))});if(result.status!=="success")throw new Error(result.message||"操作未完成");bubble("ai",deleting?"已刪除測試行程。":"已修改測試行程。","CONFIRMED");activeMutation=null;renderAction({reply:"操作已確認完成。"});await refreshEvents();setStatus("操作完成。","ok")}catch(error){setStatus("操作失敗："+error.message,"error")}}
+    function cancelPending(){activeDraft=null;activeMutation=null;renderAction({reply:"已取消待確認內容，沒有修改行事曆。"});setStatus("已取消待確認內容。","ok")}
+    async function refreshEvents(){if(!session||!session.access_token)return;try{const data=await api("/api/events?limit=100");eventCache=data.data||[];$("events").innerHTML=eventCache.length?eventCache.map(renderEvent).join(""):"目前沒有測試行程。"}catch(error){$("events").textContent="讀取失敗："+error.message}}
+    function renderEvent(e){return'<div class="item"><strong>'+esc(e.title||"未命名行程")+'</strong><div class="meta">'+esc(e.start_time||"")+"<br>"+esc(e.city||"")+esc(e.district||"")+" "+esc(e.location||"")+"<br>risk: "+esc(e.risk_level||"low")+'</div><div class="actions"><button class="danger compact" onclick="deleteEvent(\''+esc(e.id)+'\')">刪除</button></div></div>'}
+    async function deleteEvent(id){if(!id||!confirm("確定刪除這筆測試行程？"))return;try{const data=await api("/api/events/"+encodeURIComponent(id),{method:"DELETE"});if(data.status!=="success")throw new Error(data.message||"刪除失敗");await refreshEvents();setStatus("行程已刪除。","ok")}catch(error){setStatus("刪除失敗："+error.message,"error")}}
+    async function clearEvents(){if(!eventCache.length||!confirm("確定刪除目前 "+eventCache.length+" 筆測試行程？"))return;$("clearEvents").disabled=true;try{for(const event of eventCache.slice())await api("/api/events/"+encodeURIComponent(event.id),{method:"DELETE"});await refreshEvents();setStatus("測試行程已清空。","ok")}catch(error){setStatus("清空失敗："+error.message,"error")}finally{$("clearEvents").disabled=false}}
+    $("login").onclick=async function(){$("login").disabled=true;try{await signIn(true)}catch(error){setStatus("訪客登入失敗："+error.message,"error")}finally{$("login").disabled=false}};
+    $("send").onclick=sendMessage;$("clearEvents").onclick=clearEvents;$("message").onkeydown=function(e){if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}};
+    document.querySelectorAll("[data-msg]").forEach(function(button){button.onclick=function(){$("message").value=button.dataset.msg;$("message").focus()}});
+    Object.assign(window,{confirmCreate:confirmCreate,confirmMutation:confirmMutation,cancelPending:cancelPending,deleteEvent:deleteEvent});
+    renderAuth();bubble("ai","請先按「開始訪客測試」。登入後可直接用自然語言建立行程、查天氣或詢問防災資訊。","READY");if(session&&session.access_token)refreshEvents();
   </script>
 </body>
 </html>

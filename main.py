@@ -57,7 +57,7 @@ async def root():
 
 @app.get("/test-ui")
 async def test_ui():
-    return FileResponse("test_ui.html")
+    return FileResponse("test_ui.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
